@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+LABEL="com.znsoft.paddleocrvl.service"
+PLIST="/Library/LaunchDaemons/$LABEL.plist"
+
+if [ -f "$PLIST" ]; then
+  /bin/launchctl bootout system "$PLIST" >/dev/null 2>&1 || true
+fi
+
+exit 0

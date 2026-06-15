@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+LABEL="com.znsoft.paddleocrvl.service"
+PLIST="/Library/LaunchDaemons/$LABEL.plist"
+DATA_DIR="/Library/Application Support/PaddleOCRVL"
+SERVER="/usr/local/paddleocrvl/paddleocrvl-server"
+
+/bin/mkdir -p "$DATA_DIR/models"
+/usr/sbin/chown -R root:wheel /usr/local/paddleocrvl
+/usr/sbin/chown root:wheel "$DATA_DIR" "$DATA_DIR/models" "$PLIST"
+/bin/chmod 755 /usr/local/paddleocrvl "$SERVER" /usr/local/paddleocrvl/uninstall.sh
+/bin/chmod 755 "$DATA_DIR" "$DATA_DIR/models"
+/bin/chmod 644 "$PLIST"
+
+/bin/launchctl bootstrap system "$PLIST" >/dev/null 2>&1 || true
+/bin/launchctl enable "system/$LABEL" >/dev/null 2>&1 || true
+/bin/launchctl kickstart -k "system/$LABEL" >/dev/null 2>&1 || true
+
+exit 0

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.znsoft.paddleocrvl.service</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/paddleocrvl/paddleocrvl-server</string>
+    <string>-model-dir</string>
+    <string>/Library/Application Support/PaddleOCRVL/models</string>
+    <string>-admin-config</string>
+    <string>/Library/Application Support/PaddleOCRVL/paddleocrvl-admin.json</string>
+    <string>-addr</string>
+    <string>127.0.0.1:8080</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/PaddleOCRVL</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/paddleocrvl-service.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/paddleocrvl-service.err.log</string>
+</dict>
+</plist>

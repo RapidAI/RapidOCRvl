@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=PaddleOCR-VL Client
+Exec=paddleocrvl-client
+Icon=paddleocrvl-client
+Categories=Office;Utility;
+Terminal=false
