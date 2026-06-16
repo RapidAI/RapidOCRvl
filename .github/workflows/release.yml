@@ -1,0 +1,243 @@
+name: CI and Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example v1.0.0
+        required: true
+        default: v1.0.0
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.22.x"
+  NODE_VERSION: "20"
+  RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - windows-latest
+          - macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: cmd/paddleocrvl-client/frontend/package-lock.json
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            pkg-config
+
+      - name: Build frontend assets
+        working-directory: cmd/paddleocrvl-client/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run Go tests
+        run: go test ./...
+
+  release-windows:
+    name: Release Windows (${{ matrix.arch }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - amd64
+          - arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: cmd/paddleocrvl-client/frontend/package-lock.json
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+
+      - name: Build NSIS installer
+        shell: pwsh
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: .\packaging\windows\build-nsis.ps1 -Version $env:RELEASE_VERSION -Arch $env:ARCH
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-windows-${{ matrix.arch }}
+          path: dist/windows/*.exe
+          if-no-files-found: error
+
+  release-macos:
+    name: Release macOS
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: cmd/paddleocrvl-client/frontend/package-lock.json
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+
+      - name: Build PKG
+        env:
+          VERSION: ${{ env.RELEASE_VERSION }}
+        run: sh ./packaging/macos/build-pkg.sh
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-macos
+          path: dist/macos/*.pkg
+          if-no-files-found: error
+
+  release-linux:
+    name: Release Linux (${{ matrix.arch }})
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: cmd/paddleocrvl-client/frontend/package-lock.json
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            fuse \
+            libfuse2 \
+            libgtk-3-dev \
+            libwebkit2gtk-4.0-dev \
+            pkg-config
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+
+      - name: Build AppImage
+        env:
+          VERSION: ${{ env.RELEASE_VERSION }}
+          ARCH: ${{ matrix.arch }}
+        run: sh ./packaging/linux/build-appimage.sh
+
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-linux-${{ matrix.arch }}
+          path: dist/linux/*.AppImage
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs:
+      - release-windows
+      - release-macos
+      - release-linux
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: dist/release
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_VERSION }}
+          name: PaddleOCR-VL ${{ env.RELEASE_VERSION }}
+          files: dist/release/*
+          fail_on_unmatched_files: true
