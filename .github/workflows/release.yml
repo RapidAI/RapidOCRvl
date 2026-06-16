@@ -98,12 +98,15 @@ jobs:
         run: |
           choco install nsis -y --no-progress
           go install github.com/wailsapp/wails/v2/cmd/wails@v2.11.0
+          if (!(Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            throw "NSIS makensis.exe was not installed"
+          }
 
       - name: Build NSIS installer
         shell: pwsh
         env:
           ARCH: ${{ matrix.arch }}
-        run: .\packaging\windows\build-nsis.ps1 -Version $env:RELEASE_VERSION -Arch $env:ARCH
+        run: .\packaging\windows\build-nsis.ps1 -Version $env:RELEASE_VERSION -Arch $env:ARCH -Makensis "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
