@@ -78,6 +78,13 @@ Section "Install"
   SetShellVarContext all
   SetOutPath "$INSTDIR"
 
+  IfFileExists "$INSTDIR\${SERVER_EXE}" 0 old_service_done
+    DetailPrint "Stopping existing PaddleOCR-VL Windows service"
+    ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" service stop'
+    DetailPrint "Removing existing PaddleOCR-VL Windows service"
+    ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" service uninstall'
+  old_service_done:
+
   File "/oname=${CLIENT_EXE}" "${ARG_CLIENT_BINARY}"
   File "/oname=${SERVER_EXE}" "${ARG_SERVER_BINARY}"
 
@@ -88,12 +95,11 @@ Section "Install"
     ExecWait '$\"$pluginsdir\MicrosoftEdgeWebview2Setup.exe$\" /silent /install'
   !endif
 
-  CreateDirectory "$COMMONAPPDATA\PaddleOCRVL"
-  CreateDirectory "$COMMONAPPDATA\PaddleOCRVL\models"
+  CreateDirectory "$APPDATA\PaddleOCRVL"
+  CreateDirectory "$APPDATA\PaddleOCRVL\models"
 
   DetailPrint "Installing PaddleOCR-VL Windows service"
-  ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" service uninstall'
-  ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" service install -model-dir $\"$COMMONAPPDATA\PaddleOCRVL\models$\" -admin-config $\"$COMMONAPPDATA\PaddleOCRVL\paddleocrvl-admin.json$\" -addr 127.0.0.1:8080' $0
+  ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" service install -model-dir $\"$APPDATA\PaddleOCRVL\models$\" -admin-config $\"$APPDATA\PaddleOCRVL\paddleocrvl-admin.json$\" -addr 127.0.0.1:8080' $0
   ${If} $0 != 0
     DetailPrint "Service install failed with exit code $0"
     Abort "PaddleOCR-VL service install failed."
