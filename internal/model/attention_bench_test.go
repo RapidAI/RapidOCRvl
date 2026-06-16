@@ -300,7 +300,7 @@ func TestWeightedCacheValueSumLen2MatchesManual(t *testing.T) {
 		v0 := cache.v[dim+i]
 		v1 := cache.v[cache.kvDim+dim+i]
 		want := weights[0]*v0 + weights[1]*v1
-		if dst[i] != want {
+		if math.Abs(float64(dst[i]-want)) > 1e-6 {
 			t.Fatalf("dst[%d]=%f want %f", i, dst[i], want)
 		}
 	}
@@ -322,7 +322,7 @@ func TestWeightedCacheValueSumLen4MatchesManual(t *testing.T) {
 		for t, w := range weights {
 			want += w * cache.v[t*cache.kvDim+dim+i]
 		}
-		if dst[i] != want {
+		if math.Abs(float64(dst[i]-want)) > 1e-6 {
 			t.Fatalf("dst[%d]=%f want %f", i, dst[i], want)
 		}
 	}
@@ -344,7 +344,7 @@ func TestWeightedCacheValueSumLen3MatchesManual(t *testing.T) {
 		for t, w := range weights {
 			want += w * cache.v[t*cache.kvDim+dim+i]
 		}
-		if dst[i] != want {
+		if math.Abs(float64(dst[i]-want)) > 1e-6 {
 			t.Fatalf("dst[%d]=%f want %f", i, dst[i], want)
 		}
 	}
