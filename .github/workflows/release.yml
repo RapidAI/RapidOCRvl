@@ -1,16 +1,9 @@
-name: CI and Release
+name: Release
 
 on:
   push:
-    branches:
-      - main
-      - master
     tags:
       - "v*"
-  pull_request:
-    branches:
-      - main
-      - master
   workflow_dispatch:
     inputs:
       version:
@@ -75,7 +68,6 @@ jobs:
 
   release-windows:
     name: Release Windows (${{ matrix.arch }})
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: windows-latest
     strategy:
@@ -122,7 +114,6 @@ jobs:
 
   release-macos:
     name: Release macOS
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: macos-latest
     steps:
@@ -159,7 +150,6 @@ jobs:
 
   release-linux:
     name: Release Linux (${{ matrix.arch }})
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: test
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -218,7 +208,6 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs:
       - release-windows
       - release-macos
