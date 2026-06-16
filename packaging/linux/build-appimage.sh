@@ -7,6 +7,9 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 DIST="$REPO/dist/linux"
 APPDIR="$DIST/PaddleOCR-VL.AppDir"
+ICON_SRC="$REPO/cmd/paddleocrvl-client/build/appicon.png"
+ICON_PNG="$APPDIR/paddleocrvl-client.png"
+ICON_DST="$APPDIR/usr/share/icons/hicolor/512x512/apps/paddleocrvl-client.png"
 
 case "$ARCH" in
   x86_64|amd64)
@@ -33,7 +36,7 @@ APPIMAGETOOL="$DIST/appimagetool-$APPIMAGE_ARCH.AppImage"
 OUT="$DIST/PaddleOCR-VL-$VERSION-linux-$APPIMAGE_ARCH.AppImage"
 
 rm -rf "$APPDIR"
-mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/256x256/apps" "$DIST"
+mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" "$APPDIR/usr/share/icons/hicolor/512x512/apps" "$DIST"
 
 cd "$REPO"
 GOOS=linux GOARCH="$GOARCH" go build -trimpath -ldflags "-s -w" -o "$SERVER_TMP" ./cmd/paddleocrvl-server
@@ -50,8 +53,12 @@ chmod 755 "$SERVER_TMP" "$CLIENT_DST"
 cp "$SCRIPT_DIR/AppRun" "$APPDIR/AppRun"
 cp "$SCRIPT_DIR/paddleocrvl-client.desktop" "$APPDIR/paddleocrvl-client.desktop"
 cp "$SCRIPT_DIR/paddleocrvl-client.desktop" "$APPDIR/usr/share/applications/paddleocrvl-client.desktop"
-cp "$REPO/cmd/paddleocrvl-client/build/appicon.png" "$APPDIR/paddleocrvl-client.png"
-cp "$REPO/cmd/paddleocrvl-client/build/appicon.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/paddleocrvl-client.png"
+if ! command -v convert >/dev/null 2>&1; then
+  echo "ImageMagick convert is required to resize AppImage icon" >&2
+  exit 1
+fi
+convert "$ICON_SRC" -resize 512x512 "$ICON_PNG"
+cp "$ICON_PNG" "$ICON_DST"
 chmod 755 "$APPDIR/AppRun"
 
 if [ ! -x "$LINUXDEPLOY" ]; then

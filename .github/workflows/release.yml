@@ -188,6 +188,7 @@ jobs:
             curl \
             file \
             fuse \
+            imagemagick \
             libfuse2 \
             libgtk-3-dev \
             libwebkit2gtk-4.0-dev \
