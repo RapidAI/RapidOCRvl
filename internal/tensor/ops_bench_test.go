@@ -176,6 +176,21 @@ func BenchmarkMatVecBiasSerialCols16(b *testing.B) {
 	}
 }
 
+func BenchmarkMatVecBiasSerialCols256(b *testing.B) {
+	rows, cols := 512, 256
+	w := make([]float32, rows*cols)
+	x := make([]float32, cols)
+	bias := make([]float32, rows)
+	out := make([]float32, rows)
+	fillBench(w)
+	fillBench(x)
+	fillBench(bias)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVecBiasSerial(out, x, w, bias, rows, cols)
+	}
+}
+
 func BenchmarkMatRowsBiasSingleBatchMedium(b *testing.B) {
 	rows, cols := 512, 256
 	xs := makeRowsBench(1, cols)
@@ -937,6 +952,90 @@ func BenchmarkAddThenLayerNorm(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		AddInPlace(dst, add)
 		LayerNorm(out, dst, w, bias, 1e-6)
+	}
+}
+
+func BenchmarkLayerNormRowsSerial196x1024(b *testing.B) {
+	rows, cols := 196, 1024
+	x := makeRowsBench(rows, cols)
+	out := makeRowsBench(rows, cols)
+	w := make([]float32, cols)
+	bias := make([]float32, cols)
+	for i := range x {
+		fillBench(x[i])
+	}
+	for i := range w {
+		w[i] = 1 + float32(i%11)/32
+		bias[i] = float32(i%7-3) / 13
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for r := range x {
+			LayerNorm(out[r], x[r], w, bias, 1e-6)
+		}
+	}
+}
+
+func BenchmarkLayerNormRows196x1024(b *testing.B) {
+	rows, cols := 196, 1024
+	x := makeRowsBench(rows, cols)
+	out := makeRowsBench(rows, cols)
+	w := make([]float32, cols)
+	bias := make([]float32, cols)
+	for i := range x {
+		fillBench(x[i])
+	}
+	for i := range w {
+		w[i] = 1 + float32(i%11)/32
+		bias[i] = float32(i%7-3) / 13
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		LayerNormRows(out, x, w, bias, 1e-6)
+	}
+}
+
+func BenchmarkAddThenLayerNormRowsSerial196x1024(b *testing.B) {
+	rows, cols := 196, 1024
+	dst := makeRowsBench(rows, cols)
+	add := makeRowsBench(rows, cols)
+	out := makeRowsBench(rows, cols)
+	w := make([]float32, cols)
+	bias := make([]float32, cols)
+	for i := range dst {
+		fillBench(dst[i])
+		fillBench(add[i])
+	}
+	for i := range w {
+		w[i] = 1 + float32(i%11)/32
+		bias[i] = float32(i%7-3) / 13
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for r := range dst {
+			AddThenLayerNorm(out[r], dst[r], add[r], w, bias, 1e-6)
+		}
+	}
+}
+
+func BenchmarkAddThenLayerNormRows196x1024(b *testing.B) {
+	rows, cols := 196, 1024
+	dst := makeRowsBench(rows, cols)
+	add := makeRowsBench(rows, cols)
+	out := makeRowsBench(rows, cols)
+	w := make([]float32, cols)
+	bias := make([]float32, cols)
+	for i := range dst {
+		fillBench(dst[i])
+		fillBench(add[i])
+	}
+	for i := range w {
+		w[i] = 1 + float32(i%11)/32
+		bias[i] = float32(i%7-3) / 13
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		AddThenLayerNormRows(out, dst, add, w, bias, 1e-6)
 	}
 }
 

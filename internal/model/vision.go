@@ -414,27 +414,19 @@ func (rt *Runtime) visionLayer(x [][]float32, lw visionLayerWeights, next *visio
 	norm := scratch.norm
 	eps := float32(rt.cfg.VisionConfig.LayerNormEps)
 	if !normReady {
-		for i := range x {
-			tensor.LayerNorm(norm[i], x[i], lw.ln1w, lw.ln1b, eps)
-		}
+		tensor.LayerNormRows(norm, x, lw.ln1w, lw.ln1b, eps)
 	}
 	att := rt.visionAttention(norm, lw, grid, rope, scratch)
-	for i := range x {
-		tensor.AddThenLayerNorm(norm[i], x[i], att[i], lw.ln2w, lw.ln2b, eps)
-	}
+	tensor.AddThenLayerNormRows(norm, x, att, lw.ln2w, lw.ln2b, eps)
 	mlp := scratch.mlp
 	hids := scratch.hids
 	tensor.MatRowsBias(hids, norm, lw.fc1w, lw.fc1b, rt.cfg.VisionConfig.IntermediateSize, d)
 	tensor.GELUTanhRowsInPlace(hids)
 	tensor.MatRowsBias(mlp, hids, lw.fc2w, lw.fc2b, d, rt.cfg.VisionConfig.IntermediateSize)
 	if next != nil {
-		for i := range x {
-			tensor.AddThenLayerNorm(norm[i], x[i], mlp[i], next.ln1w, next.ln1b, eps)
-		}
+		tensor.AddThenLayerNormRows(norm, x, mlp, next.ln1w, next.ln1b, eps)
 	} else {
-		for i := range x {
-			tensor.AddThenLayerNorm(x[i], x[i], mlp[i], rt.vision.postNormW, rt.vision.postNormB, eps)
-		}
+		tensor.AddThenLayerNormRows(x, x, mlp, rt.vision.postNormW, rt.vision.postNormB, eps)
 	}
 	return x
 }

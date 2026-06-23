@@ -800,6 +800,39 @@ func TestReadyRejectsUninitializedServer(t *testing.T) {
 	}
 }
 
+func TestReadyURLNormalizesAddr(t *testing.T) {
+	tests := map[string]string{
+		"127.0.0.1:8080":              "http://127.0.0.1:8080/ready",
+		"http://127.0.0.1:8080":       "http://127.0.0.1:8080/ready",
+		"http://127.0.0.1:8080/ready": "http://127.0.0.1:8080/ready",
+	}
+	for in, want := range tests {
+		if got := readyURL(in); got != want {
+			t.Fatalf("readyURL(%q)=%q want %q", in, got, want)
+		}
+	}
+}
+
+func TestWaitForReadyPollsUntilOK(t *testing.T) {
+	calls := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, http.StatusOK, readyResponse{Status: "ready"})
+	}))
+	defer ts.Close()
+
+	if err := waitForReady(ts.URL, time.Second, 10*time.Millisecond); err != nil {
+		t.Fatalf("waitForReady: %v", err)
+	}
+	if calls < 2 {
+		t.Fatalf("calls=%d want at least 2", calls)
+	}
+}
+
 func TestRunRejectsMaxNewLimit(t *testing.T) {
 	s := &server{runSlots: make(chan struct{}, 1), maxNewLimit: 4}
 	_, err := s.run(context.Background(), generateRequest{Tokens: []int{1}, MaxNewTokens: 5})

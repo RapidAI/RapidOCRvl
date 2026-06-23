@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $dist = Join-Path $repo "dist\windows"
 $server = Join-Path $dist "paddleocrvl-server.exe"
+$download = Join-Path $dist "paddleocrvl-download.exe"
 $client = Join-Path $repo "cmd\paddleocrvl-client\build\bin\paddleocrvl-client.exe"
 $installerArch = if ($Arch -eq "amd64") { "x64" } else { "arm64" }
 $installer = Join-Path $dist "PaddleOCR-VL-$Version-windows-$installerArch-setup.exe"
@@ -44,6 +45,7 @@ try {
   $env:GOOS = "windows"
   $env:GOARCH = $Arch
   go build -trimpath -ldflags "-s -w" -o $server .\cmd\paddleocrvl-server
+  go build -trimpath -ldflags "-s -w" -o $download .\cmd\paddleocrvl-download
 
   Push-Location (Join-Path $repo "cmd\paddleocrvl-client")
   try {
@@ -59,6 +61,7 @@ try {
   $args = @(
     "-DARG_CLIENT_BINARY=$client",
     "-DARG_SERVER_BINARY=$server",
+    "-DARG_DOWNLOAD_BINARY=$download",
     "-DINFO_PRODUCTVERSION=$Version",
     "-DINFO_FILEVERSION=$fileVersion",
     "-DINFO_ARCH=$installerArch",

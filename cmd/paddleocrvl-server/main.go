@@ -252,10 +252,68 @@ func main() {
 }
 
 func runMain(args []string) error {
+	if handled, err := handleWaitReadyCommand(args); handled {
+		return err
+	}
 	if handled, err := handleServiceCommand(args); handled {
 		return err
 	}
 	return runServer(args, nil)
+}
+
+func handleWaitReadyCommand(args []string) (bool, error) {
+	if len(args) == 0 || args[0] != "wait-ready" {
+		return false, nil
+	}
+	fs := flag.NewFlagSet("paddleocrvl-server wait-ready", flag.ContinueOnError)
+	addr := fs.String("addr", "127.0.0.1:8080", "HTTP listen address or ready URL")
+	timeout := fs.Duration("timeout", 30*time.Minute, "maximum time to wait for /ready")
+	interval := fs.Duration("interval", time.Second, "poll interval")
+	if err := fs.Parse(args[1:]); err != nil {
+		return true, err
+	}
+	return true, waitForReady(readyURL(*addr), *timeout, *interval)
+}
+
+func readyURL(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+		if strings.HasSuffix(addr, "/ready") {
+			return addr
+		}
+		return strings.TrimRight(addr, "/") + "/ready"
+	}
+	return "http://" + strings.TrimRight(addr, "/") + "/ready"
+}
+
+func waitForReady(url string, timeout, interval time.Duration) error {
+	if timeout < 0 {
+		return fmt.Errorf("-timeout must be >= 0")
+	}
+	if interval <= 0 {
+		return fmt.Errorf("-interval must be > 0")
+	}
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{Timeout: 5 * time.Second}
+	var lastErr error
+	for {
+		resp, err := client.Get(url)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("ready: %s", url)
+				return nil
+			}
+			lastErr = fmt.Errorf("%s returned HTTP %d", url, resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		if timeout == 0 || time.Now().Add(interval).After(deadline) {
+			return fmt.Errorf("timed out waiting for %s: %w", url, lastErr)
+		}
+		time.Sleep(interval)
+	}
 }
 
 func runServer(args []string, stop <-chan struct{}) error {
@@ -298,12 +356,12 @@ func runServer(args []string, stop <-chan struct{}) error {
 	}
 	rt, err := model.LoadWithOptions(*modelDir, model.LoadOptions{Quantization: *quant, Backend: backendSel.Active, Progress: model.ProgressLogger("loader")})
 	if err != nil {
-		return err
+		return fmt.Errorf("load model from %q: %w (set -model-dir to the PaddleOCR-VL model directory containing config.json and model weights)", *modelDir, err)
 	}
 	defer rt.Close()
 	tok, err := tokenizer.Load(*modelDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("load tokenizer from %q: %w", *modelDir, err)
 	}
 	if *preloadVision {
 		log.Printf("preloading vision weights")

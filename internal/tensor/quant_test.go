@@ -581,6 +581,46 @@ func TestAddThenLayerNormMatchesAddLayerNorm(t *testing.T) {
 	assertCloseVec(t, "norm", outB, outA, 1e-5)
 }
 
+func TestLayerNormRowsMatchesPerRow(t *testing.T) {
+	rows, cols := 5, 16
+	x := makeRowsForTest(rows, cols)
+	add := makeRowsForTest(rows, cols)
+	for i := range x {
+		fillTestValues(x[i])
+		fillTestValues(add[i])
+	}
+	weight := make([]float32, cols)
+	bias := make([]float32, cols)
+	for i := range weight {
+		weight[i] = 1 + float32(i%5)/16
+		bias[i] = float32(i%7-3) / 17
+	}
+
+	want := makeRowsForTest(rows, cols)
+	got := makeRowsForTest(rows, cols)
+	for i := range x {
+		LayerNorm(want[i], x[i], weight, bias, 1e-6)
+	}
+	LayerNormRows(got, x, weight, bias, 1e-6)
+	for i := range x {
+		assertCloseVec(t, "layernorm rows", got[i], want[i], 0)
+	}
+
+	x2 := makeRowsForTest(rows, cols)
+	x3 := makeRowsForTest(rows, cols)
+	for i := range x {
+		copy(x2[i], x[i])
+		copy(x3[i], x[i])
+	}
+	for i := range x {
+		AddThenLayerNorm(want[i], x2[i], add[i], weight, bias, 1e-6)
+	}
+	AddThenLayerNormRows(got, x3, add, weight, bias, 1e-6)
+	for i := range x {
+		assertCloseVec(t, "addthenlayernorm rows", got[i], want[i], 1e-5)
+	}
+}
+
 func TestSiLUMulInPlace(t *testing.T) {
 	gate := []float32{-3, -1, 0, 0.5, 1, 2, 3, 4, 5}
 	up := []float32{2, -1, 3, 4, -2, 0.5, 1, -0.25, 0.75}
@@ -1238,6 +1278,51 @@ func TestMatVecBiasMatchesSeparateLarge(t *testing.T) {
 	got := make([]float32, rows)
 	MatVecBias(got, x, w, bias, rows, cols)
 	assertCloseVec(t, "matvecbias", got, want, 1e-5)
+}
+
+func TestMatVecCols256SpecializationMatchesReference(t *testing.T) {
+	rows, cols := 7, 256
+	x := make([]float32, cols)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillTestValues(x)
+	fillTestValues(w)
+	for i := range bias {
+		bias[i] = float32(i%5-2) / 7
+	}
+
+	want := make([]float32, rows)
+	for r := 0; r < rows; r++ {
+		want[r] = referenceDot(w[r*cols:(r+1)*cols], x)
+	}
+	got := make([]float32, rows)
+	MatVec(got, x, w, rows, cols)
+	assertCloseVec(t, "matvec256", got, want, 1e-4)
+
+	for r := range want {
+		want[r] += bias[r]
+	}
+	MatVecBias(got, x, w, bias, rows, cols)
+	assertCloseVec(t, "matvecbias256", got, want, 1e-4)
+
+	xs := [][]float32{x, append([]float32(nil), x...)}
+	xs[1][0] += 0.25
+	out := makeRowsForTest(len(xs), rows)
+	MatRowsBias(out, xs, w, bias, rows, cols)
+	for i := range xs {
+		for r := 0; r < rows; r++ {
+			want[r] = referenceDot(w[r*cols:(r+1)*cols], xs[i]) + bias[r]
+		}
+		assertCloseVec(t, "matrowsbias256", out[i], want, 1e-4)
+	}
+}
+
+func referenceDot(a, b []float32) float32 {
+	var sum float32
+	for i := range a {
+		sum += a[i] * b[i]
+	}
+	return sum
 }
 
 func fillTestValues(x []float32) {

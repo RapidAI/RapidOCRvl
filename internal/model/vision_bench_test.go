@@ -167,6 +167,37 @@ func BenchmarkVisionLayerChain(b *testing.B) {
 	}
 }
 
+func BenchmarkVisionLayerChainReuse(b *testing.B) {
+	rt := newVisionLayerTestRuntime()
+	grid := vision.Grid{T: 1, H: 8, W: 8}
+	rope := newVisionRoPETables(grid, rt.cfg.VisionConfig.HiddenSize/rt.cfg.VisionConfig.NumAttentionHeads)
+	src := makeRowsForModelTest(grid.H*grid.W, rt.cfg.VisionConfig.HiddenSize)
+	x := makeRowsForModelTest(grid.H*grid.W, rt.cfg.VisionConfig.HiddenSize)
+	for i := range src {
+		fillBenchFloat32(src[i])
+	}
+	scratch := rt.newVisionScratch(len(x))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		copyRowsForVisionBench(x, src)
+		normReady := false
+		for j := range rt.vision.layers {
+			var next *visionLayerWeights
+			if j+1 < len(rt.vision.layers) {
+				next = &rt.vision.layers[j+1]
+			}
+			x = rt.visionLayer(x, rt.vision.layers[j], next, normReady, grid, rope, scratch)
+			normReady = next != nil
+		}
+	}
+}
+
+func copyRowsForVisionBench(dst, src [][]float32) {
+	for i := range src {
+		copy(dst[i], src[i])
+	}
+}
+
 func BenchmarkNewVisionRoPETables(b *testing.B) {
 	grid := vision.Grid{T: 1, H: 14, W: 14}
 	for i := 0; i < b.N; i++ {

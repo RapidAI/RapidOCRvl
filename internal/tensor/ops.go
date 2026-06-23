@@ -13,6 +13,19 @@ func MatVec(out, x, w []float32, rows, cols int) {
 		matVecSerial16(out, x, w, rows)
 		return
 	}
+	if cols == 256 {
+		if shouldParallelMatVec(rows*cols, rows) {
+			parallelForMatVec(rows, func(start, end int) {
+				for r := start; r < end; r++ {
+					base := r * 256
+					out[r] = dotF32_256(w[base:base+256], x)
+				}
+			})
+			return
+		}
+		matVecSerial256(out, x, w, rows)
+		return
+	}
 	if shouldParallelMatVec(rows*cols, rows) {
 		parallelForMatVec(rows, func(start, end int) {
 			for r := start; r < end; r++ {
@@ -95,6 +108,19 @@ func MatVecBias(out, x, w, bias []float32, rows, cols int) {
 		matVecBiasSerial16(out, x, w, bias, rows)
 		return
 	}
+	if cols == 256 {
+		if shouldParallelMatVec(rows*cols, rows) {
+			parallelForMatVec(rows, func(start, end int) {
+				for r := start; r < end; r++ {
+					base := r * 256
+					out[r] = dotF32_256(w[base:base+256], x) + bias[r]
+				}
+			})
+			return
+		}
+		matVecBiasSerial256(out, x, w, bias, rows)
+		return
+	}
 	if shouldParallelMatVec(rows*cols, rows) {
 		parallelForMatVec(rows, func(start, end int) {
 			for r := start; r < end; r++ {
@@ -111,6 +137,10 @@ func MatVecBiasSerial(out, x, w, bias []float32, rows, cols int) {
 		matVecBiasSerial16(out, x, w, bias, rows)
 		return
 	}
+	if cols == 256 {
+		matVecBiasSerial256(out, x, w, bias, rows)
+		return
+	}
 	if cols == 588 {
 		matVecBiasSerial588(out, x, w, bias, rows)
 		return
@@ -124,6 +154,12 @@ func MatRowsBias(out [][]float32, xs [][]float32, w, bias []float32, rows, cols 
 		if cols == 16 {
 			for i := range xs {
 				matVecBiasSerial16(out[i], xs[i], w, bias, rows)
+			}
+			return
+		}
+		if cols == 256 && len(xs) > 1 {
+			for i := range xs {
+				matVecBiasSerial256(out[i], xs[i], w, bias, rows)
 			}
 			return
 		}
@@ -150,6 +186,14 @@ func MatRowsBias(out [][]float32, xs [][]float32, w, bias []float32, rows, cols 
 		parallelForMax(len(xs), workers, func(start, end int) {
 			for i := start; i < end; i++ {
 				matVecBiasSerial16(out[i], xs[i], w, bias, rows)
+			}
+		})
+		return
+	}
+	if cols == 256 {
+		parallelForMax(len(xs), workers, func(start, end int) {
+			for i := start; i < end; i++ {
+				matVecBiasSerial256(out[i], xs[i], w, bias, rows)
 			}
 		})
 		return
@@ -315,6 +359,13 @@ func matVecSerial16(out, x, w []float32, rows int) {
 	}
 }
 
+func matVecSerial256(out, x, w []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 256
+		out[r] = dotF32_256(w[base:base+256], x)
+	}
+}
+
 func matVecBiasParallel(out, x, w, bias []float32, rows, cols int) {
 	parallelFor(rows, func(start, end int) {
 		for r := start; r < end; r++ {
@@ -333,6 +384,13 @@ func matVecBiasSerial16(out, x, w, bias []float32, rows int) {
 	for r := 0; r < rows; r++ {
 		base := r * 16
 		out[r] = dotF32_16(w[base:base+16], x) + bias[r]
+	}
+}
+
+func matVecBiasSerial256(out, x, w, bias []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 256
+		out[r] = dotF32_256(w[base:base+256], x) + bias[r]
 	}
 }
 
@@ -426,6 +484,21 @@ func dotF32_16(a, b []float32) float32 {
 	s5 := a[5]*b[5] + a[13]*b[13]
 	s6 := a[6]*b[6] + a[14]*b[14]
 	s7 := a[7]*b[7] + a[15]*b[15]
+	return (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+}
+
+func dotF32_256(a, b []float32) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	for i := 0; i < 256; i += 16 {
+		s0 += a[i]*b[i] + a[i+8]*b[i+8]
+		s1 += a[i+1]*b[i+1] + a[i+9]*b[i+9]
+		s2 += a[i+2]*b[i+2] + a[i+10]*b[i+10]
+		s3 += a[i+3]*b[i+3] + a[i+11]*b[i+11]
+		s4 += a[i+4]*b[i+4] + a[i+12]*b[i+12]
+		s5 += a[i+5]*b[i+5] + a[i+13]*b[i+13]
+		s6 += a[i+6]*b[i+6] + a[i+14]*b[i+14]
+		s7 += a[i+7]*b[i+7] + a[i+15]*b[i+15]
+	}
 	return (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 }
 
@@ -698,6 +771,48 @@ func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 
 func AddThenLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 	AddLayerNorm(out, dst, add, weight, bias, eps)
+}
+
+func LayerNormRows(out, x [][]float32, weight, bias []float32, eps float32) {
+	if len(x) == 0 {
+		return
+	}
+	if shouldParallelNormRows(len(x)*len(x[0]), len(x)) {
+		parallelForNormRows(len(x), func(start, end int) {
+			for i := start; i < end; i++ {
+				LayerNorm(out[i], x[i], weight, bias, eps)
+			}
+		})
+		return
+	}
+	for i := range x {
+		LayerNorm(out[i], x[i], weight, bias, eps)
+	}
+}
+
+func AddThenLayerNormRows(out, dst, add [][]float32, weight, bias []float32, eps float32) {
+	if len(dst) == 0 {
+		return
+	}
+	if shouldParallelNormRows(len(dst)*len(dst[0]), len(dst)) {
+		parallelForNormRows(len(dst), func(start, end int) {
+			for i := start; i < end; i++ {
+				AddThenLayerNorm(out[i], dst[i], add[i], weight, bias, eps)
+			}
+		})
+		return
+	}
+	for i := range dst {
+		AddThenLayerNorm(out[i], dst[i], add[i], weight, bias, eps)
+	}
+}
+
+func shouldParallelNormRows(work, rows int) bool {
+	return work >= 1<<16 && rows >= 16 && runtime.GOMAXPROCS(0) > 1
+}
+
+func parallelForNormRows(rows int, fn func(start, end int)) {
+	parallelForMax(rows, min(runtime.GOMAXPROCS(0), 8), fn)
 }
 
 func RMSNorm(out, x, weight []float32, eps float32) {

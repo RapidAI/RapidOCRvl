@@ -10,6 +10,9 @@ Unicode true
 !ifndef ARG_SERVER_BINARY
   !error "ARG_SERVER_BINARY is required"
 !endif
+!ifndef ARG_DOWNLOAD_BINARY
+  !error "ARG_DOWNLOAD_BINARY is required"
+!endif
 
 !ifndef INFO_PRODUCTVERSION
   !define INFO_PRODUCTVERSION "1.0.0"
@@ -38,6 +41,7 @@ Unicode true
 
 !define CLIENT_EXE "paddleocrvl-client.exe"
 !define SERVER_EXE "paddleocrvl-server.exe"
+!define DOWNLOAD_EXE "paddleocrvl-download.exe"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINST_KEY_NAME}"
 
 Name "${INFO_PRODUCTNAME}"
@@ -87,6 +91,7 @@ Section "Install"
 
   File "/oname=${CLIENT_EXE}" "${ARG_CLIENT_BINARY}"
   File "/oname=${SERVER_EXE}" "${ARG_SERVER_BINARY}"
+  File "/oname=${DOWNLOAD_EXE}" "${ARG_DOWNLOAD_BINARY}"
 
   !ifdef ARG_WEBVIEW2_BOOTSTRAPPER
     InitPluginsDir
@@ -97,6 +102,13 @@ Section "Install"
 
   CreateDirectory "$APPDATA\PaddleOCRVL"
   CreateDirectory "$APPDATA\PaddleOCRVL\models"
+
+  DetailPrint "Ensuring PaddleOCR-VL model files are present"
+  ExecWait '$\"$INSTDIR\${DOWNLOAD_EXE}$\" -out $\"$APPDATA\PaddleOCRVL\models$\"' $0
+  ${If} $0 != 0
+    DetailPrint "Model download failed with exit code $0"
+    Abort "PaddleOCR-VL model download failed. Check network access and try again."
+  ${EndIf}
 
   DetailPrint "Installing PaddleOCR-VL Windows service"
   ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" service install -model-dir $\"$APPDATA\PaddleOCRVL\models$\" -admin-config $\"$APPDATA\PaddleOCRVL\paddleocrvl-admin.json$\" -addr 127.0.0.1:8080' $0
@@ -109,6 +121,12 @@ Section "Install"
     ${If} $0 != 0
       DetailPrint "Service start failed with exit code $0"
       Abort "PaddleOCR-VL service start failed."
+    ${EndIf}
+    DetailPrint "Waiting for PaddleOCR-VL service readiness"
+    ExecWait '$\"$INSTDIR\${SERVER_EXE}$\" wait-ready -addr 127.0.0.1:8080 -timeout 30m' $0
+    ${If} $0 != 0
+      DetailPrint "Service readiness check failed with exit code $0"
+      Abort "PaddleOCR-VL service did not become ready."
     ${EndIf}
   ${EndIf}
 
@@ -141,6 +159,7 @@ Section "Uninstall"
   Delete "$DESKTOP\${INFO_PRODUCTNAME} Client.lnk"
   Delete "$INSTDIR\${CLIENT_EXE}"
   Delete "$INSTDIR\${SERVER_EXE}"
+  Delete "$INSTDIR\${DOWNLOAD_EXE}"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
