@@ -26,6 +26,14 @@ const (
 	metaString = uint32(8)
 )
 
+const (
+	maxHeaderBytes     = 256 << 20
+	maxStringBytes     = 16 << 20
+	maxTensorCount     = 1 << 20
+	maxMetadataKVCount = 1 << 20
+	maxShapeDims       = 8
+)
+
 type TensorMeta struct {
 	Shape  []int64
 	Type   uint32
@@ -61,6 +69,9 @@ func (r *headerReader) readString() (string, error) {
 	}
 	if n == 0 {
 		return "", nil
+	}
+	if n > maxStringBytes {
+		return "", fmt.Errorf("GGUF string too large: %d bytes", n)
 	}
 	const maxInt = int(^uint(0) >> 1)
 	if n > uint64(maxInt-len(r.pool)) {
@@ -102,7 +113,13 @@ func Open(path string) (*File, error) {
 	if err != nil {
 		return nil, err
 	}
-	cr := &headerReader{r: bufio.NewReaderSize(f, 64<<10), pool: make([]byte, 0, 8<<10)}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	fileSize := st.Size()
+	cr := &headerReader{r: bufio.NewReaderSize(f, 64<<10), pool: make([]byte, 0, 16<<10)}
 	var magic [4]byte
 	if _, err := io.ReadFull(cr, magic[:]); err != nil {
 		f.Close()
@@ -126,32 +143,68 @@ func Open(path string) (*File, error) {
 		f.Close()
 		return nil, err
 	}
+	if tensorCount > maxTensorCount {
+		f.Close()
+		return nil, fmt.Errorf("GGUF tensor count too large: %d", tensorCount)
+	}
 	kvCount, err := cr.readU64()
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
-	metadata := make(map[string]any, kvCount)
+	if kvCount > maxMetadataKVCount {
+		f.Close()
+		return nil, fmt.Errorf("GGUF metadata count too large: %d", kvCount)
+	}
+	metadata := make(map[string]any, int(kvCount))
 	for i := uint64(0); i < kvCount; i++ {
+		if cr.n > maxHeaderBytes {
+			f.Close()
+			return nil, fmt.Errorf("GGUF header too large")
+		}
 		key, val, err := readHeaderKV(cr)
 		if err != nil {
 			f.Close()
 			return nil, err
 		}
+		if err := validateMetadataKey(key); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if _, exists := metadata[key]; exists {
+			f.Close()
+			return nil, fmt.Errorf("GGUF metadata key %s is duplicated", key)
+		}
 		metadata[key] = val
 	}
-	tensors := make(map[string]TensorMeta, tensorCount)
-	shapeBuf := make([]int64, 0, tensorCount*2)
+	tensors := make(map[string]TensorMeta, int(tensorCount))
+	shapeBuf := make([]int64, 0, int(tensorCount)*2)
 	for i := uint64(0); i < tensorCount; i++ {
+		if cr.n > maxHeaderBytes {
+			f.Close()
+			return nil, fmt.Errorf("GGUF header too large")
+		}
 		name, err := cr.readString()
 		if err != nil {
 			f.Close()
 			return nil, err
 		}
+		if err := validateTensorName(name); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if _, exists := tensors[name]; exists {
+			f.Close()
+			return nil, fmt.Errorf("GGUF tensor %s is duplicated", name)
+		}
 		nd, err := cr.readU32()
 		if err != nil {
 			f.Close()
 			return nil, err
+		}
+		if nd > maxShapeDims {
+			f.Close()
+			return nil, fmt.Errorf("GGUF tensor %s has too many dimensions: %d", name, nd)
 		}
 		start := len(shapeBuf)
 		end := start + int(nd)
@@ -184,7 +237,62 @@ func Open(path string) (*File, error) {
 		tensors[name] = TensorMeta{Shape: shape, Type: typ, Offset: off}
 	}
 	dataStart := align(cr.n, uint64(Alignment))
+	if dataStart > uint64(fileSize) {
+		f.Close()
+		return nil, fmt.Errorf("GGUF header exceeds file size")
+	}
+	for name, meta := range tensors {
+		if err := validateTensorMeta(name, meta, int64(dataStart), fileSize); err != nil {
+			f.Close()
+			return nil, err
+		}
+	}
 	return &File{f: f, dataStart: int64(dataStart), Tensors: tensors, Metadata: metadata}, nil
+}
+
+func validateMetadataKey(key string) error {
+	if key == "" {
+		return fmt.Errorf("GGUF metadata has empty key")
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x20 || key[i] == 0x7f {
+			return fmt.Errorf("GGUF metadata key contains control character")
+		}
+	}
+	return nil
+}
+
+func validateTensorName(name string) error {
+	if name == "" {
+		return fmt.Errorf("GGUF tensor has empty name")
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < 0x20 || name[i] == 0x7f {
+			return fmt.Errorf("GGUF tensor name contains control character")
+		}
+	}
+	return nil
+}
+
+func validateTensorMeta(name string, meta TensorMeta, dataStart, fileSize int64) error {
+	if _, err := checkedElemCount(meta.Shape); err != nil {
+		return fmt.Errorf("GGUF tensor %s has invalid shape: %w", name, err)
+	}
+	size := TensorBytes(meta)
+	if size <= 0 {
+		return fmt.Errorf("GGUF tensor %s has invalid type or shape", name)
+	}
+	if meta.Offset > uint64(math.MaxInt64) {
+		return fmt.Errorf("GGUF tensor %s offset too large", name)
+	}
+	start := dataStart + int64(meta.Offset)
+	if start < dataStart || start > fileSize {
+		return fmt.Errorf("GGUF tensor %s offset exceeds file size", name)
+	}
+	if size > fileSize-start {
+		return fmt.Errorf("GGUF tensor %s exceeds file size", name)
+	}
+	return nil
 }
 
 func (gf *File) Close() error {
@@ -238,13 +346,9 @@ func (gf *File) Float32RowsBuffer(name string, buf []float32, fn func(row int, v
 	rowsPerBlock := float32RowsPerBlock(rows, cols*4)
 	need := rowsPerBlock * cols
 	usePool := buf == nil
+	var poolHandle *[]float32
 	if buf == nil {
-		if v := float32RowsBufferPool.Get(); v != nil {
-			p := v.(*[]float32)
-			if cap(*p) >= need {
-				buf = (*p)[:need]
-			}
-		}
+		buf, poolHandle = getFloat32RowsBuffer(need)
 	}
 	if len(buf) < need {
 		buf = make([]float32, need)
@@ -252,7 +356,7 @@ func (gf *File) Float32RowsBuffer(name string, buf []float32, fn func(row int, v
 		buf = buf[:need]
 	}
 	if usePool {
-		defer putFloat32RowsBuffer(buf)
+		defer putFloat32RowsBuffer(poolHandle, buf)
 	}
 	base := gf.dataStart + int64(meta.Offset)
 	for r := 0; r < rows; {
@@ -274,13 +378,28 @@ func (gf *File) Float32RowsBuffer(name string, buf []float32, fn func(row int, v
 	return meta.Shape, nil
 }
 
-func putFloat32RowsBuffer(buf []float32) {
+func getFloat32RowsBuffer(n int) ([]float32, *[]float32) {
+	if n <= 0 {
+		return nil, nil
+	}
+	if v := float32RowsBufferPool.Get(); v != nil {
+		p := v.(*[]float32)
+		if cap(*p) >= n {
+			return (*p)[:n], p
+		}
+	}
+	p := new([]float32)
+	*p = make([]float32, n)
+	return *p, p
+}
+
+func putFloat32RowsBuffer(p *[]float32, buf []float32) {
 	const maxPooledFloat32RowsBuffer = 1 << 20
-	if cap(buf) == 0 || cap(buf) > maxPooledFloat32RowsBuffer {
+	if p == nil || cap(buf) == 0 || cap(buf) > maxPooledFloat32RowsBuffer {
 		return
 	}
-	buf = buf[:0]
-	float32RowsBufferPool.Put(&buf)
+	*p = buf[:0]
+	float32RowsBufferPool.Put(p)
 }
 
 func float32RowsPerBlock(rows, rowBytes int) int {
@@ -467,24 +586,44 @@ func TensorTypeName(typ uint32) string {
 func TensorBytes(meta TensorMeta) int64 {
 	switch meta.Type {
 	case typeF32:
-		return int64(elemCount(meta.Shape) * 4)
+		count, err := checkedElemCount64(meta.Shape)
+		if err != nil || count > math.MaxInt64/4 {
+			return 0
+		}
+		return count * 4
 	case typeQ8Row:
 		if len(meta.Shape) != 2 {
 			return 0
 		}
 		rows, cols := meta.Shape[0], meta.Shape[1]
+		if rows < 0 || cols < 0 || cols > math.MaxInt64-4 || rows > math.MaxInt64/(cols+4) {
+			return 0
+		}
 		return rows*4 + rows*cols
 	case typeQ4Row:
 		if len(meta.Shape) != 2 {
 			return 0
 		}
 		rows, cols := meta.Shape[0], meta.Shape[1]
+		if rows < 0 || cols < 0 || cols == math.MaxInt64 || rows > math.MaxInt64/(4+((cols+1)/2)) {
+			return 0
+		}
 		return rows*4 + rows*((cols+1)/2)
 	case typeQ6Row:
 		if len(meta.Shape) != 2 {
 			return 0
 		}
 		rows, cols := meta.Shape[0], meta.Shape[1]
+		if rows < 0 || cols < 0 {
+			return 0
+		}
+		if cols > (math.MaxInt64-7)/6 {
+			return 0
+		}
+		perRow := int64(4) + (cols*6+7)/8
+		if rows > math.MaxInt64/perRow {
+			return 0
+		}
 		return rows*4 + rows*((cols*6+7)/8)
 	default:
 		return 0
@@ -492,11 +631,43 @@ func TensorBytes(meta TensorMeta) int64 {
 }
 
 func elemCount(shape []int64) int {
+	n, err := checkedElemCount(shape)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func checkedElemCount(shape []int64) (int, error) {
+	n, err := checkedElemCount64(shape)
+	if err != nil {
+		return 0, err
+	}
+	if n > int64(maxInt()) {
+		return 0, fmt.Errorf("shape element count overflows int")
+	}
+	return int(n), nil
+}
+
+func checkedElemCount64(shape []int64) (int64, error) {
+	if len(shape) > maxShapeDims {
+		return 0, fmt.Errorf("shape has too many dimensions: %d", len(shape))
+	}
 	n := int64(1)
 	for _, d := range shape {
+		if d < 0 {
+			return 0, fmt.Errorf("shape contains negative dimension %d", d)
+		}
+		if d != 0 && n > math.MaxInt64/d {
+			return 0, fmt.Errorf("shape element count overflows int64")
+		}
 		n *= d
 	}
-	return int(n)
+	return n, nil
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
 }
 
 func readHeaderKV(r *headerReader) (string, any, error) {

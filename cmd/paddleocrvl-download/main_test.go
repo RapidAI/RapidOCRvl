@@ -5,7 +5,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestUniqueShards(t *testing.T) {
@@ -35,6 +37,59 @@ func TestJoinURL(t *testing.T) {
 	}
 	if got := joinURL("", "a.bin"); got != baseURL+"a.bin" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestValidateDownloadArgs(t *testing.T) {
+	for _, base := range []string{"", "http://x/base", "https://x/base"} {
+		if err := validateDownloadArgs(base, time.Second); err != nil {
+			t.Fatalf("%q err=%v", base, err)
+		}
+	}
+	cases := []struct {
+		base    string
+		timeout time.Duration
+		want    string
+	}{
+		{"ftp://x/base", 0, "http or https"},
+		{"x/base", 0, "invalid"},
+		{"http://x/base", -time.Second, "-timeout"},
+	}
+	for _, tc := range cases {
+		err := validateDownloadArgs(tc.base, tc.timeout)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("base=%q timeout=%s err=%v want %q", tc.base, tc.timeout, err, tc.want)
+		}
+	}
+}
+
+func TestSafeOutputPathRejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"../x.bin", `..\x.bin`, "shards/x.safetensors", "x.safetensors?download=1", "x safetensors", filepath.Join(dir, "x.bin")} {
+		if _, err := safeOutputPath(dir, name); err == nil {
+			t.Fatalf("expected %q to be rejected", name)
+		}
+	}
+	got, err := safeOutputPath(dir, "x.safetensors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(dir, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel != "x.safetensors" {
+		t.Fatalf("rel=%q", rel)
+	}
+}
+
+func BenchmarkSafeOutputPath(b *testing.B) {
+	dir := b.TempDir()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := safeOutputPath(dir, "model-00001-of-00002.safetensors"); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
@@ -78,6 +133,35 @@ func TestDownloadWritesFile(t *testing.T) {
 	}
 	if string(raw) != "abc" {
 		t.Fatalf("file=%q", raw)
+	}
+}
+
+func TestReadDownloadedIndexRejectsHugeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model.safetensors.index.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxDownloadIndexBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDownloadedIndex(path); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err=%v want too large", err)
+	}
+}
+
+func TestReadDownloadedIndexRejectsDuplicateJSONKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "model.safetensors.index.json")
+	raw := []byte(`{"weight_map":{"x.weight":"a.safetensors","x.weight":"b.safetensors"}}`)
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDownloadedIndex(path); err == nil || !strings.Contains(err.Error(), "duplicate JSON key") {
+		t.Fatalf("err=%v want duplicate JSON key", err)
 	}
 }
 

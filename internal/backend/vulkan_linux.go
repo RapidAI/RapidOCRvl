@@ -9,7 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"paddleocrvl-go/internal/jsonutil"
 )
+
+const maxVulkanICDManifestBytes = 1 << 20
 
 func VulkanInfo() Info {
 	candidates := vulkanLibraryCandidates()
@@ -117,8 +121,15 @@ func vulkanICDDrivers() []VulkanDriver {
 }
 
 func readVulkanICD(path string) (VulkanDriver, bool) {
+	st, err := os.Stat(path)
+	if err != nil || st.Size() > maxVulkanICDManifestBytes {
+		return VulkanDriver{}, false
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		return VulkanDriver{}, false
+	}
+	if err := jsonutil.RejectDuplicateKeys(raw, path); err != nil {
 		return VulkanDriver{}, false
 	}
 	var doc struct {

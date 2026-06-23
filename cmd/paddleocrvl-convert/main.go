@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -27,6 +28,9 @@ func main() {
 	}
 	backend.SetGCPercent(*gcPercent)
 	normalized := normalizedQuant(*quant)
+	if err := validateQuant(normalized); err != nil {
+		log.Fatal(err)
+	}
 	dst := *out
 	if dst == "" {
 		dst = defaultOutputPath(*modelDir, normalized)
@@ -145,6 +149,15 @@ func normalizedQuant(quant string) string {
 		return "f32"
 	}
 	return quant
+}
+
+func validateQuant(quant string) error {
+	switch normalizedQuant(quant) {
+	case "f32", "q8", "q6", "q4":
+		return nil
+	default:
+		return fmt.Errorf("unsupported quantization %q", quant)
+	}
 }
 
 func trimASCIIWhitespace(s string) string {

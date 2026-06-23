@@ -109,3 +109,59 @@ func TestSafetensorsPathAndFileBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestSafetensorsFilesSkipsDirectoriesAndCapsList(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "dir.safetensors"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := filepath.Join(dir, "model.safetensors.index.json")
+	if err := os.WriteFile(index, []byte("idx"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxInspectWeightFiles+1; i++ {
+		name := filepath.Join(dir, "shard-"+stringID(i)+".safetensors")
+		if err := os.WriteFile(name, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := safetensorsFiles(dir)
+	if len(files) != maxInspectWeightFiles {
+		t.Fatalf("files=%d want %d", len(files), maxInspectWeightFiles)
+	}
+	for _, path := range files {
+		if filepath.Base(path) == "dir.safetensors" {
+			t.Fatalf("directory included: %v", files)
+		}
+	}
+	if !containsPath(files, index) {
+		t.Fatalf("index file not retained in capped list")
+	}
+	items := weightFiles(append(files, filepath.Join(dir, "dir.safetensors")))
+	if len(items) != maxInspectWeightFiles {
+		t.Fatalf("items=%d want %d", len(items), maxInspectWeightFiles)
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, path := range paths {
+		if path == want {
+			return true
+		}
+	}
+	return false
+}
+
+func stringID(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}

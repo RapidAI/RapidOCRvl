@@ -2,12 +2,16 @@ package tokenizer
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"paddleocrvl-go/internal/jsonutil"
 )
 
 type Tokenizer struct {
@@ -56,6 +60,9 @@ type rawTokenizer struct {
 const (
 	maxCacheEntries      = 4096
 	maxCacheableInputLen = 8192
+	maxCacheableTokenLen = 8192
+	maxTokenizerBytes    = 256 << 20
+	maxTokenID           = 1 << 24
 )
 
 type CacheStats struct {
@@ -64,12 +71,34 @@ type CacheStats struct {
 }
 
 func Load(dir string) (*Tokenizer, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "tokenizer.json"))
+	path := filepath.Join(dir, "tokenizer.json")
+	f, err := os.Open(path)
 	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > maxTokenizerBytes {
+		return nil, fmt.Errorf("tokenizer.json too large: %d bytes exceeds %d", st.Size(), maxTokenizerBytes)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxTokenizerBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > maxTokenizerBytes {
+		return nil, fmt.Errorf("tokenizer.json too large: exceeds %d bytes", maxTokenizerBytes)
+	}
+	if err := jsonutil.RejectDuplicateKeys(b, path); err != nil {
 		return nil, err
 	}
 	var raw rawTokenizer
 	if err := json.Unmarshal(b, &raw); err != nil {
+		return nil, err
+	}
+	if err := validateRawTokenizer(raw); err != nil {
 		return nil, err
 	}
 	t := &Tokenizer{
@@ -131,6 +160,47 @@ func Load(dir string) (*Tokenizer, error) {
 	}
 	t.buildIDTables()
 	return t, nil
+}
+
+func validateRawTokenizer(raw rawTokenizer) error {
+	if len(raw.Model.Vocab) == 0 {
+		return fmt.Errorf("tokenizer vocab must not be empty")
+	}
+	idOwners := make(map[int]string, len(raw.Model.Vocab)+len(raw.AddedTokens))
+	for tok, id := range raw.Model.Vocab {
+		if tok == "" {
+			return fmt.Errorf("tokenizer vocab contains empty token")
+		}
+		if !validTokenID(id) {
+			return fmt.Errorf("tokenizer vocab token %q has invalid id %d", tok, id)
+		}
+		if owner, ok := idOwners[id]; ok && owner != tok {
+			return fmt.Errorf("tokenizer id %d is assigned to both %q and %q", id, owner, tok)
+		}
+		idOwners[id] = tok
+	}
+	addedContent := make(map[string]int, len(raw.AddedTokens))
+	for _, at := range raw.AddedTokens {
+		if at.Content == "" {
+			return fmt.Errorf("tokenizer added token content must not be empty")
+		}
+		if !validTokenID(at.ID) {
+			return fmt.Errorf("tokenizer added token %q has invalid id %d", at.Content, at.ID)
+		}
+		if owner, ok := idOwners[at.ID]; ok && owner != at.Content {
+			return fmt.Errorf("tokenizer id %d is assigned to both %q and %q", at.ID, owner, at.Content)
+		}
+		idOwners[at.ID] = at.Content
+		if prev, ok := addedContent[at.Content]; ok && prev != at.ID {
+			return fmt.Errorf("tokenizer added token %q has conflicting ids %d and %d", at.Content, prev, at.ID)
+		}
+		addedContent[at.Content] = at.ID
+	}
+	return nil
+}
+
+func validTokenID(id int) bool {
+	return id >= 0 && id <= maxTokenID
 }
 
 func (t *Tokenizer) buildIDTables() {
@@ -269,7 +339,7 @@ func (t *Tokenizer) decodeWithByteTokens(ids []int, includeAll bool) string {
 			continue
 		}
 		if !hasBuilder {
-			sb.Grow(t.decodedLenHint(ids, includeAll))
+			sb.Grow(len(ids) * 2)
 			hasBuilder = true
 		}
 		if len(b) > 0 {
@@ -369,12 +439,15 @@ func (t *Tokenizer) encodeNormal(s string) []int {
 	if strings.Contains(s, " ") {
 		s = strings.ReplaceAll(s, " ", "肝")
 	}
-	t.cacheMu.RLock()
-	if cached, ok := t.cache[s]; ok {
+	cacheableInput := len(s) <= maxCacheableInputLen
+	if cacheableInput {
+		t.cacheMu.RLock()
+		if cached, ok := t.cache[s]; ok {
+			t.cacheMu.RUnlock()
+			return append([]int(nil), cached...)
+		}
 		t.cacheMu.RUnlock()
-		return append([]int(nil), cached...)
 	}
-	t.cacheMu.RUnlock()
 	var smallPieces [128]string
 	pieces := smallPieces[:0]
 	if len(s) > len(smallPieces) {
@@ -419,16 +492,21 @@ func (t *Tokenizer) encodeNormal(s string) []int {
 			ids = append(ids, 0)
 		}
 	}
-	t.cacheMu.Lock()
-	if len(t.cache) >= maxCacheEntries {
-		t.cache = make(map[string][]int, maxCacheEntries)
+	if cacheableInput && len(ids) <= maxCacheableTokenLen {
+		t.cacheMu.Lock()
+		if len(t.cache) >= maxCacheEntries {
+			t.cache = make(map[string][]int, maxCacheEntries)
+		}
+		t.cache[s] = append([]int(nil), ids...)
+		t.cacheMu.Unlock()
 	}
-	t.cache[s] = append([]int(nil), ids...)
-	t.cacheMu.Unlock()
 	return ids
 }
 
 func (t *Tokenizer) storeEncodeCache(s string, ids []int) {
+	if len(ids) > maxCacheableTokenLen {
+		return
+	}
 	t.cacheMu.Lock()
 	if len(t.encodeCache) >= maxCacheEntries {
 		t.encodeCache = make(map[string][]int, maxCacheEntries)

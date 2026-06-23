@@ -162,6 +162,8 @@ Useful service flags:
 
 - `-admin-config paddleocrvl-admin.json` sets the admin console config path.
 - `-timeout 10m` sets a per-request timeout.
+- `-read-timeout 60s` caps how long the server spends reading a request body.
+- `-idle-timeout 120s` caps idle keep-alive connection lifetime.
 - `-shutdown-timeout 30s` controls graceful shutdown after SIGINT/SIGTERM.
 - `-request-limit 134217728` caps request body size.
 - `-multipart-memory 33554432` caps memory used while parsing multipart forms.

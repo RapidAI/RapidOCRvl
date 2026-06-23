@@ -1,6 +1,7 @@
 package model
 
 import (
+	"runtime"
 	"testing"
 
 	"paddleocrvl-go/internal/config"
@@ -14,6 +15,22 @@ func BenchmarkProjectImage(b *testing.B) {
 }
 
 func BenchmarkProjectImageLarge(b *testing.B) {
+	vd, td := 1024, 4096
+	grid := vision.Grid{T: 1, H: 14, W: 14}
+	benchmarkProjectImageShape(b, vd, td, grid)
+}
+
+func BenchmarkProjectImageSingleProc(b *testing.B) {
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
+	vd, td := 64, 128
+	grid := vision.Grid{T: 1, H: 14, W: 14}
+	benchmarkProjectImageShape(b, vd, td, grid)
+}
+
+func BenchmarkProjectImageLargeSingleProc(b *testing.B) {
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
 	vd, td := 1024, 4096
 	grid := vision.Grid{T: 1, H: 14, W: 14}
 	benchmarkProjectImageShape(b, vd, td, grid)
@@ -51,9 +68,38 @@ func BenchmarkVisionEmbeddings(b *testing.B) {
 	}
 }
 
+func BenchmarkVisionEmbeddingsPatch14(b *testing.B) {
+	vd, patch := 1024, 14*14*3
+	grid := vision.Grid{T: 1, H: 14, W: 14}
+	rt := &Runtime{cfg: &config.Config{VisionConfig: config.Vision{HiddenSize: vd}}}
+	rt.vision.patchW = make([]float32, vd*patch)
+	rt.vision.patchB = make([]float32, vd)
+	rt.vision.pos = make([]float32, 27*27*vd)
+	fillBenchFloat32(rt.vision.patchW)
+	fillBenchFloat32(rt.vision.pos)
+	pp := &vision.Preprocessed{Grid: grid, Patches: makeRows(grid.T*grid.H*grid.W, patch)}
+	for i := range pp.Patches {
+		fillBenchFloat32(pp.Patches[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rt.visionEmbeddings(pp)
+	}
+}
+
 func BenchmarkEncodePreprocessedImageNoLayers(b *testing.B) {
 	vd, td, patch := 1024, 4096, 16
 	grid := vision.Grid{T: 1, H: 14, W: 14}
+	benchmarkEncodePreprocessedImageNoLayers(b, vd, td, patch, grid)
+}
+
+func BenchmarkEncodePreprocessedImageNoLayersPatch14(b *testing.B) {
+	vd, td, patch := 1024, 4096, 14*14*3
+	grid := vision.Grid{T: 1, H: 14, W: 14}
+	benchmarkEncodePreprocessedImageNoLayers(b, vd, td, patch, grid)
+}
+
+func benchmarkEncodePreprocessedImageNoLayers(b *testing.B, vd, td, patch int, grid vision.Grid) {
 	rt := newProjectImageBenchRuntime(vd, td)
 	rt.cfg.VisionConfig.PatchSize = patch
 	rt.cfg.VisionConfig.NumAttentionHeads = 8
@@ -125,6 +171,25 @@ func BenchmarkNewVisionRoPETables(b *testing.B) {
 	grid := vision.Grid{T: 1, H: 14, W: 14}
 	for i := 0; i < b.N; i++ {
 		_ = newVisionRoPETables(grid, 128)
+	}
+}
+
+func BenchmarkApplyVisionRoPEPair(b *testing.B) {
+	grid := vision.Grid{T: 1, H: 14, W: 14}
+	heads, hd := 8, 128
+	width := heads * hd
+	q := make([][]float32, grid.H*grid.W)
+	k := make([][]float32, grid.H*grid.W)
+	for i := range q {
+		q[i] = make([]float32, width)
+		k[i] = make([]float32, width)
+		fillBenchFloat32(q[i])
+		fillBenchFloat32(k[i])
+	}
+	rope := newVisionRoPETables(grid, hd)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		applyVisionRoPEPair(q, k, grid, heads, hd, rope)
 	}
 }
 

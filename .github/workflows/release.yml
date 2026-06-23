@@ -67,6 +67,17 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Run focused race tests
+        if: runner.os == 'Linux'
+        run: go test -race ./cmd/paddleocrvl-server ./internal/tokenizer ./internal/model
+
+      - name: Audit frontend dependencies
+        working-directory: cmd/paddleocrvl-client/frontend
+        run: npm audit
+
   release-windows:
     name: Release Windows (${{ matrix.arch }})
     needs: test

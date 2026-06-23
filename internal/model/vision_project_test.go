@@ -1,14 +1,40 @@
 package model
 
 import (
+	"bytes"
 	"math"
 	"strconv"
+	"strings"
 	"testing"
 
 	"paddleocrvl-go/internal/config"
 	"paddleocrvl-go/internal/tensor"
 	"paddleocrvl-go/internal/vision"
 )
+
+func TestPreloadVisionRejectsIncompleteConfig(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{}}
+	err := rt.PreloadVision()
+	if err == nil || !strings.Contains(err.Error(), "vision_config.num_hidden_layers") {
+		t.Fatalf("err=%v want vision config error", err)
+	}
+}
+
+func TestEncodeImageReaderRejectsVisionConfigBeforeDecode(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{VisionConfig: config.Vision{NumHiddenLayers: 1}}}
+	_, _, err := rt.EncodeImageReader(bytes.NewReader([]byte("not an image")))
+	if err == nil || !strings.Contains(err.Error(), "vision_config.hidden_size") {
+		t.Fatalf("err=%v want vision config error", err)
+	}
+}
+
+func TestPreloadVisionRejectsNilRuntime(t *testing.T) {
+	var rt *Runtime
+	err := rt.PreloadVision()
+	if err == nil || !strings.Contains(err.Error(), "runtime config not initialized") {
+		t.Fatalf("err=%v want runtime config error", err)
+	}
+}
 
 func TestProjectImageUsesAllTemporalFrames(t *testing.T) {
 	rt := &Runtime{
@@ -88,6 +114,31 @@ func TestInterpolateVisionPosCachesBySize(t *testing.T) {
 	}
 	if got := rt.CacheStats().VisionPositionTables; got != 2 {
 		t.Fatalf("cache tables=%d want 2", got)
+	}
+}
+
+func TestVisionShapeCachesBoundEntries(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{VisionConfig: config.Vision{HiddenSize: 2, NumAttentionHeads: 1}}}
+	rt.vision.pos = make([]float32, 27*27*2)
+	for i := 0; i < maxVisionShapeCacheEntries; i++ {
+		_ = rt.interpolateVisionPos(1+i, 2+i)
+	}
+	if got := rt.CacheStats().VisionPositionTables; got != maxVisionShapeCacheEntries {
+		t.Fatalf("position cache tables=%d want %d", got, maxVisionShapeCacheEntries)
+	}
+	_ = rt.interpolateVisionPos(100, 101)
+	if got := rt.CacheStats().VisionPositionTables; got != 1 {
+		t.Fatalf("position cache tables after reset=%d want 1", got)
+	}
+	for i := 0; i < maxVisionShapeCacheEntries; i++ {
+		_ = rt.cachedVisionRoPETables(vision.Grid{T: 1, H: 1 + i, W: 2 + i}, 2)
+	}
+	if got := rt.CacheStats().VisionRoPETables; got != maxVisionShapeCacheEntries {
+		t.Fatalf("rope cache tables=%d want %d", got, maxVisionShapeCacheEntries)
+	}
+	_ = rt.cachedVisionRoPETables(vision.Grid{T: 1, H: 100, W: 101}, 2)
+	if got := rt.CacheStats().VisionRoPETables; got != 1 {
+		t.Fatalf("rope cache tables after reset=%d want 1", got)
 	}
 }
 

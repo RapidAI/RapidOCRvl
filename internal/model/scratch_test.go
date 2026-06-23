@@ -45,6 +45,113 @@ func TestGenerationScratchFallbackWithoutPoolNew(t *testing.T) {
 	}
 }
 
+func TestGenerationScratchDropsLargeTopKCandidates(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{
+		VocabSize:         8,
+		HiddenSize:        4,
+		IntermediateSize:  6,
+		NumHiddenLayers:   1,
+		NumAttentionHeads: 1,
+		NumKeyValueHeads:  1,
+		HeadDim:           4,
+	}}
+	large := rt.newGenerationScratch()
+	large.candidates = make([]tokenScore, 0, 8193)
+	rt.putGenerationScratch(large)
+	if got := rt.getGenerationScratch(); cap(got.candidates) != 0 {
+		t.Fatalf("large candidates retained cap=%d", cap(got.candidates))
+	}
+	small := rt.newGenerationScratch()
+	small.candidates = make([]tokenScore, 0, 8192)
+	rt.putGenerationScratch(small)
+	if got := rt.getGenerationScratch(); cap(got.candidates) != 8192 {
+		t.Fatalf("small candidates dropped cap=%d", cap(got.candidates))
+	}
+}
+
+func TestGenerationScratchDropsLargeScoreBlock(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{
+		VocabSize:         8,
+		HiddenSize:        4,
+		IntermediateSize:  6,
+		NumHiddenLayers:   2,
+		NumAttentionHeads: 1,
+		NumKeyValueHeads:  1,
+		HeadDim:           4,
+	}}
+	large := rt.newGenerationScratch()
+	rt.ensureScoreCapacity(large, 8193)
+	rt.putGenerationScratch(large)
+	got := rt.getGenerationScratch()
+	if cap(got.scoreBlock) != 0 {
+		t.Fatalf("large score block retained cap=%d", cap(got.scoreBlock))
+	}
+	for i := range got.layers {
+		if cap(got.layers[i].scores) != 0 {
+			t.Fatalf("layer %d scores retained cap=%d", i, cap(got.layers[i].scores))
+		}
+	}
+	small := rt.newGenerationScratch()
+	rt.ensureScoreCapacity(small, 8192)
+	rt.putGenerationScratch(small)
+	got = rt.getGenerationScratch()
+	if cap(got.scoreBlock) != 2*8192 {
+		t.Fatalf("small score block dropped cap=%d", cap(got.scoreBlock))
+	}
+}
+
+func TestGenerationScratchDropsLargeGenerationBuffers(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{
+		VocabSize:         8,
+		HiddenSize:        4,
+		IntermediateSize:  6,
+		NumHiddenLayers:   1,
+		NumAttentionHeads: 1,
+		NumKeyValueHeads:  1,
+		HeadDim:           4,
+	}}
+	large := rt.newGenerationScratch()
+	large.positions = make([]ropePos, 0, 8193)
+	large.inputIDs = make([]int, 0, 8193)
+	rt.putGenerationScratch(large)
+	got := rt.getGenerationScratch()
+	if cap(got.positions) != 0 || cap(got.inputIDs) != 0 {
+		t.Fatalf("large generation buffers retained positions=%d inputIDs=%d", cap(got.positions), cap(got.inputIDs))
+	}
+	small := rt.newGenerationScratch()
+	small.positions = make([]ropePos, 0, 8192)
+	small.inputIDs = make([]int, 0, 8192)
+	rt.putGenerationScratch(small)
+	got = rt.getGenerationScratch()
+	if cap(got.positions) != 8192 || cap(got.inputIDs) != 8192 {
+		t.Fatalf("small generation buffers dropped positions=%d inputIDs=%d", cap(got.positions), cap(got.inputIDs))
+	}
+}
+
+func TestGenerationScratchDropsOversizedWeights(t *testing.T) {
+	rt := &Runtime{cfg: &config.Config{
+		VocabSize:         9000,
+		HiddenSize:        4,
+		IntermediateSize:  6,
+		NumHiddenLayers:   1,
+		NumAttentionHeads: 1,
+		NumKeyValueHeads:  1,
+		HeadDim:           4,
+	}}
+	large := rt.newGenerationScratch()
+	large.weights = make([]float32, 0, 9001)
+	rt.putGenerationScratch(large)
+	if got := rt.getGenerationScratch(); cap(got.weights) != 0 {
+		t.Fatalf("large weights retained cap=%d", cap(got.weights))
+	}
+	small := rt.newGenerationScratch()
+	small.weights = make([]float32, 0, 9000)
+	rt.putGenerationScratch(small)
+	if got := rt.getGenerationScratch(); cap(got.weights) != 9000 {
+		t.Fatalf("vocab-sized weights dropped cap=%d", cap(got.weights))
+	}
+}
+
 func TestEnsureScoreCapacity(t *testing.T) {
 	rt := &Runtime{cfg: &config.Config{
 		VocabSize:         8,

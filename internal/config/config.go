@@ -2,9 +2,14 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+
+	"paddleocrvl-go/internal/jsonutil"
 )
+
+const maxConfigBytes = 16 << 20
 
 type Vision struct {
 	HiddenSize        int     `json:"hidden_size"`
@@ -44,8 +49,19 @@ type Config struct {
 }
 
 func Load(dir string) (*Config, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	path := filepath.Join(dir, "config.json")
+	st, err := os.Stat(path)
 	if err != nil {
+		return nil, err
+	}
+	if st.Size() > maxConfigBytes {
+		return nil, fmt.Errorf("config.json too large: %d bytes > %d", st.Size(), maxConfigBytes)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := jsonutil.RejectDuplicateKeys(b, path); err != nil {
 		return nil, err
 	}
 	var c Config

@@ -1,6 +1,7 @@
 package vision
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
@@ -34,10 +35,13 @@ type bilinearIndex struct {
 }
 
 const (
-	patchSize = 14
-	mergeSize = 2
-	minPixels = 28 * 28 * 130
-	maxPixels = 28 * 28 * 1280
+	patchSize            = 14
+	mergeSize            = 2
+	minPixels            = 28 * 28 * 130
+	maxPixels            = 28 * 28 * 1280
+	maxInputDimension    = 32768
+	maxInputPixels       = 64 << 20
+	maxEncodedImageBytes = 128 << 20
 )
 
 var clipMean = [3]float32{0.48145466, 0.4578275, 0.40821073}
@@ -73,6 +77,12 @@ func LoadImage(path string) (*Preprocessed, error) {
 		return nil, err
 	}
 	defer f.Close()
+	if err := validateImageConfig(f); err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	img, _, err := image.Decode(f)
 	if err != nil {
 		return nil, err
@@ -81,16 +91,56 @@ func LoadImage(path string) (*Preprocessed, error) {
 }
 
 func LoadImageReader(r io.Reader) (*Preprocessed, error) {
-	img, _, err := image.Decode(r)
+	if rs, ok := r.(io.ReadSeeker); ok {
+		if err := validateImageConfig(rs); err != nil {
+			return nil, err
+		}
+		if _, err := rs.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		img, _, err := image.Decode(rs)
+		if err != nil {
+			return nil, err
+		}
+		return PreprocessImage(img)
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxEncodedImageBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	return PreprocessImage(img)
+	if len(data) > maxEncodedImageBytes {
+		return nil, fmt.Errorf("image too large: encoded size exceeds %d bytes", maxEncodedImageBytes)
+	}
+	return LoadImageReader(bytes.NewReader(data))
+}
+
+func validateImageConfig(r io.Reader) error {
+	cfg, _, err := image.DecodeConfig(r)
+	if err != nil {
+		return err
+	}
+	return validateImageDimensions(cfg.Width, cfg.Height)
+}
+
+func validateImageDimensions(width, height int) error {
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("image dimensions must be positive")
+	}
+	if width > maxInputDimension || height > maxInputDimension {
+		return fmt.Errorf("image dimensions too large: %dx%d exceeds %d", width, height, maxInputDimension)
+	}
+	if width > maxInputPixels/height {
+		return fmt.Errorf("image too large: %dx%d exceeds %d pixels", width, height, maxInputPixels)
+	}
+	return nil
 }
 
 func PreprocessImage(img image.Image) (*Preprocessed, error) {
 	b := img.Bounds()
 	h, w := b.Dy(), b.Dx()
+	if err := validateImageDimensions(w, h); err != nil {
+		return nil, err
+	}
 	nh, nw, err := smartResize(h, w, patchSize*mergeSize, minPixels, maxPixels)
 	if err != nil {
 		return nil, err
@@ -106,8 +156,16 @@ func PreprocessImage(img image.Image) (*Preprocessed, error) {
 		extractPatchesRGBAMaybeParallel(patches, patchData, rgba, gridW, patchCount, patchDim, rs, gs, bs, rb, gb, bb)
 		return &Preprocessed{Patches: patches, Grid: Grid{T: 1, H: gridH, W: gridW}, Width: nw, Height: nh}, nil
 	}
+	if nrgba, ok := img.(*image.NRGBA); ok && nrgba.Bounds().Min.X == 0 && nrgba.Bounds().Min.Y == 0 && nrgba.Bounds().Dx() == nw && nrgba.Bounds().Dy() == nh {
+		extractPatchesNRGBAMaybeParallel(patches, patchData, nrgba, gridW, patchCount, patchDim, rs, gs, bs, rb, gb, bb)
+		return &Preprocessed{Patches: patches, Grid: Grid{T: 1, H: gridH, W: gridW}, Width: nw, Height: nh}, nil
+	}
 	if rgba, ok := img.(*image.RGBA); ok && rgba.Bounds().Min.X >= 0 && rgba.Bounds().Min.Y >= 0 && nw > 1 && nh > 1 {
 		extractResizedPatchesRGBA(patches, patchData, rgba, nw, nh, gridW, rs, gs, bs, rb, gb, bb)
+		return &Preprocessed{Patches: patches, Grid: Grid{T: 1, H: gridH, W: gridW}, Width: nw, Height: nh}, nil
+	}
+	if nrgba, ok := img.(*image.NRGBA); ok && nrgba.Bounds().Min.X >= 0 && nrgba.Bounds().Min.Y >= 0 && nw > 1 && nh > 1 {
+		extractResizedPatchesNRGBA(patches, patchData, nrgba, nw, nh, gridW, rs, gs, bs, rb, gb, bb)
 		return &Preprocessed{Patches: patches, Grid: Grid{T: 1, H: gridH, W: gridW}, Width: nw, Height: nh}, nil
 	}
 	resized := resizeBilinear(img, nw, nh)
@@ -117,13 +175,13 @@ func PreprocessImage(img image.Image) (*Preprocessed, error) {
 
 func extractPatchesRGBAMaybeParallel(patches [][]float32, patchData []float32, resized *image.RGBA, gridW, patchCount, patchDim int, rs, gs, bs, rb, gb, bb float32) {
 	work := patchCount * patchDim
-	if work >= 1<<18 && patchCount >= 4 {
-		workers := min(runtime.GOMAXPROCS(0), patchCount)
+	if shouldParallelVision(work, patchCount, 1<<18) {
+		workers := min(runtime.GOMAXPROCS(0), patchCount, 8)
 		var wg sync.WaitGroup
+		wg.Add(workers - 1)
 		for worker := 1; worker < workers; worker++ {
 			start := worker * patchCount / workers
 			end := (worker + 1) * patchCount / workers
-			wg.Add(1)
 			go func() {
 				extractPatchesRGBA(patches, patchData, resized, gridW, start, end, rs, gs, bs, rb, gb, bb)
 				wg.Done()
@@ -133,6 +191,32 @@ func extractPatchesRGBAMaybeParallel(patches [][]float32, patchData []float32, r
 		wg.Wait()
 	} else {
 		extractPatchesRGBA(patches, patchData, resized, gridW, 0, patchCount, rs, gs, bs, rb, gb, bb)
+	}
+}
+
+func extractPatchesNRGBAMaybeParallel(patches [][]float32, patchData []float32, resized *image.NRGBA, gridW, patchCount, patchDim int, rs, gs, bs, rb, gb, bb float32) {
+	if isNRGBAOpaque(resized, resized.Bounds()) {
+		rgba := image.RGBA{Pix: resized.Pix, Stride: resized.Stride, Rect: resized.Rect}
+		extractPatchesRGBAMaybeParallel(patches, patchData, &rgba, gridW, patchCount, patchDim, rs, gs, bs, rb, gb, bb)
+		return
+	}
+	work := patchCount * patchDim
+	if shouldParallelVision(work, patchCount, 1<<18) {
+		workers := min(runtime.GOMAXPROCS(0), patchCount, 8)
+		var wg sync.WaitGroup
+		wg.Add(workers - 1)
+		for worker := 1; worker < workers; worker++ {
+			start := worker * patchCount / workers
+			end := (worker + 1) * patchCount / workers
+			go func() {
+				extractPatchesNRGBA(patches, patchData, resized, gridW, start, end, rs, gs, bs, rb, gb, bb)
+				wg.Done()
+			}()
+		}
+		extractPatchesNRGBA(patches, patchData, resized, gridW, 0, patchCount/workers, rs, gs, bs, rb, gb, bb)
+		wg.Wait()
+	} else {
+		extractPatchesNRGBA(patches, patchData, resized, gridW, 0, patchCount, rs, gs, bs, rb, gb, bb)
 	}
 }
 
@@ -160,7 +244,7 @@ func extractResizedPatchesRGBA(patches [][]float32, patchData []float32, src *im
 	}
 	patchCount := len(patches)
 	work := patchCount * 3 * patchSize * patchSize
-	if work >= 1<<18 && patchCount >= 4 {
+	if shouldParallelVision(work, patchCount, 1<<18) {
 		workers := min(runtime.GOMAXPROCS(0), patchCount)
 		var wg sync.WaitGroup
 		for worker := 1; worker < workers; worker++ {
@@ -179,11 +263,59 @@ func extractResizedPatchesRGBA(patches [][]float32, patchData []float32, src *im
 	extractResizedPatchesRGBARange(patches, patchData, src.Pix, gridW, xs, ys, 0, patchCount, rs, gs, bs, rb, gb, bb)
 }
 
+func extractResizedPatchesNRGBA(patches [][]float32, patchData []float32, src *image.NRGBA, w, h, gridW int, rs, gs, bs, rb, gb, bb float32) {
+	if isNRGBAOpaque(src, src.Bounds()) {
+		rgba := image.RGBA{Pix: src.Pix, Stride: src.Stride, Rect: src.Rect}
+		extractResizedPatchesRGBA(patches, patchData, &rgba, w, h, gridW, rs, gs, bs, rb, gb, bb)
+		return
+	}
+	sb := src.Bounds()
+	xScale := float64(sb.Dx()-1) / float64(w-1)
+	yScale := float64(sb.Dy()-1) / float64(h-1)
+	idx, idxPtr := getBilinearIndexes(w + h)
+	defer putBilinearIndexes(idx, idxPtr)
+	xs := idx[:w]
+	for x := 0; x < w; x++ {
+		fx := float64(x)*xScale + float64(sb.Min.X)
+		x0 := int(fx)
+		x1 := min(x0+1, sb.Max.X-1)
+		wx := float32(fx - float64(x0))
+		xs[x] = bilinearIndex{I0: (x0 - src.Rect.Min.X) * 4, I1: (x1 - src.Rect.Min.X) * 4, W0: 1 - wx, W1: wx}
+	}
+	ys := idx[w:]
+	for y := 0; y < h; y++ {
+		fy := float64(y)*yScale + float64(sb.Min.Y)
+		y0 := int(fy)
+		y1 := min(y0+1, sb.Max.Y-1)
+		wy := float32(fy - float64(y0))
+		ys[y] = bilinearIndex{I0: (y0 - src.Rect.Min.Y) * src.Stride, I1: (y1 - src.Rect.Min.Y) * src.Stride, W0: 1 - wy, W1: wy}
+	}
+	patchCount := len(patches)
+	work := patchCount * 3 * patchSize * patchSize
+	if shouldParallelVision(work, patchCount, 1<<18) {
+		workers := min(runtime.GOMAXPROCS(0), patchCount)
+		var wg sync.WaitGroup
+		for worker := 1; worker < workers; worker++ {
+			start := worker * patchCount / workers
+			end := (worker + 1) * patchCount / workers
+			wg.Add(1)
+			go func() {
+				extractResizedPatchesNRGBARange(patches, patchData, src.Pix, gridW, xs, ys, start, end, rs, gs, bs, rb, gb, bb)
+				wg.Done()
+			}()
+		}
+		extractResizedPatchesNRGBARange(patches, patchData, src.Pix, gridW, xs, ys, 0, patchCount/workers, rs, gs, bs, rb, gb, bb)
+		wg.Wait()
+		return
+	}
+	extractResizedPatchesNRGBARange(patches, patchData, src.Pix, gridW, xs, ys, 0, patchCount, rs, gs, bs, rb, gb, bb)
+}
+
 func extractResizedPatchesRGBARange(patches [][]float32, patchData []float32, pix []byte, gridW int, xs, ys []bilinearIndex, start, end int, rs, gs, bs, rb, gb, bb float32) {
 	patchDim := 3 * patchSize * patchSize
 	channel := patchSize * patchSize
+	gy, gx := start/gridW, start%gridW
 	for patchIdx := start; patchIdx < end; patchIdx++ {
-		gy, gx := patchIdx/gridW, patchIdx%gridW
 		p := patchData[patchIdx*patchDim : (patchIdx+1)*patchDim]
 		pr := p[:channel]
 		pg := p[channel : 2*channel]
@@ -254,6 +386,61 @@ func extractResizedPatchesRGBARange(patches [][]float32, patchData []float32, pi
 			}
 		}
 		patches[patchIdx] = p
+		gx++
+		if gx == gridW {
+			gx = 0
+			gy++
+		}
+	}
+}
+
+func extractResizedPatchesNRGBARange(patches [][]float32, patchData []float32, pix []byte, gridW int, xs, ys []bilinearIndex, start, end int, rs, gs, bs, rb, gb, bb float32) {
+	patchDim := 3 * patchSize * patchSize
+	channel := patchSize * patchSize
+	gy, gx := start/gridW, start%gridW
+	for patchIdx := start; patchIdx < end; patchIdx++ {
+		p := patchData[patchIdx*patchDim : (patchIdx+1)*patchDim]
+		pr := p[:channel]
+		pg := p[channel : 2*channel]
+		pb := p[2*channel:]
+		for py := 0; py < patchSize; py++ {
+			y := gy*patchSize + py
+			yi := ys[y]
+			row0 := yi.I0
+			row1 := yi.I1
+			yw0 := yi.W0
+			yw1 := yi.W1
+			idx := py * patchSize
+			for px := 0; px < patchSize; px++ {
+				x := gx*patchSize + px
+				xi := xs[x]
+				xw0 := xi.W0
+				xw1 := xi.W1
+				col0 := xi.I0
+				col1 := xi.I1
+				o00 := row0 + col0
+				o10 := row0 + col1
+				o01 := row1 + col0
+				o11 := row1 + col1
+				r00, g00, b00 := premulNRGBA(pix, o00)
+				r10, g10, b10 := premulNRGBA(pix, o10)
+				r01, g01, b01 := premulNRGBA(pix, o01)
+				r11, g11, b11 := premulNRGBA(pix, o11)
+				r := (r00*xw0+r10*xw1)*yw0 + (r01*xw0+r11*xw1)*yw1
+				g := (g00*xw0+g10*xw1)*yw0 + (g01*xw0+g11*xw1)*yw1
+				b := (b00*xw0+b10*xw1)*yw0 + (b01*xw0+b11*xw1)*yw1
+				j := idx + px
+				pr[j] = roundByteFloat(r)*rs + rb
+				pg[j] = roundByteFloat(g)*gs + gb
+				pb[j] = roundByteFloat(b)*bs + bb
+			}
+		}
+		patches[patchIdx] = p
+		gx++
+		if gx == gridW {
+			gx = 0
+			gy++
+		}
 	}
 }
 
@@ -264,30 +451,32 @@ func roundByteFloat(v float32) float32 {
 func extractPatchesRGBA(patches [][]float32, patchData []float32, resized *image.RGBA, gridW, start, end int, rs, gs, bs, rb, gb, bb float32) {
 	patchDim := 3 * patchSize * patchSize
 	channel := patchSize * patchSize
+	pix := resized.Pix
+	stride := resized.Stride
+	gy, gx := start/gridW, start%gridW
 	for patchIdx := start; patchIdx < end; patchIdx++ {
-		gy, gx := patchIdx/gridW, patchIdx%gridW
 		p := patchData[patchIdx*patchDim : (patchIdx+1)*patchDim]
 		pr := p[:channel]
 		pg := p[channel : 2*channel]
 		pb := p[2*channel:]
 		for py := 0; py < patchSize; py++ {
 			y := gy*patchSize + py
-			off := y*resized.Stride + gx*patchSize*4
+			off := y*stride + gx*patchSize*4
 			idx := py * patchSize
 			px := 0
 			for ; px+3 < patchSize; px += 4 {
-				r := float32(resized.Pix[off])
-				g := float32(resized.Pix[off+1])
-				b := float32(resized.Pix[off+2])
-				r1 := float32(resized.Pix[off+4])
-				g1 := float32(resized.Pix[off+5])
-				b1 := float32(resized.Pix[off+6])
-				r2 := float32(resized.Pix[off+8])
-				g2 := float32(resized.Pix[off+9])
-				b2 := float32(resized.Pix[off+10])
-				r3 := float32(resized.Pix[off+12])
-				g3 := float32(resized.Pix[off+13])
-				b3 := float32(resized.Pix[off+14])
+				r := float32(pix[off])
+				g := float32(pix[off+1])
+				b := float32(pix[off+2])
+				r1 := float32(pix[off+4])
+				g1 := float32(pix[off+5])
+				b1 := float32(pix[off+6])
+				r2 := float32(pix[off+8])
+				g2 := float32(pix[off+9])
+				b2 := float32(pix[off+10])
+				r3 := float32(pix[off+12])
+				g3 := float32(pix[off+13])
+				b3 := float32(pix[off+14])
 				j := idx + px
 				pr[j] = r*rs + rb
 				pg[j] = g*gs + gb
@@ -305,13 +494,51 @@ func extractPatchesRGBA(patches [][]float32, patchData []float32, resized *image
 			}
 			for ; px < patchSize; px++ {
 				j := idx + px
-				pr[j] = float32(resized.Pix[off])*rs + rb
-				pg[j] = float32(resized.Pix[off+1])*gs + gb
-				pb[j] = float32(resized.Pix[off+2])*bs + bb
+				pr[j] = float32(pix[off])*rs + rb
+				pg[j] = float32(pix[off+1])*gs + gb
+				pb[j] = float32(pix[off+2])*bs + bb
 				off += 4
 			}
 		}
 		patches[patchIdx] = p
+		gx++
+		if gx == gridW {
+			gx = 0
+			gy++
+		}
+	}
+}
+
+func extractPatchesNRGBA(patches [][]float32, patchData []float32, resized *image.NRGBA, gridW, start, end int, rs, gs, bs, rb, gb, bb float32) {
+	patchDim := 3 * patchSize * patchSize
+	channel := patchSize * patchSize
+	pix := resized.Pix
+	stride := resized.Stride
+	gy, gx := start/gridW, start%gridW
+	for patchIdx := start; patchIdx < end; patchIdx++ {
+		p := patchData[patchIdx*patchDim : (patchIdx+1)*patchDim]
+		pr := p[:channel]
+		pg := p[channel : 2*channel]
+		pb := p[2*channel:]
+		for py := 0; py < patchSize; py++ {
+			y := gy*patchSize + py
+			off := y*stride + gx*patchSize*4
+			idx := py * patchSize
+			for px := 0; px < patchSize; px++ {
+				j := idx + px
+				r, g, b := premulNRGBA(pix, off)
+				pr[j] = r*rs + rb
+				pg[j] = g*gs + gb
+				pb[j] = b*bs + bb
+				off += 4
+			}
+		}
+		patches[patchIdx] = p
+		gx++
+		if gx == gridW {
+			gx = 0
+			gy++
+		}
 	}
 }
 
@@ -330,12 +557,14 @@ func smartResize(height, width, factor, minPix, maxPix int) (int, int, error) {
 	}
 	hBar := int(math.Round(float64(height)/float64(factor))) * factor
 	wBar := int(math.Round(float64(width)/float64(factor))) * factor
-	if hBar*wBar > maxPix {
-		beta := math.Sqrt(float64(height*width) / float64(maxPix))
+	resizedPixels := int64(hBar) * int64(wBar)
+	inputPixels := int64(height) * int64(width)
+	if resizedPixels > int64(maxPix) {
+		beta := math.Sqrt(float64(inputPixels) / float64(maxPix))
 		hBar = int(math.Floor(float64(height)/beta/float64(factor))) * factor
 		wBar = int(math.Floor(float64(width)/beta/float64(factor))) * factor
-	} else if hBar*wBar < minPix {
-		beta := math.Sqrt(float64(minPix) / float64(height*width))
+	} else if resizedPixels < int64(minPix) {
+		beta := math.Sqrt(float64(minPix) / float64(inputPixels))
 		hBar = int(math.Ceil(float64(height)*beta/float64(factor))) * factor
 		wBar = int(math.Ceil(float64(width)*beta/float64(factor))) * factor
 	}
@@ -350,6 +579,10 @@ func resizeBilinear(src image.Image, w, h int) *image.RGBA {
 	}
 	if rgba, ok := src.(*image.RGBA); ok {
 		resizeBilinearRGBA(dst, rgba, w, h)
+		return dst
+	}
+	if nrgba, ok := src.(*image.NRGBA); ok {
+		resizeBilinearNRGBA(dst, nrgba, w, h)
 		return dst
 	}
 	xScale := float64(sb.Dx()-1) / float64(w-1)
@@ -403,9 +636,55 @@ func resizeBilinearRGBA(dst, src *image.RGBA, w, h int) {
 			o10 := row0 + col1
 			o01 := row1 + col0
 			o11 := row1 + col1
-			r := bilerp(float32(src.Pix[o00]), float32(src.Pix[o10]), float32(src.Pix[o01]), float32(src.Pix[o11]), wx, wy)
-			g := bilerp(float32(src.Pix[o00+1]), float32(src.Pix[o10+1]), float32(src.Pix[o01+1]), float32(src.Pix[o11+1]), wx, wy)
-			b := bilerp(float32(src.Pix[o00+2]), float32(src.Pix[o10+2]), float32(src.Pix[o01+2]), float32(src.Pix[o11+2]), wx, wy)
+			r00, g00, b00 := premulNRGBA(src.Pix, o00)
+			r10, g10, b10 := premulNRGBA(src.Pix, o10)
+			r01, g01, b01 := premulNRGBA(src.Pix, o01)
+			r11, g11, b11 := premulNRGBA(src.Pix, o11)
+			r := bilerp(r00, r10, r01, r11, wx, wy)
+			g := bilerp(g00, g10, g01, g11, wx, wy)
+			b := bilerp(b00, b10, b01, b11, wx, wy)
+			do := y*dst.Stride + x*4
+			dst.Pix[do] = uint8(clamp(r))
+			dst.Pix[do+1] = uint8(clamp(g))
+			dst.Pix[do+2] = uint8(clamp(b))
+			dst.Pix[do+3] = 255
+		}
+	}
+}
+
+func resizeBilinearNRGBA(dst *image.RGBA, src *image.NRGBA, w, h int) {
+	sb := src.Bounds()
+	if sb.Min.X >= 0 && sb.Min.Y >= 0 {
+		resizeBilinearNRGBAFast(dst, src, w, h, sb)
+		return
+	}
+	xScale := float64(sb.Dx()-1) / float64(w-1)
+	yScale := float64(sb.Dy()-1) / float64(h-1)
+	for y := 0; y < h; y++ {
+		fy := float64(y)*yScale + float64(sb.Min.Y)
+		y0 := int(math.Floor(fy))
+		y1 := min(y0+1, sb.Max.Y-1)
+		wy := float32(fy - float64(y0))
+		row0 := (y0 - src.Rect.Min.Y) * src.Stride
+		row1 := (y1 - src.Rect.Min.Y) * src.Stride
+		for x := 0; x < w; x++ {
+			fx := float64(x)*xScale + float64(sb.Min.X)
+			x0 := int(math.Floor(fx))
+			x1 := min(x0+1, sb.Max.X-1)
+			wx := float32(fx - float64(x0))
+			col0 := (x0 - src.Rect.Min.X) * 4
+			col1 := (x1 - src.Rect.Min.X) * 4
+			o00 := row0 + col0
+			o10 := row0 + col1
+			o01 := row1 + col0
+			o11 := row1 + col1
+			r00, g00, b00 := premulNRGBA(src.Pix, o00)
+			r10, g10, b10 := premulNRGBA(src.Pix, o10)
+			r01, g01, b01 := premulNRGBA(src.Pix, o01)
+			r11, g11, b11 := premulNRGBA(src.Pix, o11)
+			r := bilerp(r00, r10, r01, r11, wx, wy)
+			g := bilerp(g00, g10, g01, g11, wx, wy)
+			b := bilerp(b00, b10, b01, b11, wx, wy)
 			do := y*dst.Stride + x*4
 			dst.Pix[do] = uint8(clamp(r))
 			dst.Pix[do+1] = uint8(clamp(g))
@@ -439,7 +718,7 @@ func resizeBilinearRGBAFast(dst, src *image.RGBA, w, h int, sb image.Rectangle) 
 		ys[y] = bilinearIndex{I0: (y0 - src.Rect.Min.Y) * src.Stride, I1: (y1 - src.Rect.Min.Y) * src.Stride, W0: 1 - wy, W1: wy}
 	}
 	pixels := w * h
-	if pixels >= 1<<16 && h >= 4 {
+	if shouldParallelVision(pixels, h, 1<<16) {
 		workers := min(runtime.GOMAXPROCS(0), h)
 		var wg sync.WaitGroup
 		for worker := 1; worker < workers; worker++ {
@@ -458,7 +737,129 @@ func resizeBilinearRGBAFast(dst, src *image.RGBA, w, h int, sb image.Rectangle) 
 	resizeBilinearRGBARows(dpix, spix, dst.Stride, w, xs, ys, 0, h)
 }
 
+func resizeBilinearNRGBAFast(dst *image.RGBA, src *image.NRGBA, w, h int, sb image.Rectangle) {
+	xScale := float64(sb.Dx()-1) / float64(w-1)
+	yScale := float64(sb.Dy()-1) / float64(h-1)
+	spix := src.Pix
+	dpix := dst.Pix
+	idx, idxPtr := getBilinearIndexes(w + h)
+	defer putBilinearIndexes(idx, idxPtr)
+	xs := idx[:w]
+	for x := 0; x < w; x++ {
+		fx := float64(x)*xScale + float64(sb.Min.X)
+		x0 := int(fx)
+		x1 := min(x0+1, sb.Max.X-1)
+		wx := float32(fx - float64(x0))
+		xs[x] = bilinearIndex{I0: (x0 - src.Rect.Min.X) * 4, I1: (x1 - src.Rect.Min.X) * 4, W0: 1 - wx, W1: wx}
+	}
+	ys := idx[w:]
+	for y := 0; y < h; y++ {
+		fy := float64(y)*yScale + float64(sb.Min.Y)
+		y0 := int(fy)
+		y1 := min(y0+1, sb.Max.Y-1)
+		wy := float32(fy - float64(y0))
+		ys[y] = bilinearIndex{I0: (y0 - src.Rect.Min.Y) * src.Stride, I1: (y1 - src.Rect.Min.Y) * src.Stride, W0: 1 - wy, W1: wy}
+	}
+	resizeRows := resizeBilinearNRGBARows
+	if isNRGBAOpaque(src, sb) {
+		resizeRows = resizeBilinearRGBARows
+	}
+	pixels := w * h
+	if shouldParallelVision(pixels, h, 1<<16) {
+		workers := min(runtime.GOMAXPROCS(0), h)
+		var wg sync.WaitGroup
+		for worker := 1; worker < workers; worker++ {
+			start := worker * h / workers
+			end := (worker + 1) * h / workers
+			wg.Add(1)
+			go func() {
+				resizeRows(dpix, spix, dst.Stride, w, xs, ys, start, end)
+				wg.Done()
+			}()
+		}
+		resizeRows(dpix, spix, dst.Stride, w, xs, ys, 0, h/workers)
+		wg.Wait()
+		return
+	}
+	resizeRows(dpix, spix, dst.Stride, w, xs, ys, 0, h)
+}
+
+func shouldParallelVision(work, units, minWork int) bool {
+	if work < minWork || units < 4 {
+		return false
+	}
+	return runtime.GOMAXPROCS(0) > 1
+}
+
 func resizeBilinearRGBARows(dpix, spix []byte, dstStride, w int, xs, ys []bilinearIndex, start, end int) {
+	for y := start; y < end; y++ {
+		yi := ys[y]
+		yw0 := yi.W0
+		yw1 := yi.W1
+		row0 := yi.I0
+		row1 := yi.I1
+		drow := y * dstStride
+		x := 0
+		for ; x+1 < w; x += 2 {
+			xi := xs[x]
+			xw0 := xi.W0
+			xw1 := xi.W1
+			col0 := xi.I0
+			col1 := xi.I1
+			o00 := row0 + col0
+			o10 := row0 + col1
+			o01 := row1 + col0
+			o11 := row1 + col1
+			r := (float32(spix[o00])*xw0+float32(spix[o10])*xw1)*yw0 + (float32(spix[o01])*xw0+float32(spix[o11])*xw1)*yw1
+			g := (float32(spix[o00+1])*xw0+float32(spix[o10+1])*xw1)*yw0 + (float32(spix[o01+1])*xw0+float32(spix[o11+1])*xw1)*yw1
+			b := (float32(spix[o00+2])*xw0+float32(spix[o10+2])*xw1)*yw0 + (float32(spix[o01+2])*xw0+float32(spix[o11+2])*xw1)*yw1
+			do := drow + x*4
+			dpix[do] = uint8(r + 0.5)
+			dpix[do+1] = uint8(g + 0.5)
+			dpix[do+2] = uint8(b + 0.5)
+			dpix[do+3] = 255
+
+			xi = xs[x+1]
+			xw0 = xi.W0
+			xw1 = xi.W1
+			col0 = xi.I0
+			col1 = xi.I1
+			o00 = row0 + col0
+			o10 = row0 + col1
+			o01 = row1 + col0
+			o11 = row1 + col1
+			r = (float32(spix[o00])*xw0+float32(spix[o10])*xw1)*yw0 + (float32(spix[o01])*xw0+float32(spix[o11])*xw1)*yw1
+			g = (float32(spix[o00+1])*xw0+float32(spix[o10+1])*xw1)*yw0 + (float32(spix[o01+1])*xw0+float32(spix[o11+1])*xw1)*yw1
+			b = (float32(spix[o00+2])*xw0+float32(spix[o10+2])*xw1)*yw0 + (float32(spix[o01+2])*xw0+float32(spix[o11+2])*xw1)*yw1
+			do = drow + (x+1)*4
+			dpix[do] = uint8(r + 0.5)
+			dpix[do+1] = uint8(g + 0.5)
+			dpix[do+2] = uint8(b + 0.5)
+			dpix[do+3] = 255
+		}
+		for ; x < w; x++ {
+			xi := xs[x]
+			xw0 := xi.W0
+			xw1 := xi.W1
+			col0 := xi.I0
+			col1 := xi.I1
+			o00 := row0 + col0
+			o10 := row0 + col1
+			o01 := row1 + col0
+			o11 := row1 + col1
+			r := (float32(spix[o00])*xw0+float32(spix[o10])*xw1)*yw0 + (float32(spix[o01])*xw0+float32(spix[o11])*xw1)*yw1
+			g := (float32(spix[o00+1])*xw0+float32(spix[o10+1])*xw1)*yw0 + (float32(spix[o01+1])*xw0+float32(spix[o11+1])*xw1)*yw1
+			b := (float32(spix[o00+2])*xw0+float32(spix[o10+2])*xw1)*yw0 + (float32(spix[o01+2])*xw0+float32(spix[o11+2])*xw1)*yw1
+			do := drow + x*4
+			dpix[do] = uint8(r + 0.5)
+			dpix[do+1] = uint8(g + 0.5)
+			dpix[do+2] = uint8(b + 0.5)
+			dpix[do+3] = 255
+		}
+	}
+}
+
+func resizeBilinearNRGBARows(dpix, spix []byte, dstStride, w int, xs, ys []bilinearIndex, start, end int) {
 	for y := start; y < end; y++ {
 		yi := ys[y]
 		yw0 := yi.W0
@@ -476,16 +877,44 @@ func resizeBilinearRGBARows(dpix, spix []byte, dstStride, w int, xs, ys []biline
 			o10 := row0 + col1
 			o01 := row1 + col0
 			o11 := row1 + col1
-			r := (float32(spix[o00])*xw0+float32(spix[o10])*xw1)*yw0 + (float32(spix[o01])*xw0+float32(spix[o11])*xw1)*yw1
-			g := (float32(spix[o00+1])*xw0+float32(spix[o10+1])*xw1)*yw0 + (float32(spix[o01+1])*xw0+float32(spix[o11+1])*xw1)*yw1
-			b := (float32(spix[o00+2])*xw0+float32(spix[o10+2])*xw1)*yw0 + (float32(spix[o01+2])*xw0+float32(spix[o11+2])*xw1)*yw1
+			r00, g00, b00 := premulNRGBA(spix, o00)
+			r10, g10, b10 := premulNRGBA(spix, o10)
+			r01, g01, b01 := premulNRGBA(spix, o01)
+			r11, g11, b11 := premulNRGBA(spix, o11)
+			r := (r00*xw0+r10*xw1)*yw0 + (r01*xw0+r11*xw1)*yw1
+			g := (g00*xw0+g10*xw1)*yw0 + (g01*xw0+g11*xw1)*yw1
+			b := (b00*xw0+b10*xw1)*yw0 + (b01*xw0+b11*xw1)*yw1
 			do := drow + x*4
-			dpix[do] = uint8(clamp(r))
-			dpix[do+1] = uint8(clamp(g))
-			dpix[do+2] = uint8(clamp(b))
+			dpix[do] = uint8(r + 0.5)
+			dpix[do+1] = uint8(g + 0.5)
+			dpix[do+2] = uint8(b + 0.5)
 			dpix[do+3] = 255
 		}
 	}
+}
+
+func premulNRGBA(pix []byte, off int) (float32, float32, float32) {
+	a := uint32(pix[off+3]) * 0x101
+	return premulNRGBAByte(pix[off], a), premulNRGBAByte(pix[off+1], a), premulNRGBAByte(pix[off+2], a)
+}
+
+func premulNRGBAByte(v byte, a uint32) float32 {
+	return float32((uint32(v) * 0x101 * a / 0xffff) >> 8)
+}
+
+func isNRGBAOpaque(src *image.NRGBA, bounds image.Rectangle) bool {
+	x0 := (bounds.Min.X - src.Rect.Min.X) * 4
+	width := bounds.Dx()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		off := (y-src.Rect.Min.Y)*src.Stride + x0 + 3
+		for x := 0; x < width; x++ {
+			if src.Pix[off] != 255 {
+				return false
+			}
+			off += 4
+		}
+	}
+	return true
 }
 
 func rgb(c color.Color) (float32, float32, float32) {

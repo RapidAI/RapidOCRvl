@@ -279,6 +279,57 @@ func TestFusedMatVec3SerialPartialRanges(t *testing.T) {
 	}
 }
 
+func TestFusedMatVec3QuantSerialPartialRanges(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25}
+	a := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+	}
+	b := []float32{
+		0.5, 1, -1,
+	}
+	c := []float32{
+		2, -0.25, 0.75,
+		-0.5, 1.5, 0.25,
+	}
+
+	wantA, wantB, wantC := make([]float32, 2), make([]float32, 1), make([]float32, 2)
+	qa, qb, qc := QuantizeQ8Row(a, 2, 3), QuantizeQ8Row(b, 1, 3), QuantizeQ8Row(c, 2, 3)
+	FusedMatVec3Q8(wantA, wantB, wantC, x, qa, qb, qc)
+	gotA, gotB, gotC := make([]float32, 2), make([]float32, 1), make([]float32, 2)
+	fusedMatVec3Q8Serial(gotA, gotB, gotC, x, qa, qb, qc, 1, 4)
+	if gotA[0] != 0 || gotC[1] != 0 {
+		t.Fatalf("q8 range touched outA[0]=%f outC[1]=%f", gotA[0], gotC[1])
+	}
+	assertCloseVec(t, "q8 partial a", gotA[1:], wantA[1:], 0)
+	assertCloseVec(t, "q8 partial b", gotB, wantB, 0)
+	assertCloseVec(t, "q8 partial c", gotC[:1], wantC[:1], 0)
+
+	wantA, wantB, wantC = make([]float32, 2), make([]float32, 1), make([]float32, 2)
+	q6a, q6b, q6c := QuantizeQ6Row(a, 2, 3), QuantizeQ6Row(b, 1, 3), QuantizeQ6Row(c, 2, 3)
+	FusedMatVec3Q6(wantA, wantB, wantC, x, q6a, q6b, q6c)
+	gotA, gotB, gotC = make([]float32, 2), make([]float32, 1), make([]float32, 2)
+	fusedMatVec3Q6Serial(gotA, gotB, gotC, x, q6a, q6b, q6c, 1, 4)
+	if gotA[0] != 0 || gotC[1] != 0 {
+		t.Fatalf("q6 range touched outA[0]=%f outC[1]=%f", gotA[0], gotC[1])
+	}
+	assertCloseVec(t, "q6 partial a", gotA[1:], wantA[1:], 0)
+	assertCloseVec(t, "q6 partial b", gotB, wantB, 0)
+	assertCloseVec(t, "q6 partial c", gotC[:1], wantC[:1], 0)
+
+	wantA, wantB, wantC = make([]float32, 2), make([]float32, 1), make([]float32, 2)
+	q4a, q4b, q4c := QuantizeQ4Row(a, 2, 3), QuantizeQ4Row(b, 1, 3), QuantizeQ4Row(c, 2, 3)
+	FusedMatVec3Q4(wantA, wantB, wantC, x, q4a, q4b, q4c)
+	gotA, gotB, gotC = make([]float32, 2), make([]float32, 1), make([]float32, 2)
+	fusedMatVec3Q4Serial(gotA, gotB, gotC, x, q4a, q4b, q4c, 1, 4)
+	if gotA[0] != 0 || gotC[1] != 0 {
+		t.Fatalf("q4 range touched outA[0]=%f outC[1]=%f", gotA[0], gotC[1])
+	}
+	assertCloseVec(t, "q4 partial a", gotA[1:], wantA[1:], 0)
+	assertCloseVec(t, "q4 partial b", gotB, wantB, 0)
+	assertCloseVec(t, "q4 partial c", gotC[:1], wantC[:1], 0)
+}
+
 func TestDotAndAddScaled(t *testing.T) {
 	a := []float32{1, 2, 3, 4, 5, 6, 7, 8, 9}
 	b := []float32{9, 8, 7, 6, 5, 4, 3, 2, 1}
@@ -566,7 +617,7 @@ func TestFusedSwiGLUF32Scratch(t *testing.T) {
 	MatVec(want, g, down, 2, 2)
 
 	got := make([]float32, 2)
-	FusedSwiGLUF32Scratch(got, x, gate, up, down, 2, 3, 2, make([]float32, 2), make([]float32, 2))
+	FusedSwiGLUF32Scratch(got, x, gate, up, down, 2, 3, 2, make([]float32, 2))
 	for i := range got {
 		if math.Abs(float64(got[i]-want[i])) > 1e-6 {
 			t.Fatalf("row %d got %f want %f", i, got[i], want[i])
@@ -589,10 +640,10 @@ func TestFusedSwiGLUQuantScratch(t *testing.T) {
 		0.5, 0.25,
 	}
 	want := make([]float32, 2)
-	FusedSwiGLUF32Scratch(want, x, gate, up, down, 2, 3, 2, make([]float32, 2), make([]float32, 2))
+	FusedSwiGLUF32Scratch(want, x, gate, up, down, 2, 3, 2, make([]float32, 2))
 
 	got8 := make([]float32, 2)
-	FusedSwiGLUQ8Scratch(got8, x, QuantizeQ8Row(gate, 2, 3), QuantizeQ8Row(up, 2, 3), QuantizeQ8Row(down, 2, 2), make([]float32, 2), make([]float32, 2))
+	FusedSwiGLUQ8Scratch(got8, x, QuantizeQ8Row(gate, 2, 3), QuantizeQ8Row(up, 2, 3), QuantizeQ8Row(down, 2, 2), make([]float32, 2))
 	for i := range got8 {
 		if math.Abs(float64(got8[i]-want[i])) > 0.1 {
 			t.Fatalf("q8 row %d got %f want %f", i, got8[i], want[i])
@@ -600,7 +651,7 @@ func TestFusedSwiGLUQuantScratch(t *testing.T) {
 	}
 
 	got4 := make([]float32, 2)
-	FusedSwiGLUQ4Scratch(got4, x, QuantizeQ4Row(gate, 2, 3), QuantizeQ4Row(up, 2, 3), QuantizeQ4Row(down, 2, 2), make([]float32, 2), make([]float32, 2))
+	FusedSwiGLUQ4Scratch(got4, x, QuantizeQ4Row(gate, 2, 3), QuantizeQ4Row(up, 2, 3), QuantizeQ4Row(down, 2, 2), make([]float32, 2))
 	for i := range got4 {
 		if math.Abs(float64(got4[i]-want[i])) > 0.8 {
 			t.Fatalf("q4 row %d got %f want %f", i, got4[i], want[i])
@@ -608,11 +659,359 @@ func TestFusedSwiGLUQuantScratch(t *testing.T) {
 	}
 
 	got6 := make([]float32, 2)
-	FusedSwiGLUQ6Scratch(got6, x, QuantizeQ6Row(gate, 2, 3), QuantizeQ6Row(up, 2, 3), QuantizeQ6Row(down, 2, 2), make([]float32, 2), make([]float32, 2))
+	FusedSwiGLUQ6Scratch(got6, x, QuantizeQ6Row(gate, 2, 3), QuantizeQ6Row(up, 2, 3), QuantizeQ6Row(down, 2, 2), make([]float32, 2))
 	for i := range got6 {
 		if math.Abs(float64(got6[i]-want[i])) > 0.25 {
 			t.Fatalf("q6 row %d got %f want %f", i, got6[i], want[i])
 		}
+	}
+}
+
+func TestFusedSwiGLUQuantScratchUsesSingleScratch(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+	}
+	up := []float32{
+		0.5, 1, -1,
+		2, -0.25, 0.75,
+	}
+	down := []float32{
+		1, -2,
+		0.5, 0.25,
+	}
+	q8Gate := QuantizeQ8Row(gate, 2, 3)
+	q8Up := QuantizeQ8Row(up, 2, 3)
+	q8Down := QuantizeQ8Row(down, 2, 2)
+	q4Gate := QuantizeQ4Row(gate, 2, 3)
+	q4Up := QuantizeQ4Row(up, 2, 3)
+	q4Down := QuantizeQ4Row(down, 2, 2)
+	q6Gate := QuantizeQ6Row(gate, 2, 3)
+	q6Up := QuantizeQ6Row(up, 2, 3)
+	q6Down := QuantizeQ6Row(down, 2, 2)
+
+	want8 := make([]float32, 2)
+	got8 := make([]float32, 2)
+	FusedSwiGLUQ8(want8, x, q8Gate, q8Up, q8Down)
+	FusedSwiGLUQ8Scratch(got8, x, q8Gate, q8Up, q8Down, make([]float32, 2))
+	assertCloseVec(t, "q8 single scratch", got8, want8, 0)
+
+	want4 := make([]float32, 2)
+	got4 := make([]float32, 2)
+	FusedSwiGLUQ4(want4, x, q4Gate, q4Up, q4Down)
+	FusedSwiGLUQ4Scratch(got4, x, q4Gate, q4Up, q4Down, make([]float32, 2))
+	assertCloseVec(t, "q4 single scratch", got4, want4, 0)
+
+	want6 := make([]float32, 2)
+	got6 := make([]float32, 2)
+	FusedSwiGLUQ6(want6, x, q6Gate, q6Up, q6Down)
+	FusedSwiGLUQ6Scratch(got6, x, q6Gate, q6Up, q6Down, make([]float32, 2))
+	assertCloseVec(t, "q6 single scratch", got6, want6, 0)
+}
+
+func TestFusedSwiGLUQuantConvenienceAllocatesSingleScratch(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25, 0.75}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+	}
+	up := []float32{
+		0.5, 1, -1, 0.25,
+		2, -0.25, 0.75, -1,
+		1.25, -0.5, 0.5, 2,
+	}
+	down := []float32{
+		1, -2,
+		0.5, 0.25,
+	}
+
+	q8Gate := QuantizeQ8Row(gate, 2, 3)
+	q8Up := QuantizeQ8Row(up, 3, 4)
+	q8Down := QuantizeQ8Row(down, 2, 2)
+	want8, got8 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ8Scratch(want8, x, q8Gate, q8Up, q8Down, make([]float32, 4))
+	FusedSwiGLUQ8(got8, x, q8Gate, q8Up, q8Down)
+	assertCloseVec(t, "q8 convenience fallback", got8, want8, 0)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ8(got8, x, q8Gate, q8Up, q8Down)
+	}); allocs != 1 {
+		t.Fatalf("q8 convenience allocs=%f want 1", allocs)
+	}
+
+	q4Gate := QuantizeQ4Row(gate, 2, 3)
+	q4Up := QuantizeQ4Row(up, 3, 4)
+	q4Down := QuantizeQ4Row(down, 2, 2)
+	want4, got4 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ4Scratch(want4, x, q4Gate, q4Up, q4Down, make([]float32, 4))
+	FusedSwiGLUQ4(got4, x, q4Gate, q4Up, q4Down)
+	assertCloseVec(t, "q4 convenience fallback", got4, want4, 0)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ4(got4, x, q4Gate, q4Up, q4Down)
+	}); allocs != 1 {
+		t.Fatalf("q4 convenience allocs=%f want 1", allocs)
+	}
+
+	q6Gate := QuantizeQ6Row(gate, 2, 3)
+	q6Up := QuantizeQ6Row(up, 3, 4)
+	q6Down := QuantizeQ6Row(down, 2, 2)
+	want6, got6 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ6Scratch(want6, x, q6Gate, q6Up, q6Down, make([]float32, 4))
+	FusedSwiGLUQ6(got6, x, q6Gate, q6Up, q6Down)
+	assertCloseVec(t, "q6 convenience fallback", got6, want6, 0)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ6(got6, x, q6Gate, q6Up, q6Down)
+	}); allocs != 1 {
+		t.Fatalf("q6 convenience allocs=%f want 1", allocs)
+	}
+}
+
+func TestFusedSwiGLUQuantConvenienceEqualShapeAllocatesSingleScratch(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+	}
+	up := []float32{
+		0.5, 1, -1,
+		2, -0.25, 0.75,
+	}
+	down := []float32{
+		1, -2,
+		0.5, 0.25,
+	}
+
+	q8Gate := QuantizeQ8Row(gate, 2, 3)
+	q8Up := QuantizeQ8Row(up, 2, 3)
+	q8Down := QuantizeQ8Row(down, 2, 2)
+	got8 := make([]float32, 2)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ8(got8, x, q8Gate, q8Up, q8Down)
+	}); allocs != 1 {
+		t.Fatalf("q8 equal-shape allocs=%f want 1", allocs)
+	}
+
+	q4Gate := QuantizeQ4Row(gate, 2, 3)
+	q4Up := QuantizeQ4Row(up, 2, 3)
+	q4Down := QuantizeQ4Row(down, 2, 2)
+	got4 := make([]float32, 2)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ4(got4, x, q4Gate, q4Up, q4Down)
+	}); allocs != 1 {
+		t.Fatalf("q4 equal-shape allocs=%f want 1", allocs)
+	}
+
+	q6Gate := QuantizeQ6Row(gate, 2, 3)
+	q6Up := QuantizeQ6Row(up, 2, 3)
+	q6Down := QuantizeQ6Row(down, 2, 2)
+	got6 := make([]float32, 2)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ6(got6, x, q6Gate, q6Up, q6Down)
+	}); allocs != 1 {
+		t.Fatalf("q6 equal-shape allocs=%f want 1", allocs)
+	}
+}
+
+func TestQuantSwiGLUFallbackHandlesShortUpRows(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+		0.75, -1.25, 0.5,
+	}
+	up := []float32{
+		0.5, 1, -1,
+		2, -0.25, 0.75,
+	}
+
+	q8Gate := QuantizeQ8Row(gate, 3, 3)
+	q8Up := QuantizeQ8Row(up, 2, 3)
+	wantGate, wantUp := make([]float32, 3), make([]float32, 2)
+	MatVecQ8(wantGate, x, q8Gate)
+	MatVecQ8(wantUp, x, q8Up)
+	got := []float32{9, 9, 9}
+	matVecQ8SwiGLU(got, x, q8Gate, q8Up)
+	assertCloseVec(t, "q8 fallback head", got[:2], []float32{SiLU(wantGate[0]) * wantUp[0], SiLU(wantGate[1]) * wantUp[1]}, 0)
+	if got[2] != 0 {
+		t.Fatalf("q8 fallback tail=%f want 0", got[2])
+	}
+
+	q4Gate := QuantizeQ4Row(gate, 3, 3)
+	q4Up := QuantizeQ4Row(up, 2, 3)
+	MatVecQ4(wantGate, x, q4Gate)
+	MatVecQ4(wantUp, x, q4Up)
+	got = []float32{9, 9, 9}
+	matVecQ4SwiGLU(got, x, q4Gate, q4Up)
+	assertCloseVec(t, "q4 fallback head", got[:2], []float32{SiLU(wantGate[0]) * wantUp[0], SiLU(wantGate[1]) * wantUp[1]}, 0)
+	if got[2] != 0 {
+		t.Fatalf("q4 fallback tail=%f want 0", got[2])
+	}
+
+	q6Gate := QuantizeQ6Row(gate, 3, 3)
+	q6Up := QuantizeQ6Row(up, 2, 3)
+	MatVecQ6(wantGate, x, q6Gate)
+	MatVecQ6(wantUp, x, q6Up)
+	got = []float32{9, 9, 9}
+	matVecQ6SwiGLU(got, x, q6Gate, q6Up)
+	assertCloseVec(t, "q6 fallback head", got[:2], []float32{SiLU(wantGate[0]) * wantUp[0], SiLU(wantGate[1]) * wantUp[1]}, 0)
+	if got[2] != 0 {
+		t.Fatalf("q6 fallback tail=%f want 0", got[2])
+	}
+}
+
+func TestQuantSwiGLUFallbackHandlesLongUpRowsAndDifferentCols(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25, 0.75}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+	}
+	up := []float32{
+		0.5, 1, -1, 0.25,
+		2, -0.25, 0.75, -1,
+		1.25, -0.5, 0.5, 2,
+	}
+
+	q8Gate := QuantizeQ8Row(gate, 2, 3)
+	q8Up := QuantizeQ8Row(up, 3, 4)
+	wantGate, wantUp := make([]float32, 2), make([]float32, 3)
+	MatVecQ8(wantGate, x, q8Gate)
+	MatVecQ8(wantUp, x, q8Up)
+	got := []float32{9, 9}
+	matVecQ8SwiGLU(got, x, q8Gate, q8Up)
+	assertCloseVec(t, "q8 fallback long up", got, []float32{SiLU(wantGate[0]) * wantUp[0], SiLU(wantGate[1]) * wantUp[1]}, 0)
+
+	q4Gate := QuantizeQ4Row(gate, 2, 3)
+	q4Up := QuantizeQ4Row(up, 3, 4)
+	MatVecQ4(wantGate, x, q4Gate)
+	MatVecQ4(wantUp, x, q4Up)
+	got = []float32{9, 9}
+	matVecQ4SwiGLU(got, x, q4Gate, q4Up)
+	assertCloseVec(t, "q4 fallback long up", got, []float32{SiLU(wantGate[0]) * wantUp[0], SiLU(wantGate[1]) * wantUp[1]}, 0)
+
+	q6Gate := QuantizeQ6Row(gate, 2, 3)
+	q6Up := QuantizeQ6Row(up, 3, 4)
+	MatVecQ6(wantGate, x, q6Gate)
+	MatVecQ6(wantUp, x, q6Up)
+	got = []float32{9, 9}
+	matVecQ6SwiGLU(got, x, q6Gate, q6Up)
+	assertCloseVec(t, "q6 fallback long up", got, []float32{SiLU(wantGate[0]) * wantUp[0], SiLU(wantGate[1]) * wantUp[1]}, 0)
+}
+
+func TestFusedSwiGLUQuantScratchFallbackReusesExtraScratch(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25, 0.75}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+	}
+	up := []float32{
+		0.5, 1, -1, 0.25,
+		2, -0.25, 0.75, -1,
+		1.25, -0.5, 0.5, 2,
+	}
+	down := []float32{
+		1, -2,
+		0.5, 0.25,
+	}
+
+	q8Gate := QuantizeQ8Row(gate, 2, 3)
+	q8Up := QuantizeQ8Row(up, 3, 4)
+	q8Down := QuantizeQ8Row(down, 2, 2)
+	want8, got8 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ8Scratch(want8, x, q8Gate, q8Up, q8Down, make([]float32, 2))
+	FusedSwiGLUQ8Scratch(got8, x, q8Gate, q8Up, q8Down, make([]float32, 4))
+	assertCloseVec(t, "q8 fallback extra scratch", got8, want8, 0)
+	scratch8 := make([]float32, 4)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ8Scratch(got8, x, q8Gate, q8Up, q8Down, scratch8)
+	}); allocs != 0 {
+		t.Fatalf("q8 fallback allocs=%f want 0", allocs)
+	}
+
+	q4Gate := QuantizeQ4Row(gate, 2, 3)
+	q4Up := QuantizeQ4Row(up, 3, 4)
+	q4Down := QuantizeQ4Row(down, 2, 2)
+	want4, got4 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ4Scratch(want4, x, q4Gate, q4Up, q4Down, make([]float32, 2))
+	FusedSwiGLUQ4Scratch(got4, x, q4Gate, q4Up, q4Down, make([]float32, 4))
+	assertCloseVec(t, "q4 fallback extra scratch", got4, want4, 0)
+	scratch4 := make([]float32, 4)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ4Scratch(got4, x, q4Gate, q4Up, q4Down, scratch4)
+	}); allocs != 0 {
+		t.Fatalf("q4 fallback allocs=%f want 0", allocs)
+	}
+
+	q6Gate := QuantizeQ6Row(gate, 2, 3)
+	q6Up := QuantizeQ6Row(up, 3, 4)
+	q6Down := QuantizeQ6Row(down, 2, 2)
+	want6, got6 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ6Scratch(want6, x, q6Gate, q6Up, q6Down, make([]float32, 2))
+	FusedSwiGLUQ6Scratch(got6, x, q6Gate, q6Up, q6Down, make([]float32, 4))
+	assertCloseVec(t, "q6 fallback extra scratch", got6, want6, 0)
+	scratch6 := make([]float32, 4)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ6Scratch(got6, x, q6Gate, q6Up, q6Down, scratch6)
+	}); allocs != 0 {
+		t.Fatalf("q6 fallback allocs=%f want 0", allocs)
+	}
+}
+
+func TestFusedSwiGLUQuantScratchFallbackReusesShortUpScratch(t *testing.T) {
+	x := []float32{0.25, -0.5, 1.25}
+	gate := []float32{
+		1, 2, 3,
+		-1, 0.5, 2,
+		0.75, -1.25, 0.5,
+	}
+	up := []float32{
+		0.5, 1, -1,
+		2, -0.25, 0.75,
+	}
+	down := []float32{
+		1, -2, 0.5,
+		0.5, 0.25, -1,
+	}
+
+	q8Gate := QuantizeQ8Row(gate, 3, 3)
+	q8Up := QuantizeQ8Row(up, 2, 3)
+	q8Down := QuantizeQ8Row(down, 2, 3)
+	want8, got8 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ8Scratch(want8, x, q8Gate, q8Up, q8Down, make([]float32, 3))
+	scratch8 := make([]float32, 5)
+	FusedSwiGLUQ8Scratch(got8, x, q8Gate, q8Up, q8Down, scratch8)
+	assertCloseVec(t, "q8 fallback short-up scratch", got8, want8, 0)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ8Scratch(got8, x, q8Gate, q8Up, q8Down, scratch8)
+	}); allocs != 0 {
+		t.Fatalf("q8 short-up fallback allocs=%f want 0", allocs)
+	}
+
+	q4Gate := QuantizeQ4Row(gate, 3, 3)
+	q4Up := QuantizeQ4Row(up, 2, 3)
+	q4Down := QuantizeQ4Row(down, 2, 3)
+	want4, got4 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ4Scratch(want4, x, q4Gate, q4Up, q4Down, make([]float32, 3))
+	scratch4 := make([]float32, 5)
+	FusedSwiGLUQ4Scratch(got4, x, q4Gate, q4Up, q4Down, scratch4)
+	assertCloseVec(t, "q4 fallback short-up scratch", got4, want4, 0)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ4Scratch(got4, x, q4Gate, q4Up, q4Down, scratch4)
+	}); allocs != 0 {
+		t.Fatalf("q4 short-up fallback allocs=%f want 0", allocs)
+	}
+
+	q6Gate := QuantizeQ6Row(gate, 3, 3)
+	q6Up := QuantizeQ6Row(up, 2, 3)
+	q6Down := QuantizeQ6Row(down, 2, 3)
+	want6, got6 := make([]float32, 2), make([]float32, 2)
+	FusedSwiGLUQ6Scratch(want6, x, q6Gate, q6Up, q6Down, make([]float32, 3))
+	scratch6 := make([]float32, 5)
+	FusedSwiGLUQ6Scratch(got6, x, q6Gate, q6Up, q6Down, scratch6)
+	assertCloseVec(t, "q6 fallback short-up scratch", got6, want6, 0)
+	if allocs := testing.AllocsPerRun(100, func() {
+		FusedSwiGLUQ6Scratch(got6, x, q6Gate, q6Up, q6Down, scratch6)
+	}); allocs != 0 {
+		t.Fatalf("q6 short-up fallback allocs=%f want 0", allocs)
 	}
 }
 
@@ -636,6 +1035,115 @@ func TestMatRowsBias(t *testing.T) {
 				t.Fatalf("out[%d][%d] got %f want %f", i, j, out[i][j], want[j])
 			}
 		}
+	}
+}
+
+func TestMatRowsBiasAddRowsMatchesSeparate(t *testing.T) {
+	xs := [][]float32{
+		{1, 2, 3},
+		{-1, 0.5, 2},
+	}
+	w := []float32{
+		1, 0, -1,
+		0.5, 2, 1,
+	}
+	bias := []float32{0.25, -0.5}
+	add := [][]float32{
+		{0.1, 0.2},
+		{-0.3, 0.4},
+	}
+	want := makeRowsForTest(2, 2)
+	got := makeRowsForTest(2, 2)
+	MatRowsBias(want, xs, w, bias, 2, 3)
+	for i := range want {
+		AddInPlace(want[i], add[i])
+	}
+	MatRowsBiasAddRows(got, xs, w, bias, add, 2, 3)
+	for i := range got {
+		assertCloseVec(t, "row", got[i], want[i], 1e-6)
+	}
+}
+
+func TestMatRowsBiasAddRowsEmptyAddMatchesMatRowsBias(t *testing.T) {
+	xs := [][]float32{
+		{1, 2, 3},
+		{-1, 0.5, 2},
+	}
+	w := []float32{
+		1, 0, -1,
+		0.5, 2, 1,
+	}
+	bias := []float32{0.25, -0.5}
+	want := makeRowsForTest(2, 2)
+	got := makeRowsForTest(2, 2)
+	MatRowsBias(want, xs, w, bias, 2, 3)
+	MatRowsBiasAddRows(got, xs, w, bias, nil, 2, 3)
+	for i := range got {
+		assertCloseVec(t, "row", got[i], want[i], 1e-6)
+	}
+}
+
+func TestMatRowsBiasAddRowsCols588MatchesSeparate(t *testing.T) {
+	rows, cols, batch := 3, 588, 2
+	xs := makeRowsForTest(batch, cols)
+	out := makeRowsForTest(batch, rows)
+	want := makeRowsForTest(batch, rows)
+	add := makeRowsForTest(batch, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	for i := range w {
+		w[i] = float32(i%17-8) / 17
+	}
+	for i := range bias {
+		bias[i] = float32(i%5-2) / 5
+	}
+	for i := range xs {
+		for j := range xs[i] {
+			xs[i][j] = float32((i+j)%13-6) / 13
+		}
+		for j := range add[i] {
+			add[i][j] = float32((i+j)%7-3) / 7
+		}
+	}
+	MatRowsBias(want, xs, w, bias, rows, cols)
+	for i := range want {
+		AddInPlace(want[i], add[i])
+	}
+	MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	for i := range out {
+		assertCloseVec(t, "row", out[i], want[i], 1e-5)
+	}
+}
+
+func TestMatRowsBiasAddRowsCols16MatchesSeparate(t *testing.T) {
+	rows, cols, batch := 5, 16, 3
+	xs := makeRowsForTest(batch, cols)
+	out := makeRowsForTest(batch, rows)
+	want := makeRowsForTest(batch, rows)
+	add := makeRowsForTest(batch, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	for i := range w {
+		w[i] = float32(i%17-8) / 17
+	}
+	for i := range bias {
+		bias[i] = float32(i%5-2) / 5
+	}
+	for i := range xs {
+		for j := range xs[i] {
+			xs[i][j] = float32((i+j)%13-6) / 13
+		}
+		for j := range add[i] {
+			add[i][j] = float32((i+j)%7-3) / 7
+		}
+	}
+	MatRowsBias(want, xs, w, bias, rows, cols)
+	for i := range want {
+		AddInPlace(want[i], add[i])
+	}
+	MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	for i := range out {
+		assertCloseVec(t, "row", out[i], want[i], 1e-5)
 	}
 }
 

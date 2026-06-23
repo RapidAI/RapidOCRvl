@@ -28,8 +28,8 @@ func QuantizeQ8Row(w []float32, rows, cols int) *Q8Matrix {
 		Data:  make([]int8, rows*cols),
 		Scale: make([]float32, rows),
 	}
-	if rows*cols >= parallelWork && rows >= 4 {
-		parallelRows(rows, func(start, end int) {
+	if shouldParallelQuantizeRows(rows*cols, rows) {
+		parallelForQuantizeRows(rows, func(start, end int) {
 			quantizeQ8Rows(w, q, start, end)
 		})
 		return q
@@ -148,8 +148,8 @@ func QuantizeQ4Row(w []float32, rows, cols int) *Q4Matrix {
 		Data:  make([]byte, rows*((cols+1)/2)),
 		Scale: make([]float32, rows),
 	}
-	if rows*cols >= parallelWork && rows >= 4 {
-		parallelRows(rows, func(start, end int) {
+	if shouldParallelQuantizeRows(rows*cols, rows) {
+		parallelForQuantizeRows(rows, func(start, end int) {
 			quantizeQ4Rows(w, q, start, end)
 		})
 		return q
@@ -165,8 +165,8 @@ func QuantizeQ6Row(w []float32, rows, cols int) *Q6Matrix {
 		Data:  make([]byte, rows*PackedQ6Cols(cols)),
 		Scale: make([]float32, rows),
 	}
-	if rows*cols >= parallelWork && rows >= 4 {
-		parallelRows(rows, func(start, end int) {
+	if shouldParallelQuantizeRows(rows*cols, rows) {
+		parallelForQuantizeRows(rows, func(start, end int) {
 			quantizeQ6Rows(w, q, start, end)
 		})
 		return q
@@ -345,15 +345,27 @@ func roundToInt(x float32) int {
 }
 
 func MatVecQ8(out, x []float32, q *Q8Matrix) {
-	if q.Rows*q.Cols >= parallelWork && q.Rows >= 4 {
-		matVecQ8Parallel(out, x, q)
+	matVecQ8Rows(out, x, q, q.Rows)
+}
+
+func matVecQ8Rows(out, x []float32, q *Q8Matrix, rows int) {
+	if shouldParallelQuantMatVec(rows*q.Cols, rows) {
+		parallelForQuantMatVec(rows, func(start, end int) {
+			matVecQ8Serial(out, x, q, start, end)
+		})
 		return
 	}
-	matVecQ8Serial(out, x, q, 0, q.Rows)
+	matVecQ8Serial(out, x, q, 0, rows)
 }
 
 func MatVecQ8Bias(out, x []float32, q *Q8Matrix, bias []float32) {
-	if q.Rows*q.Cols >= parallelWork && q.Rows >= 4 {
+	if shouldParallelQuantMatVec(q.Rows*q.Cols, q.Rows) {
+		parallelForQuantMatVec(q.Rows, func(start, end int) {
+			matVecQ8BiasSerial(out, x, q, bias, start, end)
+		})
+		return
+	}
+	if shouldParallel(q.Rows*q.Cols, q.Rows) {
 		parallelFor(q.Rows, func(start, end int) {
 			matVecQ8BiasSerial(out, x, q, bias, start, end)
 		})
@@ -363,25 +375,88 @@ func MatVecQ8Bias(out, x []float32, q *Q8Matrix, bias []float32) {
 }
 
 func MatVecQ4(out, x []float32, q *Q4Matrix) {
-	if q.Rows*q.Cols >= parallelWork && q.Rows >= 4 {
-		matVecQ4Parallel(out, x, q)
+	matVecQ4Rows(out, x, q, q.Rows)
+}
+
+func matVecQ4Rows(out, x []float32, q *Q4Matrix, rows int) {
+	if shouldParallelQuantMatVec(rows*q.Cols, rows) {
+		parallelForQuantMatVec(rows, func(start, end int) {
+			matVecQ4Serial(out, x, q, start, end)
+		})
 		return
 	}
-	matVecQ4Serial(out, x, q, 0, q.Rows)
+	matVecQ4Serial(out, x, q, 0, rows)
 }
 
 func MatVecQ6(out, x []float32, q *Q6Matrix) {
-	if q.Rows*q.Cols >= parallelWork && q.Rows >= 4 {
-		matVecQ6Parallel(out, x, q)
+	matVecQ6Rows(out, x, q, q.Rows)
+}
+
+func matVecQ6Rows(out, x []float32, q *Q6Matrix, rows int) {
+	if shouldParallelQuantMatVec(rows*q.Cols, rows) {
+		parallelForQuantMatVec(rows, func(start, end int) {
+			matVecQ6Serial(out, x, q, start, end)
+		})
 		return
 	}
-	matVecQ6Serial(out, x, q, 0, q.Rows)
+	matVecQ6Serial(out, x, q, 0, rows)
+}
+
+func shouldParallelQuantMatVec(work, rows int) bool {
+	if work >= parallelWork/2 && rows >= 512 {
+		return shouldParallel(parallelWork, rows)
+	}
+	return false
+}
+
+func shouldParallelQuantMatVec3EqualRows(work, rows int) bool {
+	if work >= parallelWork/2 && rows >= 256 && rows <= 512 {
+		return shouldParallel(parallelWork, rows)
+	}
+	return false
+}
+
+func shouldParallelQuantizeRows(work, rows int) bool {
+	if work >= parallelWork/2 && rows >= 512 {
+		return shouldParallel(parallelWork, rows)
+	}
+	return shouldParallel(work, rows)
+}
+
+func parallelForQuantizeRows(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelRows(rows, fn)
+}
+
+func parallelForQuantMatVec(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelFor(rows, fn)
+}
+
+func parallelForQuantMatVec3EqualRows(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelFor(rows, fn)
 }
 
 func FusedMatVec3Q8(outA, outB, outC, x []float32, a, b, c *Q8Matrix) {
 	totalRows := a.Rows + b.Rows + c.Rows
 	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
-		if totalRows*a.Cols >= parallelWork && a.Rows >= 4 {
+		if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
+			parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
+				fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
+			})
+			return
+		}
+		if shouldParallel(totalRows*a.Cols, a.Rows) {
 			parallelFor(a.Rows, func(start, end int) {
 				fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
 			})
@@ -390,7 +465,7 @@ func FusedMatVec3Q8(outA, outB, outC, x []float32, a, b, c *Q8Matrix) {
 		}
 		return
 	}
-	if totalRows*a.Cols >= parallelWork && totalRows >= 4 {
+	if shouldParallel(totalRows*a.Cols, totalRows) {
 		fusedMatVec3Q8Parallel(outA, outB, outC, x, a, b, c, totalRows)
 		return
 	}
@@ -400,7 +475,13 @@ func FusedMatVec3Q8(outA, outB, outC, x []float32, a, b, c *Q8Matrix) {
 func FusedMatVec3Q6(outA, outB, outC, x []float32, a, b, c *Q6Matrix) {
 	totalRows := a.Rows + b.Rows + c.Rows
 	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
-		if totalRows*a.Cols >= parallelWork && a.Rows >= 4 {
+		if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
+			parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
+				fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
+			})
+			return
+		}
+		if shouldParallel(totalRows*a.Cols, a.Rows) {
 			parallelFor(a.Rows, func(start, end int) {
 				fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
 			})
@@ -409,7 +490,7 @@ func FusedMatVec3Q6(outA, outB, outC, x []float32, a, b, c *Q6Matrix) {
 		}
 		return
 	}
-	if totalRows*a.Cols >= parallelWork && totalRows >= 4 {
+	if shouldParallel(totalRows*a.Cols, totalRows) {
 		fusedMatVec3Q6Parallel(outA, outB, outC, x, a, b, c, totalRows)
 		return
 	}
@@ -419,7 +500,13 @@ func FusedMatVec3Q6(outA, outB, outC, x []float32, a, b, c *Q6Matrix) {
 func FusedMatVec3Q4(outA, outB, outC, x []float32, a, b, c *Q4Matrix) {
 	totalRows := a.Rows + b.Rows + c.Rows
 	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
-		if totalRows*a.Cols >= parallelWork && a.Rows >= 4 {
+		if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
+			parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
+				fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
+			})
+			return
+		}
+		if shouldParallel(totalRows*a.Cols, a.Rows) {
 			parallelFor(a.Rows, func(start, end int) {
 				fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
 			})
@@ -428,7 +515,7 @@ func FusedMatVec3Q4(outA, outB, outC, x []float32, a, b, c *Q4Matrix) {
 		}
 		return
 	}
-	if totalRows*a.Cols >= parallelWork && totalRows >= 4 {
+	if shouldParallel(totalRows*a.Cols, totalRows) {
 		fusedMatVec3Q4Parallel(outA, outB, outC, x, a, b, c, totalRows)
 		return
 	}
@@ -436,33 +523,159 @@ func FusedMatVec3Q4(outA, outB, outC, x []float32, a, b, c *Q4Matrix) {
 }
 
 func FusedSwiGLUQ8(out, x []float32, gate, up, down *Q8Matrix) {
-	tmpG := make([]float32, gate.Rows)
-	tmpU := make([]float32, up.Rows)
-	FusedSwiGLUQ8Scratch(out, x, gate, up, down, tmpG, tmpU)
+	tmpG := make([]float32, swiGLUQuantScratchLen(gate.Rows, gate.Cols, up.Rows, up.Cols))
+	FusedSwiGLUQ8Scratch(out, x, gate, up, down, tmpG)
 }
 
-func FusedSwiGLUQ8Scratch(out, x []float32, gate, up, down *Q8Matrix, tmpG, tmpU []float32) {
-	tmpG = tmpG[:gate.Rows]
-	tmpU = tmpU[:up.Rows]
-	matVecQ8Pair(tmpG, tmpU, x, gate, up)
-	SiLUMulInPlace(tmpG, tmpU)
+func FusedSwiGLUQ4(out, x []float32, gate, up, down *Q4Matrix) {
+	tmpG := make([]float32, swiGLUQuantScratchLen(gate.Rows, gate.Cols, up.Rows, up.Cols))
+	FusedSwiGLUQ4Scratch(out, x, gate, up, down, tmpG)
+}
+
+func FusedSwiGLUQ6(out, x []float32, gate, up, down *Q6Matrix) {
+	tmpG := make([]float32, swiGLUQuantScratchLen(gate.Rows, gate.Cols, up.Rows, up.Cols))
+	FusedSwiGLUQ6Scratch(out, x, gate, up, down, tmpG)
+}
+
+func FusedSwiGLUQ8Scratch(out, x []float32, gate, up, down *Q8Matrix, tmpG []float32) {
+	tmpG, tmpU := swiGLUQuantScratch(tmpG, gate.Rows, up.Rows)
+	matVecQ8SwiGLUScratch(tmpG, x, gate, up, tmpU)
 	MatVecQ8(out, tmpG, down)
 }
 
-func FusedSwiGLUQ4Scratch(out, x []float32, gate, up, down *Q4Matrix, tmpG, tmpU []float32) {
-	tmpG = tmpG[:gate.Rows]
-	tmpU = tmpU[:up.Rows]
-	matVecQ4Pair(tmpG, tmpU, x, gate, up)
-	SiLUMulInPlace(tmpG, tmpU)
+func FusedSwiGLUQ4Scratch(out, x []float32, gate, up, down *Q4Matrix, tmpG []float32) {
+	tmpG, tmpU := swiGLUQuantScratch(tmpG, gate.Rows, up.Rows)
+	matVecQ4SwiGLUScratch(tmpG, x, gate, up, tmpU)
 	MatVecQ4(out, tmpG, down)
 }
 
-func FusedSwiGLUQ6Scratch(out, x []float32, gate, up, down *Q6Matrix, tmpG, tmpU []float32) {
-	tmpG = tmpG[:gate.Rows]
-	tmpU = tmpU[:up.Rows]
-	matVecQ6Pair(tmpG, tmpU, x, gate, up)
-	SiLUMulInPlace(tmpG, tmpU)
+func FusedSwiGLUQ6Scratch(out, x []float32, gate, up, down *Q6Matrix, tmpG []float32) {
+	tmpG, tmpU := swiGLUQuantScratch(tmpG, gate.Rows, up.Rows)
+	matVecQ6SwiGLUScratch(tmpG, x, gate, up, tmpU)
 	MatVecQ6(out, tmpG, down)
+}
+
+func swiGLUQuantScratch(tmp []float32, gateRows, upRows int) ([]float32, []float32) {
+	gateTmp := tmp[:gateRows]
+	upScratchRows := min(gateRows, upRows)
+	if gateRows+upScratchRows <= cap(tmp) {
+		return gateTmp, tmp[:gateRows+upScratchRows][gateRows:]
+	}
+	return gateTmp, nil
+}
+
+func swiGLUQuantScratchLen(gateRows, gateCols, upRows, upCols int) int {
+	if gateRows != upRows || gateCols != upCols {
+		return gateRows + min(gateRows, upRows)
+	}
+	return gateRows
+}
+
+func matVecQ8SwiGLU(out, x []float32, gate, up *Q8Matrix) {
+	matVecQ8SwiGLUScratch(out, x, gate, up, nil)
+}
+
+func matVecQ8SwiGLUScratch(out, x []float32, gate, up *Q8Matrix, tmpU []float32) {
+	if gate.Rows != up.Rows || gate.Cols != up.Cols {
+		rows, tmpU := swiGLUFallbackScratch(gate.Rows, up.Rows, tmpU)
+		matVecQ8Rows(out, x, gate, rows)
+		matVecQ8Rows(tmpU, x, up, rows)
+		swiGLUFallbackInPlace(out, tmpU)
+		return
+	}
+	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
+		parallelForQuantPair(gate.Rows, func(start, end int) {
+			matVecQ8SwiGLUSerial(out, x, gate, up, start, end)
+		})
+		return
+	}
+	matVecQ8SwiGLUSerial(out, x, gate, up, 0, gate.Rows)
+}
+
+func matVecQ8SwiGLUSerial(out, x []float32, gate, up *Q8Matrix, start, end int) {
+	for r := start; r < end; r++ {
+		base := r * gate.Cols
+		g, u := dotQ8Pair(gate.Data[base:base+gate.Cols], up.Data[base:base+up.Cols], x)
+		out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
+	}
+}
+
+func matVecQ4SwiGLU(out, x []float32, gate, up *Q4Matrix) {
+	matVecQ4SwiGLUScratch(out, x, gate, up, nil)
+}
+
+func matVecQ4SwiGLUScratch(out, x []float32, gate, up *Q4Matrix, tmpU []float32) {
+	if gate.Rows != up.Rows || gate.Cols != up.Cols {
+		rows, tmpU := swiGLUFallbackScratch(gate.Rows, up.Rows, tmpU)
+		matVecQ4Rows(out, x, gate, rows)
+		matVecQ4Rows(tmpU, x, up, rows)
+		swiGLUFallbackInPlace(out, tmpU)
+		return
+	}
+	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
+		parallelForQuantPair(gate.Rows, func(start, end int) {
+			matVecQ4SwiGLUSerial(out, x, gate, up, start, end)
+		})
+		return
+	}
+	matVecQ4SwiGLUSerial(out, x, gate, up, 0, gate.Rows)
+}
+
+func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) {
+	packedCols := (gate.Cols + 1) / 2
+	for r := start; r < end; r++ {
+		base := r * packedCols
+		g, u := dotQ4Pair(gate.Data[base:base+packedCols], up.Data[base:base+packedCols], x, gate.Cols)
+		out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
+	}
+}
+
+func matVecQ6SwiGLU(out, x []float32, gate, up *Q6Matrix) {
+	matVecQ6SwiGLUScratch(out, x, gate, up, nil)
+}
+
+func matVecQ6SwiGLUScratch(out, x []float32, gate, up *Q6Matrix, tmpU []float32) {
+	if gate.Rows != up.Rows || gate.Cols != up.Cols {
+		rows, tmpU := swiGLUFallbackScratch(gate.Rows, up.Rows, tmpU)
+		matVecQ6Rows(out, x, gate, rows)
+		matVecQ6Rows(tmpU, x, up, rows)
+		swiGLUFallbackInPlace(out, tmpU)
+		return
+	}
+	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
+		parallelForQuantPair(gate.Rows, func(start, end int) {
+			matVecQ6SwiGLUSerial(out, x, gate, up, start, end)
+		})
+		return
+	}
+	matVecQ6SwiGLUSerial(out, x, gate, up, 0, gate.Rows)
+}
+
+func matVecQ6SwiGLUSerial(out, x []float32, gate, up *Q6Matrix, start, end int) {
+	packedCols := PackedQ6Cols(gate.Cols)
+	for r := start; r < end; r++ {
+		base := r * packedCols
+		g, u := dotQ6Pair(gate.Data[base:base+packedCols], up.Data[base:base+packedCols], x, gate.Cols)
+		out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
+	}
+}
+
+func swiGLUFallbackInPlace(gate, up []float32) {
+	n := min(len(gate), len(up))
+	for i := 0; i < n; i++ {
+		gate[i] = SiLU(gate[i]) * up[i]
+	}
+	clear(gate[n:])
+}
+
+func swiGLUFallbackScratch(gateRows, upRows int, tmpU []float32) (int, []float32) {
+	rows := min(gateRows, upRows)
+	if len(tmpU) < rows {
+		tmpU = make([]float32, rows)
+	} else {
+		tmpU = tmpU[:rows]
+	}
+	return rows, tmpU
 }
 
 func matVecQ8Pair(outA, outB, x []float32, a, b *Q8Matrix) {
@@ -471,8 +684,8 @@ func matVecQ8Pair(outA, outB, x []float32, a, b *Q8Matrix) {
 		MatVecQ8(outB, x, b)
 		return
 	}
-	if a.Rows*a.Cols >= parallelWork && a.Rows >= 4 {
-		parallelFor(a.Rows, func(start, end int) {
+	if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
+		parallelForQuantPair(a.Rows, func(start, end int) {
 			matVecQ8PairSerial(outA, outB, x, a, b, start, end)
 		})
 		return
@@ -553,8 +766,8 @@ func matVecQ4Pair(outA, outB, x []float32, a, b *Q4Matrix) {
 		MatVecQ4(outB, x, b)
 		return
 	}
-	if a.Rows*a.Cols >= parallelWork && a.Rows >= 4 {
-		parallelFor(a.Rows, func(start, end int) {
+	if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
+		parallelForQuantPair(a.Rows, func(start, end int) {
 			matVecQ4PairSerial(outA, outB, x, a, b, start, end)
 		})
 		return
@@ -578,13 +791,21 @@ func matVecQ6Pair(outA, outB, x []float32, a, b *Q6Matrix) {
 		MatVecQ6(outB, x, b)
 		return
 	}
-	if a.Rows*a.Cols >= parallelWork && a.Rows >= 4 {
-		parallelFor(a.Rows, func(start, end int) {
+	if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
+		parallelForQuantPair(a.Rows, func(start, end int) {
 			matVecQ6PairSerial(outA, outB, x, a, b, start, end)
 		})
 		return
 	}
 	matVecQ6PairSerial(outA, outB, x, a, b, 0, a.Rows)
+}
+
+func parallelForQuantPair(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelFor(rows, fn)
 }
 
 func matVecQ6PairSerial(outA, outB, x []float32, a, b *Q6Matrix, start, end int) {
@@ -999,48 +1220,52 @@ var q4ByteLo, q4ByteHi = func() ([256]float32, [256]float32) {
 	return lo, hi
 }()
 
+var q6PairLo, q6PairHi = func() ([4096]float32, [4096]float32) {
+	var lo, hi [4096]float32
+	for i := range lo {
+		v := uint32(i)
+		lo[i] = q6ValueTable[byte(v&0x3F)]
+		hi[i] = q6ValueTable[byte((v>>6)&0x3F)]
+	}
+	return lo, hi
+}()
+
 func dotQ6(a []byte, b []float32, cols int) float32 {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
 	for ; i+15 < cols; i += 16 {
 		base := (i * 6) / 8
-		b0 := uint32(a[base])
-		b1 := uint32(a[base+1])
-		b2 := uint32(a[base+2])
-		b3 := uint32(a[base+3])
-		b4 := uint32(a[base+4])
-		b5 := uint32(a[base+5])
-		b6 := uint32(a[base+6])
-		b7 := uint32(a[base+7])
-		b8 := uint32(a[base+8])
-		b9 := uint32(a[base+9])
-		b10 := uint32(a[base+10])
-		b11 := uint32(a[base+11])
-		s0 += q6ValueTable[byte(b0&0x3F)]*b[i] + q6ValueTable[byte(b6&0x3F)]*b[i+8]
-		s1 += q6ValueTable[byte(((b0>>6)|((b1&0x0F)<<2))&0x3F)]*b[i+1] + q6ValueTable[byte(((b6>>6)|((b7&0x0F)<<2))&0x3F)]*b[i+9]
-		s2 += q6ValueTable[byte(((b1>>4)|((b2&0x03)<<4))&0x3F)]*b[i+2] + q6ValueTable[byte(((b7>>4)|((b8&0x03)<<4))&0x3F)]*b[i+10]
-		s3 += q6ValueTable[byte((b2>>2)&0x3F)]*b[i+3] + q6ValueTable[byte((b8>>2)&0x3F)]*b[i+11]
-		s4 += q6ValueTable[byte(b3&0x3F)]*b[i+4] + q6ValueTable[byte(b9&0x3F)]*b[i+12]
-		s5 += q6ValueTable[byte(((b3>>6)|((b4&0x0F)<<2))&0x3F)]*b[i+5] + q6ValueTable[byte(((b9>>6)|((b10&0x0F)<<2))&0x3F)]*b[i+13]
-		s6 += q6ValueTable[byte(((b4>>4)|((b5&0x03)<<4))&0x3F)]*b[i+6] + q6ValueTable[byte(((b10>>4)|((b11&0x03)<<4))&0x3F)]*b[i+14]
-		s7 += q6ValueTable[byte((b5>>2)&0x3F)]*b[i+7] + q6ValueTable[byte((b11>>2)&0x3F)]*b[i+15]
+		v0 := uint32(a[base]) | uint32(a[base+1])<<8 | uint32(a[base+2])<<16
+		v1 := uint32(a[base+3]) | uint32(a[base+4])<<8 | uint32(a[base+5])<<16
+		v2 := uint32(a[base+6]) | uint32(a[base+7])<<8 | uint32(a[base+8])<<16
+		v3 := uint32(a[base+9]) | uint32(a[base+10])<<8 | uint32(a[base+11])<<16
+		p0, p1 := v0&0x0FFF, v0>>12
+		p2, p3 := v1&0x0FFF, v1>>12
+		p4, p5 := v2&0x0FFF, v2>>12
+		p6, p7 := v3&0x0FFF, v3>>12
+		s0 += q6PairLo[p0]*b[i] + q6PairLo[p4]*b[i+8]
+		s1 += q6PairHi[p0]*b[i+1] + q6PairHi[p4]*b[i+9]
+		s2 += q6PairLo[p1]*b[i+2] + q6PairLo[p5]*b[i+10]
+		s3 += q6PairHi[p1]*b[i+3] + q6PairHi[p5]*b[i+11]
+		s4 += q6PairLo[p2]*b[i+4] + q6PairLo[p6]*b[i+12]
+		s5 += q6PairHi[p2]*b[i+5] + q6PairHi[p6]*b[i+13]
+		s6 += q6PairLo[p3]*b[i+6] + q6PairLo[p7]*b[i+14]
+		s7 += q6PairHi[p3]*b[i+7] + q6PairHi[p7]*b[i+15]
 	}
 	for ; i+7 < cols; i += 8 {
 		base := (i * 6) / 8
-		b0 := uint32(a[base])
-		b1 := uint32(a[base+1])
-		b2 := uint32(a[base+2])
-		b3 := uint32(a[base+3])
-		b4 := uint32(a[base+4])
-		b5 := uint32(a[base+5])
-		s0 += q6ValueTable[byte(b0&0x3F)] * b[i]
-		s1 += q6ValueTable[byte(((b0>>6)|((b1&0x0F)<<2))&0x3F)] * b[i+1]
-		s2 += q6ValueTable[byte(((b1>>4)|((b2&0x03)<<4))&0x3F)] * b[i+2]
-		s3 += q6ValueTable[byte((b2>>2)&0x3F)] * b[i+3]
-		s4 += q6ValueTable[byte(b3&0x3F)] * b[i+4]
-		s5 += q6ValueTable[byte(((b3>>6)|((b4&0x0F)<<2))&0x3F)] * b[i+5]
-		s6 += q6ValueTable[byte(((b4>>4)|((b5&0x03)<<4))&0x3F)] * b[i+6]
-		s7 += q6ValueTable[byte((b5>>2)&0x3F)] * b[i+7]
+		v0 := uint32(a[base]) | uint32(a[base+1])<<8 | uint32(a[base+2])<<16
+		v1 := uint32(a[base+3]) | uint32(a[base+4])<<8 | uint32(a[base+5])<<16
+		p0, p1 := v0&0x0FFF, v0>>12
+		p2, p3 := v1&0x0FFF, v1>>12
+		s0 += q6PairLo[p0] * b[i]
+		s1 += q6PairHi[p0] * b[i+1]
+		s2 += q6PairLo[p1] * b[i+2]
+		s3 += q6PairHi[p1] * b[i+3]
+		s4 += q6PairLo[p2] * b[i+4]
+		s5 += q6PairHi[p2] * b[i+5]
+		s6 += q6PairLo[p3] * b[i+6]
+		s7 += q6PairHi[p3] * b[i+7]
 	}
 	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < cols; i++ {
@@ -1058,53 +1283,51 @@ func dotQ6Pair(a, b []byte, x []float32, cols int) (float32, float32) {
 		x4, x5, x6, x7 := x[i+4], x[i+5], x[i+6], x[i+7]
 		x8, x9, x10, x11 := x[i+8], x[i+9], x[i+10], x[i+11]
 		x12, x13, x14, x15 := x[i+12], x[i+13], x[i+14], x[i+15]
-		av0, av1, av2, av3 := uint32(a[base]), uint32(a[base+1]), uint32(a[base+2]), uint32(a[base+3])
-		av4, av5, av6, av7 := uint32(a[base+4]), uint32(a[base+5]), uint32(a[base+6]), uint32(a[base+7])
-		av8, av9, av10, av11 := uint32(a[base+8]), uint32(a[base+9]), uint32(a[base+10]), uint32(a[base+11])
-		bv0, bv1, bv2, bv3 := uint32(b[base]), uint32(b[base+1]), uint32(b[base+2]), uint32(b[base+3])
-		bv4, bv5, bv6, bv7 := uint32(b[base+4]), uint32(b[base+5]), uint32(b[base+6]), uint32(b[base+7])
-		bv8, bv9, bv10, bv11 := uint32(b[base+8]), uint32(b[base+9]), uint32(b[base+10]), uint32(b[base+11])
-		a0 += q6ValueTable[byte(av0&0x3F)]*x0 + q6ValueTable[byte(av6&0x3F)]*x8
-		a1 += q6ValueTable[byte(((av0>>6)|((av1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((av6>>6)|((av7&0x0F)<<2))&0x3F)]*x9
-		a2 += q6ValueTable[byte(((av1>>4)|((av2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((av7>>4)|((av8&0x03)<<4))&0x3F)]*x10
-		a3 += q6ValueTable[byte((av2>>2)&0x3F)]*x3 + q6ValueTable[byte((av8>>2)&0x3F)]*x11
-		a0 += q6ValueTable[byte(av3&0x3F)]*x4 + q6ValueTable[byte(av9&0x3F)]*x12
-		a1 += q6ValueTable[byte(((av3>>6)|((av4&0x0F)<<2))&0x3F)]*x5 + q6ValueTable[byte(((av9>>6)|((av10&0x0F)<<2))&0x3F)]*x13
-		a2 += q6ValueTable[byte(((av4>>4)|((av5&0x03)<<4))&0x3F)]*x6 + q6ValueTable[byte(((av10>>4)|((av11&0x03)<<4))&0x3F)]*x14
-		a3 += q6ValueTable[byte((av5>>2)&0x3F)]*x7 + q6ValueTable[byte((av11>>2)&0x3F)]*x15
-		b0 += q6ValueTable[byte(bv0&0x3F)]*x0 + q6ValueTable[byte(bv6&0x3F)]*x8
-		b1 += q6ValueTable[byte(((bv0>>6)|((bv1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((bv6>>6)|((bv7&0x0F)<<2))&0x3F)]*x9
-		b2 += q6ValueTable[byte(((bv1>>4)|((bv2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((bv7>>4)|((bv8&0x03)<<4))&0x3F)]*x10
-		b3 += q6ValueTable[byte((bv2>>2)&0x3F)]*x3 + q6ValueTable[byte((bv8>>2)&0x3F)]*x11
-		b0 += q6ValueTable[byte(bv3&0x3F)]*x4 + q6ValueTable[byte(bv9&0x3F)]*x12
-		b1 += q6ValueTable[byte(((bv3>>6)|((bv4&0x0F)<<2))&0x3F)]*x5 + q6ValueTable[byte(((bv9>>6)|((bv10&0x0F)<<2))&0x3F)]*x13
-		b2 += q6ValueTable[byte(((bv4>>4)|((bv5&0x03)<<4))&0x3F)]*x6 + q6ValueTable[byte(((bv10>>4)|((bv11&0x03)<<4))&0x3F)]*x14
-		b3 += q6ValueTable[byte((bv5>>2)&0x3F)]*x7 + q6ValueTable[byte((bv11>>2)&0x3F)]*x15
+		av0 := uint32(a[base]) | uint32(a[base+1])<<8 | uint32(a[base+2])<<16
+		av1 := uint32(a[base+3]) | uint32(a[base+4])<<8 | uint32(a[base+5])<<16
+		av2 := uint32(a[base+6]) | uint32(a[base+7])<<8 | uint32(a[base+8])<<16
+		av3 := uint32(a[base+9]) | uint32(a[base+10])<<8 | uint32(a[base+11])<<16
+		bv0 := uint32(b[base]) | uint32(b[base+1])<<8 | uint32(b[base+2])<<16
+		bv1 := uint32(b[base+3]) | uint32(b[base+4])<<8 | uint32(b[base+5])<<16
+		bv2 := uint32(b[base+6]) | uint32(b[base+7])<<8 | uint32(b[base+8])<<16
+		bv3 := uint32(b[base+9]) | uint32(b[base+10])<<8 | uint32(b[base+11])<<16
+		ap0, ap1 := av0&0x0FFF, av0>>12
+		ap2, ap3 := av1&0x0FFF, av1>>12
+		ap4, ap5 := av2&0x0FFF, av2>>12
+		ap6, ap7 := av3&0x0FFF, av3>>12
+		bp0, bp1 := bv0&0x0FFF, bv0>>12
+		bp2, bp3 := bv1&0x0FFF, bv1>>12
+		bp4, bp5 := bv2&0x0FFF, bv2>>12
+		bp6, bp7 := bv3&0x0FFF, bv3>>12
+		a0 += q6PairLo[ap0]*x0 + q6PairLo[ap2]*x4 + q6PairLo[ap4]*x8 + q6PairLo[ap6]*x12
+		a1 += q6PairHi[ap0]*x1 + q6PairHi[ap2]*x5 + q6PairHi[ap4]*x9 + q6PairHi[ap6]*x13
+		a2 += q6PairLo[ap1]*x2 + q6PairLo[ap3]*x6 + q6PairLo[ap5]*x10 + q6PairLo[ap7]*x14
+		a3 += q6PairHi[ap1]*x3 + q6PairHi[ap3]*x7 + q6PairHi[ap5]*x11 + q6PairHi[ap7]*x15
+		b0 += q6PairLo[bp0]*x0 + q6PairLo[bp2]*x4 + q6PairLo[bp4]*x8 + q6PairLo[bp6]*x12
+		b1 += q6PairHi[bp0]*x1 + q6PairHi[bp2]*x5 + q6PairHi[bp4]*x9 + q6PairHi[bp6]*x13
+		b2 += q6PairLo[bp1]*x2 + q6PairLo[bp3]*x6 + q6PairLo[bp5]*x10 + q6PairLo[bp7]*x14
+		b3 += q6PairHi[bp1]*x3 + q6PairHi[bp3]*x7 + q6PairHi[bp5]*x11 + q6PairHi[bp7]*x15
 	}
 	for ; i+7 < cols; i += 8 {
 		base := (i * 6) / 8
-		aa0 := uint32(a[base])
-		aa1 := uint32(a[base+1])
-		aa2 := uint32(a[base+2])
-		aa3 := uint32(a[base+3])
-		aa4 := uint32(a[base+4])
-		aa5 := uint32(a[base+5])
-		bb0 := uint32(b[base])
-		bb1 := uint32(b[base+1])
-		bb2 := uint32(b[base+2])
-		bb3 := uint32(b[base+3])
-		bb4 := uint32(b[base+4])
-		bb5 := uint32(b[base+5])
+		av0 := uint32(a[base]) | uint32(a[base+1])<<8 | uint32(a[base+2])<<16
+		av1 := uint32(a[base+3]) | uint32(a[base+4])<<8 | uint32(a[base+5])<<16
+		bv0 := uint32(b[base]) | uint32(b[base+1])<<8 | uint32(b[base+2])<<16
+		bv1 := uint32(b[base+3]) | uint32(b[base+4])<<8 | uint32(b[base+5])<<16
+		ap0, ap1 := av0&0x0FFF, av0>>12
+		ap2, ap3 := av1&0x0FFF, av1>>12
+		bp0, bp1 := bv0&0x0FFF, bv0>>12
+		bp2, bp3 := bv1&0x0FFF, bv1>>12
 		x0, x1, x2, x3 := x[i], x[i+1], x[i+2], x[i+3]
 		x4, x5, x6, x7 := x[i+4], x[i+5], x[i+6], x[i+7]
-		a0 += q6ValueTable[byte(aa0&0x3F)]*x0 + q6ValueTable[byte(aa3&0x3F)]*x4
-		a1 += q6ValueTable[byte(((aa0>>6)|((aa1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((aa3>>6)|((aa4&0x0F)<<2))&0x3F)]*x5
-		a2 += q6ValueTable[byte(((aa1>>4)|((aa2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((aa4>>4)|((aa5&0x03)<<4))&0x3F)]*x6
-		a3 += q6ValueTable[byte((aa2>>2)&0x3F)]*x3 + q6ValueTable[byte((aa5>>2)&0x3F)]*x7
-		b0 += q6ValueTable[byte(bb0&0x3F)]*x0 + q6ValueTable[byte(bb3&0x3F)]*x4
-		b1 += q6ValueTable[byte(((bb0>>6)|((bb1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((bb3>>6)|((bb4&0x0F)<<2))&0x3F)]*x5
-		b2 += q6ValueTable[byte(((bb1>>4)|((bb2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((bb4>>4)|((bb5&0x03)<<4))&0x3F)]*x6
-		b3 += q6ValueTable[byte((bb2>>2)&0x3F)]*x3 + q6ValueTable[byte((bb5>>2)&0x3F)]*x7
+		a0 += q6PairLo[ap0]*x0 + q6PairLo[ap2]*x4
+		a1 += q6PairHi[ap0]*x1 + q6PairHi[ap2]*x5
+		a2 += q6PairLo[ap1]*x2 + q6PairLo[ap3]*x6
+		a3 += q6PairHi[ap1]*x3 + q6PairHi[ap3]*x7
+		b0 += q6PairLo[bp0]*x0 + q6PairLo[bp2]*x4
+		b1 += q6PairHi[bp0]*x1 + q6PairHi[bp2]*x5
+		b2 += q6PairLo[bp1]*x2 + q6PairLo[bp3]*x6
+		b3 += q6PairHi[bp1]*x3 + q6PairHi[bp3]*x7
 	}
 	sa := (a0 + a1) + (a2 + a3)
 	sb := (b0 + b1) + (b2 + b3)
@@ -1125,98 +1348,71 @@ func dotQ6Triplet(a, b, c []byte, x []float32, cols int) (float32, float32, floa
 		x4, x5, x6, x7 := x[i+4], x[i+5], x[i+6], x[i+7]
 		x8, x9, x10, x11 := x[i+8], x[i+9], x[i+10], x[i+11]
 		x12, x13, x14, x15 := x[i+12], x[i+13], x[i+14], x[i+15]
-		av0, av1, av2, av3 := uint32(a[base]), uint32(a[base+1]), uint32(a[base+2]), uint32(a[base+3])
-		av4, av5, av6, av7 := uint32(a[base+4]), uint32(a[base+5]), uint32(a[base+6]), uint32(a[base+7])
-		av8, av9, av10, av11 := uint32(a[base+8]), uint32(a[base+9]), uint32(a[base+10]), uint32(a[base+11])
-		bv0, bv1, bv2, bv3 := uint32(b[base]), uint32(b[base+1]), uint32(b[base+2]), uint32(b[base+3])
-		bv4, bv5, bv6, bv7 := uint32(b[base+4]), uint32(b[base+5]), uint32(b[base+6]), uint32(b[base+7])
-		bv8, bv9, bv10, bv11 := uint32(b[base+8]), uint32(b[base+9]), uint32(b[base+10]), uint32(b[base+11])
-		cv0, cv1, cv2, cv3 := uint32(c[base]), uint32(c[base+1]), uint32(c[base+2]), uint32(c[base+3])
-		cv4, cv5, cv6, cv7 := uint32(c[base+4]), uint32(c[base+5]), uint32(c[base+6]), uint32(c[base+7])
-		cv8, cv9, cv10, cv11 := uint32(c[base+8]), uint32(c[base+9]), uint32(c[base+10]), uint32(c[base+11])
-		aq0 := q6ValueTable[byte(av0&0x3F)]
-		aq1 := q6ValueTable[byte(((av0>>6)|((av1&0x0F)<<2))&0x3F)]
-		aq2 := q6ValueTable[byte(((av1>>4)|((av2&0x03)<<4))&0x3F)]
-		aq3 := q6ValueTable[byte((av2>>2)&0x3F)]
-		aq4 := q6ValueTable[byte(av3&0x3F)]
-		aq5 := q6ValueTable[byte(((av3>>6)|((av4&0x0F)<<2))&0x3F)]
-		aq6 := q6ValueTable[byte(((av4>>4)|((av5&0x03)<<4))&0x3F)]
-		aq7 := q6ValueTable[byte((av5>>2)&0x3F)]
-		aq8 := q6ValueTable[byte(av6&0x3F)]
-		aq9 := q6ValueTable[byte(((av6>>6)|((av7&0x0F)<<2))&0x3F)]
-		aq10 := q6ValueTable[byte(((av7>>4)|((av8&0x03)<<4))&0x3F)]
-		aq11 := q6ValueTable[byte((av8>>2)&0x3F)]
-		aq12 := q6ValueTable[byte(av9&0x3F)]
-		aq13 := q6ValueTable[byte(((av9>>6)|((av10&0x0F)<<2))&0x3F)]
-		aq14 := q6ValueTable[byte(((av10>>4)|((av11&0x03)<<4))&0x3F)]
-		aq15 := q6ValueTable[byte((av11>>2)&0x3F)]
-		bq0 := q6ValueTable[byte(bv0&0x3F)]
-		bq1 := q6ValueTable[byte(((bv0>>6)|((bv1&0x0F)<<2))&0x3F)]
-		bq2 := q6ValueTable[byte(((bv1>>4)|((bv2&0x03)<<4))&0x3F)]
-		bq3 := q6ValueTable[byte((bv2>>2)&0x3F)]
-		bq4 := q6ValueTable[byte(bv3&0x3F)]
-		bq5 := q6ValueTable[byte(((bv3>>6)|((bv4&0x0F)<<2))&0x3F)]
-		bq6 := q6ValueTable[byte(((bv4>>4)|((bv5&0x03)<<4))&0x3F)]
-		bq7 := q6ValueTable[byte((bv5>>2)&0x3F)]
-		bq8 := q6ValueTable[byte(bv6&0x3F)]
-		bq9 := q6ValueTable[byte(((bv6>>6)|((bv7&0x0F)<<2))&0x3F)]
-		bq10 := q6ValueTable[byte(((bv7>>4)|((bv8&0x03)<<4))&0x3F)]
-		bq11 := q6ValueTable[byte((bv8>>2)&0x3F)]
-		bq12 := q6ValueTable[byte(bv9&0x3F)]
-		bq13 := q6ValueTable[byte(((bv9>>6)|((bv10&0x0F)<<2))&0x3F)]
-		bq14 := q6ValueTable[byte(((bv10>>4)|((bv11&0x03)<<4))&0x3F)]
-		bq15 := q6ValueTable[byte((bv11>>2)&0x3F)]
-		cq0 := q6ValueTable[byte(cv0&0x3F)]
-		cq1 := q6ValueTable[byte(((cv0>>6)|((cv1&0x0F)<<2))&0x3F)]
-		cq2 := q6ValueTable[byte(((cv1>>4)|((cv2&0x03)<<4))&0x3F)]
-		cq3 := q6ValueTable[byte((cv2>>2)&0x3F)]
-		cq4 := q6ValueTable[byte(cv3&0x3F)]
-		cq5 := q6ValueTable[byte(((cv3>>6)|((cv4&0x0F)<<2))&0x3F)]
-		cq6 := q6ValueTable[byte(((cv4>>4)|((cv5&0x03)<<4))&0x3F)]
-		cq7 := q6ValueTable[byte((cv5>>2)&0x3F)]
-		cq8 := q6ValueTable[byte(cv6&0x3F)]
-		cq9 := q6ValueTable[byte(((cv6>>6)|((cv7&0x0F)<<2))&0x3F)]
-		cq10 := q6ValueTable[byte(((cv7>>4)|((cv8&0x03)<<4))&0x3F)]
-		cq11 := q6ValueTable[byte((cv8>>2)&0x3F)]
-		cq12 := q6ValueTable[byte(cv9&0x3F)]
-		cq13 := q6ValueTable[byte(((cv9>>6)|((cv10&0x0F)<<2))&0x3F)]
-		cq14 := q6ValueTable[byte(((cv10>>4)|((cv11&0x03)<<4))&0x3F)]
-		cq15 := q6ValueTable[byte((cv11>>2)&0x3F)]
-		a0 += aq0*x0 + aq4*x4 + aq8*x8 + aq12*x12
-		a1 += aq1*x1 + aq5*x5 + aq9*x9 + aq13*x13
-		a2 += aq2*x2 + aq6*x6 + aq10*x10 + aq14*x14
-		a3 += aq3*x3 + aq7*x7 + aq11*x11 + aq15*x15
-		b0 += bq0*x0 + bq4*x4 + bq8*x8 + bq12*x12
-		b1 += bq1*x1 + bq5*x5 + bq9*x9 + bq13*x13
-		b2 += bq2*x2 + bq6*x6 + bq10*x10 + bq14*x14
-		b3 += bq3*x3 + bq7*x7 + bq11*x11 + bq15*x15
-		c0 += cq0*x0 + cq4*x4 + cq8*x8 + cq12*x12
-		c1 += cq1*x1 + cq5*x5 + cq9*x9 + cq13*x13
-		c2 += cq2*x2 + cq6*x6 + cq10*x10 + cq14*x14
-		c3 += cq3*x3 + cq7*x7 + cq11*x11 + cq15*x15
+		av0 := uint32(a[base]) | uint32(a[base+1])<<8 | uint32(a[base+2])<<16
+		av1 := uint32(a[base+3]) | uint32(a[base+4])<<8 | uint32(a[base+5])<<16
+		av2 := uint32(a[base+6]) | uint32(a[base+7])<<8 | uint32(a[base+8])<<16
+		av3 := uint32(a[base+9]) | uint32(a[base+10])<<8 | uint32(a[base+11])<<16
+		bv0 := uint32(b[base]) | uint32(b[base+1])<<8 | uint32(b[base+2])<<16
+		bv1 := uint32(b[base+3]) | uint32(b[base+4])<<8 | uint32(b[base+5])<<16
+		bv2 := uint32(b[base+6]) | uint32(b[base+7])<<8 | uint32(b[base+8])<<16
+		bv3 := uint32(b[base+9]) | uint32(b[base+10])<<8 | uint32(b[base+11])<<16
+		cv0 := uint32(c[base]) | uint32(c[base+1])<<8 | uint32(c[base+2])<<16
+		cv1 := uint32(c[base+3]) | uint32(c[base+4])<<8 | uint32(c[base+5])<<16
+		cv2 := uint32(c[base+6]) | uint32(c[base+7])<<8 | uint32(c[base+8])<<16
+		cv3 := uint32(c[base+9]) | uint32(c[base+10])<<8 | uint32(c[base+11])<<16
+		ap0, ap1 := av0&0x0FFF, av0>>12
+		ap2, ap3 := av1&0x0FFF, av1>>12
+		ap4, ap5 := av2&0x0FFF, av2>>12
+		ap6, ap7 := av3&0x0FFF, av3>>12
+		bp0, bp1 := bv0&0x0FFF, bv0>>12
+		bp2, bp3 := bv1&0x0FFF, bv1>>12
+		bp4, bp5 := bv2&0x0FFF, bv2>>12
+		bp6, bp7 := bv3&0x0FFF, bv3>>12
+		cp0, cp1 := cv0&0x0FFF, cv0>>12
+		cp2, cp3 := cv1&0x0FFF, cv1>>12
+		cp4, cp5 := cv2&0x0FFF, cv2>>12
+		cp6, cp7 := cv3&0x0FFF, cv3>>12
+		a0 += q6PairLo[ap0]*x0 + q6PairLo[ap2]*x4 + q6PairLo[ap4]*x8 + q6PairLo[ap6]*x12
+		a1 += q6PairHi[ap0]*x1 + q6PairHi[ap2]*x5 + q6PairHi[ap4]*x9 + q6PairHi[ap6]*x13
+		a2 += q6PairLo[ap1]*x2 + q6PairLo[ap3]*x6 + q6PairLo[ap5]*x10 + q6PairLo[ap7]*x14
+		a3 += q6PairHi[ap1]*x3 + q6PairHi[ap3]*x7 + q6PairHi[ap5]*x11 + q6PairHi[ap7]*x15
+		b0 += q6PairLo[bp0]*x0 + q6PairLo[bp2]*x4 + q6PairLo[bp4]*x8 + q6PairLo[bp6]*x12
+		b1 += q6PairHi[bp0]*x1 + q6PairHi[bp2]*x5 + q6PairHi[bp4]*x9 + q6PairHi[bp6]*x13
+		b2 += q6PairLo[bp1]*x2 + q6PairLo[bp3]*x6 + q6PairLo[bp5]*x10 + q6PairLo[bp7]*x14
+		b3 += q6PairHi[bp1]*x3 + q6PairHi[bp3]*x7 + q6PairHi[bp5]*x11 + q6PairHi[bp7]*x15
+		c0 += q6PairLo[cp0]*x0 + q6PairLo[cp2]*x4 + q6PairLo[cp4]*x8 + q6PairLo[cp6]*x12
+		c1 += q6PairHi[cp0]*x1 + q6PairHi[cp2]*x5 + q6PairHi[cp4]*x9 + q6PairHi[cp6]*x13
+		c2 += q6PairLo[cp1]*x2 + q6PairLo[cp3]*x6 + q6PairLo[cp5]*x10 + q6PairLo[cp7]*x14
+		c3 += q6PairHi[cp1]*x3 + q6PairHi[cp3]*x7 + q6PairHi[cp5]*x11 + q6PairHi[cp7]*x15
 	}
 	for ; i+7 < cols; i += 8 {
 		base := (i * 6) / 8
-		av0, av1, av2 := uint32(a[base]), uint32(a[base+1]), uint32(a[base+2])
-		av3, av4, av5 := uint32(a[base+3]), uint32(a[base+4]), uint32(a[base+5])
-		bv0, bv1, bv2 := uint32(b[base]), uint32(b[base+1]), uint32(b[base+2])
-		bv3, bv4, bv5 := uint32(b[base+3]), uint32(b[base+4]), uint32(b[base+5])
-		cv0, cv1, cv2 := uint32(c[base]), uint32(c[base+1]), uint32(c[base+2])
-		cv3, cv4, cv5 := uint32(c[base+3]), uint32(c[base+4]), uint32(c[base+5])
+		av0 := uint32(a[base]) | uint32(a[base+1])<<8 | uint32(a[base+2])<<16
+		av1 := uint32(a[base+3]) | uint32(a[base+4])<<8 | uint32(a[base+5])<<16
+		bv0 := uint32(b[base]) | uint32(b[base+1])<<8 | uint32(b[base+2])<<16
+		bv1 := uint32(b[base+3]) | uint32(b[base+4])<<8 | uint32(b[base+5])<<16
+		cv0 := uint32(c[base]) | uint32(c[base+1])<<8 | uint32(c[base+2])<<16
+		cv1 := uint32(c[base+3]) | uint32(c[base+4])<<8 | uint32(c[base+5])<<16
+		ap0, ap1 := av0&0x0FFF, av0>>12
+		ap2, ap3 := av1&0x0FFF, av1>>12
+		bp0, bp1 := bv0&0x0FFF, bv0>>12
+		bp2, bp3 := bv1&0x0FFF, bv1>>12
+		cp0, cp1 := cv0&0x0FFF, cv0>>12
+		cp2, cp3 := cv1&0x0FFF, cv1>>12
 		x0, x1, x2, x3 := x[i], x[i+1], x[i+2], x[i+3]
 		x4, x5, x6, x7 := x[i+4], x[i+5], x[i+6], x[i+7]
-		a0 += q6ValueTable[byte(av0&0x3F)]*x0 + q6ValueTable[byte(av3&0x3F)]*x4
-		a1 += q6ValueTable[byte(((av0>>6)|((av1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((av3>>6)|((av4&0x0F)<<2))&0x3F)]*x5
-		a2 += q6ValueTable[byte(((av1>>4)|((av2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((av4>>4)|((av5&0x03)<<4))&0x3F)]*x6
-		a3 += q6ValueTable[byte((av2>>2)&0x3F)]*x3 + q6ValueTable[byte((av5>>2)&0x3F)]*x7
-		b0 += q6ValueTable[byte(bv0&0x3F)]*x0 + q6ValueTable[byte(bv3&0x3F)]*x4
-		b1 += q6ValueTable[byte(((bv0>>6)|((bv1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((bv3>>6)|((bv4&0x0F)<<2))&0x3F)]*x5
-		b2 += q6ValueTable[byte(((bv1>>4)|((bv2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((bv4>>4)|((bv5&0x03)<<4))&0x3F)]*x6
-		b3 += q6ValueTable[byte((bv2>>2)&0x3F)]*x3 + q6ValueTable[byte((bv5>>2)&0x3F)]*x7
-		c0 += q6ValueTable[byte(cv0&0x3F)]*x0 + q6ValueTable[byte(cv3&0x3F)]*x4
-		c1 += q6ValueTable[byte(((cv0>>6)|((cv1&0x0F)<<2))&0x3F)]*x1 + q6ValueTable[byte(((cv3>>6)|((cv4&0x0F)<<2))&0x3F)]*x5
-		c2 += q6ValueTable[byte(((cv1>>4)|((cv2&0x03)<<4))&0x3F)]*x2 + q6ValueTable[byte(((cv4>>4)|((cv5&0x03)<<4))&0x3F)]*x6
-		c3 += q6ValueTable[byte((cv2>>2)&0x3F)]*x3 + q6ValueTable[byte((cv5>>2)&0x3F)]*x7
+		a0 += q6PairLo[ap0]*x0 + q6PairLo[ap2]*x4
+		a1 += q6PairHi[ap0]*x1 + q6PairHi[ap2]*x5
+		a2 += q6PairLo[ap1]*x2 + q6PairLo[ap3]*x6
+		a3 += q6PairHi[ap1]*x3 + q6PairHi[ap3]*x7
+		b0 += q6PairLo[bp0]*x0 + q6PairLo[bp2]*x4
+		b1 += q6PairHi[bp0]*x1 + q6PairHi[bp2]*x5
+		b2 += q6PairLo[bp1]*x2 + q6PairLo[bp3]*x6
+		b3 += q6PairHi[bp1]*x3 + q6PairHi[bp3]*x7
+		c0 += q6PairLo[cp0]*x0 + q6PairLo[cp2]*x4
+		c1 += q6PairHi[cp0]*x1 + q6PairHi[cp2]*x5
+		c2 += q6PairLo[cp1]*x2 + q6PairLo[cp3]*x6
+		c3 += q6PairHi[cp1]*x3 + q6PairHi[cp3]*x7
 	}
 	sa := (a0 + a1) + (a2 + a3)
 	sb := (b0 + b1) + (b2 + b3)

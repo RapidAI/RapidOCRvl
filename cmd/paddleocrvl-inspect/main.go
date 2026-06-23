@@ -38,6 +38,8 @@ type weightFile struct {
 	SHA256 string `json:"sha256"`
 }
 
+const maxInspectWeightFiles = 4096
+
 type inspectSummary struct {
 	ModelType    string                `json:"model_type"`
 	WeightFormat string                `json:"weight_format"`
@@ -259,14 +261,22 @@ func safetensorsFileBytes(dir string) int64 {
 func safetensorsFiles(dir string) []string {
 	seen := make(map[string]bool, 4)
 	var out []string
-	for _, pattern := range []string{"model.safetensors", "*.safetensors", "model.safetensors.index.json"} {
+	for _, pattern := range []string{"model.safetensors", "model.safetensors.index.json", "*.safetensors"} {
 		matches, _ := filepath.Glob(filepath.Join(dir, pattern))
 		for _, path := range matches {
 			if seen[path] {
 				continue
 			}
+			st, err := os.Stat(path)
+			if err != nil || !st.Mode().IsRegular() {
+				continue
+			}
 			seen[path] = true
 			out = append(out, path)
+			if len(out) >= maxInspectWeightFiles {
+				sort.Strings(out)
+				return out
+			}
 		}
 	}
 	sort.Strings(out)
@@ -278,6 +288,9 @@ func weightFiles(paths []string) []weightFile {
 	for _, path := range paths {
 		st, err := os.Stat(path)
 		if err != nil {
+			continue
+		}
+		if !st.Mode().IsRegular() {
 			continue
 		}
 		out = append(out, weightFile{Path: fileutil.Abs(path), Bytes: st.Size(), SHA256: fileutil.SHA256(path)})

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,12 +40,42 @@ type server struct {
 	maxNewLimit   int
 	maxInputLimit int
 	maxBatchSize  int
+	autoBatchSize int
+	autoBatchWait time.Duration
 	started       time.Time
 	concurrency   int
 	metrics       metrics
 	weightSHA256  string
 	backendSel    backend.Selection
 	cpuInfo       backend.CPUInfo
+	infer         inferenceFunc
+	batcher       *requestBatcher
+}
+
+type inferenceFunc func(context.Context, generateRequest, []int, []byte, model.GenerateOptions) (model.GenerateResult, error)
+
+type batchItem struct {
+	ctx  context.Context
+	req  generateRequest
+	done chan batchItemResult
+}
+
+type batchItemResult struct {
+	res generateResponse
+	err error
+}
+
+type requestBatcher struct {
+	s       *server
+	maxSize int
+	wait    time.Duration
+	ch      chan batchItem
+	stop    chan struct{}
+	once    sync.Once
+	closed  atomic.Bool
+	done    chan struct{}
+	procWG  sync.WaitGroup
+	procSem chan struct{}
 }
 
 type metrics struct {
@@ -63,6 +94,9 @@ type metrics struct {
 
 var contentTypeJSONHeader = []string{"application/json"}
 var okJSONBytes = []byte("{\"ok\":true}\n")
+
+const maxImagePayloadBytes = 128 << 20
+
 var adminSessionJSON = [4][]byte{
 	[]byte("{\"initialized\":false,\"authenticated\":false}\n"),
 	[]byte("{\"initialized\":true,\"authenticated\":false}\n"),
@@ -73,6 +107,8 @@ var errorBufferPool = sync.Pool{New: func() any {
 	buf := make([]byte, 0, 512)
 	return &buf
 }}
+
+const maxResponseBufferPoolCap = 4 << 10
 
 type generateRequest struct {
 	Prompt              string `json:"prompt"`
@@ -141,6 +177,8 @@ type statsResponse struct {
 	MaxNewLimit          int                          `json:"max_new_limit"`
 	MaxInputTokens       int                          `json:"max_input_tokens"`
 	MaxBatchSize         int                          `json:"max_batch_size"`
+	AutoBatchSize        int                          `json:"auto_batch_size"`
+	AutoBatchWaitMS      int64                        `json:"auto_batch_wait_ms"`
 	TimeoutSeconds       int64                        `json:"timeout_seconds"`
 	Quantization         string                       `json:"quantization"`
 	RequestedQuant       string                       `json:"requested_quant"`
@@ -228,13 +266,17 @@ func runServer(args []string, stop <-chan struct{}) error {
 	backendName := fs.String("backend", "cpu", "compute backend: cpu, vulkan, or auto")
 	addr := fs.String("addr", "127.0.0.1:8080", "HTTP listen address")
 	timeout := fs.Duration("timeout", 0, "per-request timeout; 0 disables")
+	readTimeout := fs.Duration("read-timeout", 60*time.Second, "maximum time to read the full request, including body; 0 disables")
+	idleTimeout := fs.Duration("idle-timeout", 120*time.Second, "maximum keep-alive idle time; 0 disables")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 30*time.Second, "graceful shutdown timeout")
 	requestLimit := fs.Int64("request-limit", 128<<20, "max request body bytes")
 	multipartMem := fs.Int64("multipart-memory", 32<<20, "max memory used while parsing multipart forms")
 	maxNewLimit := fs.Int("max-new-limit", 4096, "maximum max_new_tokens per request; 0 disables")
 	maxInputLimit := fs.Int("max-input-tokens", 0, "maximum prompt/input tokens per request; 0 disables")
 	maxBatchSize := fs.Int("max-batch-size", 0, "maximum /v1/batch request count; 0 disables")
-	concurrency := fs.Int("concurrency", 1, "max concurrent inference requests")
+	autoBatchSize := fs.Int("auto-batch-size", 2, "max concurrent /v1/generate requests to coalesce; 0 or 1 disables")
+	autoBatchWait := fs.Duration("auto-batch-wait", 2*time.Millisecond, "maximum wait to collect /v1/generate auto-batch requests")
+	concurrency := fs.Int("concurrency", defaultInferenceConcurrency(), "max concurrent inference requests")
 	gomaxprocs := fs.Int("gomaxprocs", 0, "set Go GOMAXPROCS; 0 keeps current value")
 	gcPercent := fs.Int("gc-percent", 0, "set Go GC percent; 0 keeps current value, -1 disables GC")
 	preloadVision := fs.Bool("preload-vision", false, "load vision weights at startup")
@@ -242,7 +284,7 @@ func runServer(args []string, stop <-chan struct{}) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := validateServerLimits(*concurrency, *maxBatchSize, *maxInputLimit, *requestLimit, *multipartMem); err != nil {
+	if err := validateServerLimits(*concurrency, *maxBatchSize, *autoBatchSize, *maxInputLimit, *requestLimit, *multipartMem, *timeout, *readTimeout, *idleTimeout, *shutdownTimeout, *autoBatchWait); err != nil {
 		return err
 	}
 	if _, err := backend.SetGOMAXPROCS(*gomaxprocs); err != nil {
@@ -275,11 +317,16 @@ func runServer(args []string, stop <-chan struct{}) error {
 			return err
 		}
 	}
+	admin := loadAdminState(*adminConfigPath)
+	if admin.loadErr != nil {
+		return admin.loadErr
+	}
+	effectiveAutoBatchSize := autoBatchSizeForConcurrency(*autoBatchSize, *concurrency)
 	s := &server{
 		rt:            rt,
 		tok:           tok,
 		taskIDs:       buildTaskIDs(tok),
-		admin:         loadAdminState(*adminConfigPath),
+		admin:         admin,
 		modelDir:      *modelDir,
 		timeout:       *timeout,
 		requestLimit:  *requestLimit,
@@ -287,12 +334,18 @@ func runServer(args []string, stop <-chan struct{}) error {
 		maxNewLimit:   *maxNewLimit,
 		maxInputLimit: *maxInputLimit,
 		maxBatchSize:  *maxBatchSize,
+		autoBatchSize: effectiveAutoBatchSize,
+		autoBatchWait: *autoBatchWait,
 		runSlots:      make(chan struct{}, *concurrency),
 		started:       time.Now(),
 		concurrency:   *concurrency,
 		weightSHA256:  fileutil.SHA256(rt.WeightPath()),
 		backendSel:    backendSel,
 		cpuInfo:       backend.CPU(),
+	}
+	if effectiveAutoBatchSize > 1 {
+		s.batcher = newRequestBatcher(s, effectiveAutoBatchSize, *autoBatchWait)
+		defer s.batcher.close()
 	}
 
 	mux := http.NewServeMux()
@@ -333,6 +386,8 @@ func runServer(args []string, stop <-chan struct{}) error {
 		Addr:              *addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       *readTimeout,
+		IdleTimeout:       *idleTimeout,
 	}
 	if err := serveWithShutdownStop(srv, *shutdownTimeout, stop); err != nil {
 		return err
@@ -340,12 +395,15 @@ func runServer(args []string, stop <-chan struct{}) error {
 	return nil
 }
 
-func validateServerLimits(concurrency, maxBatchSize, maxInputLimit int, requestLimit, multipartMem int64) error {
+func validateServerLimits(concurrency, maxBatchSize, autoBatchSize, maxInputLimit int, requestLimit, multipartMem int64, timeout, readTimeout, idleTimeout, shutdownTimeout, autoBatchWait time.Duration) error {
 	if concurrency < 1 {
 		return fmt.Errorf("-concurrency must be >= 1")
 	}
 	if maxBatchSize < 0 {
 		return fmt.Errorf("-max-batch-size must be >= 0")
+	}
+	if autoBatchSize < 0 {
+		return fmt.Errorf("-auto-batch-size must be >= 0")
 	}
 	if maxInputLimit < 0 {
 		return fmt.Errorf("-max-input-tokens must be >= 0")
@@ -356,7 +414,232 @@ func validateServerLimits(concurrency, maxBatchSize, maxInputLimit int, requestL
 	if multipartMem < 0 {
 		return fmt.Errorf("-multipart-memory must be >= 0")
 	}
+	if timeout < 0 {
+		return fmt.Errorf("-timeout must be >= 0")
+	}
+	if readTimeout < 0 {
+		return fmt.Errorf("-read-timeout must be >= 0")
+	}
+	if idleTimeout < 0 {
+		return fmt.Errorf("-idle-timeout must be >= 0")
+	}
+	if shutdownTimeout < 0 {
+		return fmt.Errorf("-shutdown-timeout must be >= 0")
+	}
+	if autoBatchWait < 0 {
+		return fmt.Errorf("-auto-batch-wait must be >= 0")
+	}
 	return nil
+}
+
+func defaultInferenceConcurrency() int {
+	if runtime.NumCPU() < 2 {
+		return 1
+	}
+	return 2
+}
+
+func autoBatchSizeForConcurrency(autoBatchSize, concurrency int) int {
+	if autoBatchSize <= 1 || concurrency <= 1 {
+		return 0
+	}
+	return autoBatchSize
+}
+
+func newRequestBatcher(s *server, maxSize int, wait time.Duration) *requestBatcher {
+	b := &requestBatcher{
+		s:       s,
+		maxSize: maxSize,
+		wait:    wait,
+		ch:      make(chan batchItem, maxSize*4),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		procSem: make(chan struct{}, batchProcessLimit(s, maxSize)),
+	}
+	go b.loop()
+	return b
+}
+
+func batchProcessLimit(s *server, batchSize int) int {
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	concurrency := s.effectiveConcurrency()
+	limit := (concurrency + batchSize - 1) / batchSize
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
+
+func (b *requestBatcher) submit(ctx context.Context, req generateRequest) (generateResponse, error) {
+	if b.closed.Load() {
+		return generateResponse{}, context.Canceled
+	}
+	item := batchItem{ctx: ctx, req: req, done: make(chan batchItemResult, 1)}
+	select {
+	case b.ch <- item:
+	case <-ctx.Done():
+		return generateResponse{}, ctx.Err()
+	case <-b.stop:
+		return generateResponse{}, context.Canceled
+	}
+	select {
+	case res := <-item.done:
+		return res.res, res.err
+	case <-ctx.Done():
+		return generateResponse{}, ctx.Err()
+	case <-b.stop:
+		return generateResponse{}, context.Canceled
+	}
+}
+
+func (b *requestBatcher) close() {
+	b.once.Do(func() {
+		b.closed.Store(true)
+		close(b.stop)
+	})
+	<-b.done
+}
+
+func (b *requestBatcher) loop() {
+	defer func() {
+		b.procWG.Wait()
+		close(b.done)
+	}()
+	for {
+		select {
+		case first := <-b.ch:
+			batch := b.collect(first)
+			if !b.acquireProcessSlot() {
+				b.completeBatch(batch, context.Canceled)
+				return
+			}
+			b.procWG.Add(1)
+			go func() {
+				defer b.procWG.Done()
+				defer b.releaseProcessSlot()
+				b.process(batch)
+			}()
+		case <-b.stop:
+			return
+		}
+	}
+}
+
+func (b *requestBatcher) acquireProcessSlot() bool {
+	select {
+	case b.procSem <- struct{}{}:
+		return true
+	case <-b.stop:
+		return false
+	}
+}
+
+func (b *requestBatcher) releaseProcessSlot() {
+	<-b.procSem
+}
+
+func (b *requestBatcher) collect(first batchItem) []batchItem {
+	batch := make([]batchItem, 0, b.maxSize)
+	batch = append(batch, first)
+	if b.maxSize <= 1 {
+		return batch
+	}
+	if b.wait <= 0 {
+		return b.collectAvailable(batch)
+	}
+	timer := time.NewTimer(b.wait)
+	defer timer.Stop()
+	for len(batch) < b.maxSize {
+		select {
+		case item := <-b.ch:
+			batch = append(batch, item)
+		case <-timer.C:
+			return batch
+		case <-b.stop:
+			return batch
+		}
+	}
+	return batch
+}
+
+func (b *requestBatcher) collectAvailable(batch []batchItem) []batchItem {
+	for len(batch) < b.maxSize {
+		select {
+		case item := <-b.ch:
+			batch = append(batch, item)
+		default:
+			return batch
+		}
+	}
+	return batch
+}
+
+func (b *requestBatcher) process(batch []batchItem) {
+	if len(batch) == 0 {
+		return
+	}
+	select {
+	case <-b.stop:
+		b.completeBatch(batch, context.Canceled)
+		return
+	default:
+	}
+	batch = b.cancelInactive(batch)
+	if len(batch) == 0 {
+		return
+	}
+	b.s.metrics.batches.Add(1)
+	b.s.metrics.batchItems.Add(int64(len(batch)))
+	b.s.metrics.queued.Add(int64(len(batch)))
+	var wg sync.WaitGroup
+	workers := min(len(batch), b.s.effectiveConcurrency())
+	jobs := make(chan int)
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				item := batch[i]
+				select {
+				case <-b.stop:
+					item.done <- batchItemResult{err: context.Canceled}
+					continue
+				case <-item.ctx.Done():
+					item.done <- batchItemResult{err: item.ctx.Err()}
+					continue
+				default:
+				}
+				res, err := b.s.runBatchItem(item.ctx, item.req)
+				item.done <- batchItemResult{res: res, err: err}
+			}
+		}()
+	}
+	for i := range batch {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+func (b *requestBatcher) cancelInactive(batch []batchItem) []batchItem {
+	active := batch[:0]
+	for _, item := range batch {
+		select {
+		case <-item.ctx.Done():
+			item.done <- batchItemResult{err: item.ctx.Err()}
+		default:
+			active = append(active, item)
+		}
+	}
+	return active
+}
+
+func (b *requestBatcher) completeBatch(batch []batchItem, err error) {
+	for _, item := range batch {
+		item.done <- batchItemResult{err: err}
+	}
 }
 
 func serveWithShutdown(srv *http.Server, timeout time.Duration) error {
@@ -419,13 +702,14 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) readyState() (int, readyResponse) {
-	if s.rt == nil || s.tok == nil || s.runSlots == nil || s.concurrency < 1 {
+	if s.rt == nil || s.tok == nil || s.runSlots == nil {
 		return http.StatusServiceUnavailable, readyResponse{
 			Status: "not_ready",
 			Reason: "model, tokenizer, or inference slots not initialized",
 		}
 	}
 	inFlight := len(s.runSlots)
+	concurrency := s.effectiveConcurrency()
 	body := readyResponse{
 		Status:         "ready",
 		Quantization:   s.rt.Quantization(),
@@ -433,84 +717,15 @@ func (s *server) readyState() (int, readyResponse) {
 		WeightSource:   s.rt.WeightSource(),
 		Backend:        s.rt.Backend(),
 		VisionLoaded:   s.rt.VisionLoaded(),
-		Concurrency:    s.concurrency,
+		Concurrency:    concurrency,
 		InFlight:       inFlight,
-		AvailableSlots: s.concurrency - inFlight,
+		AvailableSlots: concurrency - inFlight,
 	}
 	return http.StatusOK, body
 }
 
 func (s *server) stats(w http.ResponseWriter, r *http.Request) {
-	cfg := s.rt.Config()
-	inFlight := len(s.runSlots)
-	cmdPlan := s.rt.VulkanCommandPlan()
-	cmdPlanErr := backend.ValidateVulkanCommandPlan(cmdPlan)
-	writeJSON(w, http.StatusOK, statsResponse{
-		Status:               "ok",
-		UptimeSeconds:        int64(time.Since(s.started).Seconds()),
-		Concurrency:          s.concurrency,
-		InFlight:             inFlight,
-		AvailableSlots:       s.concurrency - inFlight,
-		RequestLimit:         s.requestLimit,
-		MultipartMemory:      s.multipartMem,
-		MaxNewLimit:          s.maxNewLimit,
-		MaxInputTokens:       s.maxInputLimit,
-		MaxBatchSize:         s.maxBatchSize,
-		TimeoutSeconds:       int64(s.timeout.Seconds()),
-		Quantization:         s.rt.Quantization(),
-		RequestedQuant:       s.rt.RequestedQuantization(),
-		WeightPath:           s.rt.WeightPath(),
-		WeightSource:         s.rt.WeightSource(),
-		WeightSHA256:         s.weightSHA256,
-		Weights:              s.rt.WeightStats(),
-		LoadStats:            s.rt.LoadStats(),
-		Backend:              s.rt.Backend(),
-		VisionLoaded:         s.rt.VisionLoaded(),
-		Backends:             s.backendSel,
-		VulkanPlans:          s.rt.VulkanPlans(),
-		VulkanPlanSummary:    s.rt.VulkanPlanSummary(),
-		VulkanExecutionGraph: s.rt.VulkanExecutionGraph(),
-		VulkanPipelinePlan:   s.rt.VulkanPipelinePlan(),
-		VulkanCommandPlan:    cmdPlan,
-		VulkanCommandPlanOK:  cmdPlanErr == "",
-		VulkanCommandPlanErr: cmdPlanErr,
-		CPU:                  s.cpuInfo,
-		Memory:               backend.Memory(),
-		Requests: statsRequests{
-			Queued:          s.metrics.queued.Load(),
-			Started:         s.metrics.started.Load(),
-			Succeeded:       s.metrics.succeeded.Load(),
-			Failed:          s.metrics.failed.Load(),
-			Canceled:        s.metrics.canceled.Load(),
-			Batches:         s.metrics.batches.Load(),
-			BatchItems:      s.metrics.batchItems.Load(),
-			GeneratedTokens: s.metrics.generatedTokens.Load(),
-			AvgLatencyMS:    s.avgLatencyMillis(),
-			AvgQueueWaitMS:  s.avgQueueWaitMillis(),
-			LastError:       s.lastError(),
-		},
-		Model: statsModel{
-			VocabSize: cfg.VocabSize,
-			Text: statsTextModel{
-				Layers:  cfg.NumHiddenLayers,
-				Hidden:  cfg.HiddenSize,
-				Heads:   cfg.NumAttentionHeads,
-				KVHeads: cfg.NumKeyValueHeads,
-				HeadDim: cfg.HeadDim,
-			},
-			Vision: statsVisionModel{
-				Layers: cfg.VisionConfig.NumHiddenLayers,
-				Hidden: cfg.VisionConfig.HiddenSize,
-				Heads:  cfg.VisionConfig.NumAttentionHeads,
-				Patch:  cfg.VisionConfig.PatchSize,
-			},
-		},
-		Cache: statsCache{
-			TaskPrompts: len(s.taskIDs),
-			Runtime:     s.rt.CacheStats(),
-			Tokenizer:   s.tok.CacheStats(),
-		},
-	})
+	writeJSON(w, http.StatusOK, s.statsSnapshot())
 }
 
 func (s *server) generateJSON(w http.ResponseWriter, r *http.Request) {
@@ -523,12 +738,19 @@ func (s *server) generateJSON(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := s.requestContext(r)
 	defer cancel()
-	res, err := s.run(ctx, req)
+	res, err := s.runGenerate(ctx, req)
 	if err != nil {
 		writeRunError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) runGenerate(ctx context.Context, req generateRequest) (generateResponse, error) {
+	if s.batcher != nil {
+		return s.batcher.submit(ctx, req)
+	}
+	return s.run(ctx, req)
 }
 
 func (s *server) batchJSON(w http.ResponseWriter, r *http.Request) {
@@ -555,13 +777,7 @@ func (s *server) batchJSON(w http.ResponseWriter, r *http.Request) {
 	defer cancelBatch()
 	s.metrics.queued.Add(int64(len(req.Requests)))
 	if len(req.Requests) == 1 {
-		if err := s.acquire(ctx); err != nil {
-			s.recordFailure(err)
-			writeRunError(w, fmt.Errorf("request 0: %w", err))
-			return
-		}
-		res, err := s.runAcquired(ctx, req.Requests[0])
-		s.release()
+		res, err := s.runBatchItem(ctx, req.Requests[0])
 		if err != nil {
 			writeRunError(w, fmt.Errorf("request 0: %w", err))
 			return
@@ -573,22 +789,14 @@ func (s *server) batchJSON(w http.ResponseWriter, r *http.Request) {
 	errs := make([]error, len(req.Requests))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
-	workers := min(len(req.Requests), s.concurrency)
-	if workers < 1 {
-		workers = 1
-	}
+	workers := min(len(req.Requests), s.effectiveConcurrency())
 	for worker := 0; worker < workers; worker++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for i := range jobs {
 				item := req.Requests[i]
-				if err := s.acquire(ctx); err != nil {
-					s.recordFailure(err)
-					errs[i] = err
-					continue
-				}
-				res, err := s.runAcquired(ctx, item)
-				s.release()
+				res, err := s.runBatchItem(ctx, item)
 				if err != nil {
 					errs[i] = err
 					cancelBatch()
@@ -596,7 +804,6 @@ func (s *server) batchJSON(w http.ResponseWriter, r *http.Request) {
 				}
 				responses[i] = res
 			}
-			wg.Done()
 		}()
 	}
 sendJobs:
@@ -656,9 +863,9 @@ func (s *server) ocrMultipart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	data, err := io.ReadAll(file)
+	data, err := readAllLimited(file, maxImagePayloadBytes, "image")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	task := formDefault(r, "task", "ocr")
@@ -673,7 +880,7 @@ func (s *server) ocrMultipart(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := s.requestContext(r)
 	defer cancel()
-	res, err := s.run(ctx, req)
+	res, err := s.runGenerate(ctx, req)
 	if err != nil {
 		writeRunError(w, err)
 		return
@@ -690,6 +897,10 @@ func (s *server) requestContext(r *http.Request) (context.Context, context.Cance
 
 func (s *server) run(ctx context.Context, req generateRequest) (generateResponse, error) {
 	s.metrics.queued.Add(1)
+	return s.runBatchItem(ctx, req)
+}
+
+func (s *server) runBatchItem(ctx context.Context, req generateRequest) (generateResponse, error) {
 	if err := s.acquire(ctx); err != nil {
 		s.recordFailure(err)
 		return generateResponse{}, err
@@ -710,6 +921,10 @@ func (s *server) runAcquired(ctx context.Context, req generateRequest) (generate
 	}
 	ids, err := s.inputIDs(&req, hasImage)
 	if err != nil {
+		s.recordFailure(err)
+		return generateResponse{}, err
+	}
+	if err := validateRequestTokenIDs(ids); err != nil {
 		s.recordFailure(err)
 		return generateResponse{}, err
 	}
@@ -742,14 +957,7 @@ func (s *server) runAcquired(ctx context.Context, req generateRequest) (generate
 		s.recordFailure(err)
 		return generateResponse{}, err
 	}
-	var res model.GenerateResult
-	if len(imageData) > 0 {
-		res, err = s.rt.GenerateWithImageBytesOptions(ctx, ids, imageData, opts)
-	} else if req.ImagePath != "" {
-		res, err = s.rt.GenerateWithImageOptions(ctx, ids, req.ImagePath, opts)
-	} else {
-		res, err = s.rt.GenerateWithOptions(ctx, ids, opts)
-	}
+	res, err := s.inferModel(ctx, req, ids, imageData, opts)
 	if err != nil {
 		s.recordFailure(err)
 		return generateResponse{}, err
@@ -763,6 +971,28 @@ func (s *server) runAcquired(ctx context.Context, req generateRequest) (generate
 	s.metrics.generatedTokens.Add(int64(resp.GeneratedTokens))
 	s.metrics.latencyNanos.Add(time.Since(started).Nanoseconds())
 	return resp, nil
+}
+
+func (s *server) inferModel(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+	if s.infer != nil {
+		return s.infer(ctx, req, ids, imageData, opts)
+	}
+	if len(imageData) > 0 {
+		return s.rt.GenerateWithImageBytesOptions(ctx, ids, imageData, opts)
+	}
+	if req.ImagePath != "" {
+		return s.rt.GenerateWithImageOptions(ctx, ids, req.ImagePath, opts)
+	}
+	return s.rt.GenerateWithOptions(ctx, ids, opts)
+}
+
+func validateRequestTokenIDs(ids []int) error {
+	for _, id := range ids {
+		if id < 0 {
+			return fmt.Errorf("input tokens must not contain negative ids")
+		}
+	}
+	return nil
 }
 
 func decodeTokenRange(tokens []int, promptTokens int, generatedOnly bool) []int {
@@ -793,19 +1023,18 @@ func (s *server) recordFailure(err error) {
 }
 
 func (s *server) avgLatencyMillis() int64 {
-	ok := s.metrics.succeeded.Load()
-	if ok == 0 {
-		return 0
-	}
-	return s.metrics.latencyNanos.Load() / ok / int64(time.Millisecond)
+	return avgMillis(s.metrics.latencyNanos.Load(), s.metrics.succeeded.Load())
 }
 
 func (s *server) avgQueueWaitMillis() int64 {
-	started := s.metrics.started.Load()
-	if started == 0 {
+	return avgMillis(s.metrics.queueWaitNanos.Load(), s.metrics.started.Load())
+}
+
+func avgMillis(totalNanos, count int64) int64 {
+	if count == 0 {
 		return 0
 	}
-	return s.metrics.queueWaitNanos.Load() / started / int64(time.Millisecond)
+	return totalNanos / count / int64(time.Millisecond)
 }
 
 func (s *server) lastError() string {
@@ -837,6 +1066,16 @@ func (s *server) release() {
 	<-s.runSlots
 }
 
+func (s *server) effectiveConcurrency() int {
+	if s.concurrency > 0 {
+		return s.concurrency
+	}
+	if s.runSlots != nil && cap(s.runSlots) > 0 {
+		return cap(s.runSlots)
+	}
+	return 1
+}
+
 func requestHasImage(req *generateRequest) bool {
 	return req.ImagePath != "" || req.ImageBase64 != "" || len(req.imageData) > 0
 }
@@ -860,13 +1099,68 @@ func imageBytes(req *generateRequest) ([]byte, error) {
 			data = data[i+1:]
 		}
 	}
-	raw := make([]byte, base64.StdEncoding.DecodedLen(len(data)))
+	decodedLen := base64DecodedLen(data)
+	if decodedLen > maxImagePayloadBytes {
+		decodedLen = base64DecodedLenIgnoringCRLF(data)
+	}
+	if decodedLen > maxImagePayloadBytes {
+		return nil, fmt.Errorf("image_base64 too large: decoded size exceeds %d bytes", maxImagePayloadBytes)
+	}
+	raw := make([]byte, decodedLen)
 	src := unsafe.Slice(unsafe.StringData(data), len(data))
 	n, err := base64.StdEncoding.Decode(raw, src)
 	if err != nil {
 		return nil, fmt.Errorf("decode image_base64: %w", err)
 	}
+	if n > maxImagePayloadBytes {
+		return nil, fmt.Errorf("image_base64 too large: decoded size exceeds %d bytes", maxImagePayloadBytes)
+	}
 	return raw[:n], nil
+}
+
+func base64DecodedLen(s string) int {
+	n := base64.StdEncoding.DecodedLen(len(s))
+	for len(s) > 0 && s[len(s)-1] == '=' {
+		n--
+		s = s[:len(s)-1]
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func base64DecodedLenIgnoringCRLF(s string) int {
+	encoded := 0
+	padding := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\r', '\n':
+			continue
+		case '=':
+			encoded++
+			padding++
+		default:
+			encoded++
+			padding = 0
+		}
+	}
+	n := base64.StdEncoding.DecodedLen(encoded) - padding
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func readAllLimited(r io.Reader, maxBytes int64, label string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s too large: exceeds %d bytes", label, maxBytes)
+	}
+	return data, nil
 }
 
 func (s *server) inputIDs(req *generateRequest, hasImage bool) ([]int, error) {
@@ -1048,8 +1342,7 @@ func writeOKErrorJSON(w http.ResponseWriter, msg string) {
 	buf = strconv.AppendQuote(buf, msg)
 	buf = append(buf, "}\n"...)
 	_, _ = w.Write(buf)
-	*p = buf
-	errorBufferPool.Put(p)
+	putResponseBuffer(p, buf)
 }
 
 func writeAdminSessionJSON(w http.ResponseWriter, initialized, authenticated bool) {
@@ -1091,8 +1384,7 @@ func writeHealthJSON(w http.ResponseWriter, res healthResponse) {
 		buf = append(buf, "false}\n"...)
 	}
 	_, _ = w.Write(buf)
-	*p = buf
-	errorBufferPool.Put(p)
+	putResponseBuffer(p, buf)
 }
 
 func writeReadyJSON(w http.ResponseWriter, status int, res readyResponse) {
@@ -1142,8 +1434,7 @@ func writeReadyJSON(w http.ResponseWriter, status int, res readyResponse) {
 	}
 	buf = append(buf, "}\n"...)
 	_, _ = w.Write(buf)
-	*p = buf
-	errorBufferPool.Put(p)
+	putResponseBuffer(p, buf)
 }
 
 func decodeJSON(r io.Reader, v any) error {
@@ -1174,10 +1465,15 @@ func writeError(w http.ResponseWriter, status int, err error) {
 	buf = strconv.AppendQuote(buf, msg)
 	buf = append(buf, "}\n"...)
 	_, _ = w.Write(buf)
-	if cap(buf) <= 512 {
-		*p = buf[:0]
-		errorBufferPool.Put(p)
+	putResponseBuffer(p, buf)
+}
+
+func putResponseBuffer(p *[]byte, buf []byte) {
+	if cap(buf) > maxResponseBufferPoolCap {
+		return
 	}
+	*p = buf[:0]
+	errorBufferPool.Put(p)
 }
 
 func writeRunError(w http.ResponseWriter, err error) {

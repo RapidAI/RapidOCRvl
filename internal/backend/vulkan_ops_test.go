@@ -2,9 +2,27 @@ package backend
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func benchmarkVulkanShape(quant string) VulkanModelShape {
+	return VulkanModelShape{
+		Quant:               quant,
+		VocabSize:           32000,
+		HiddenSize:          2048,
+		IntermediateSize:    8192,
+		NumAttentionHeads:   16,
+		NumKeyValueHeads:    4,
+		HeadDim:             128,
+		VisionHiddenSize:    1024,
+		VisionIntermediate:  4096,
+		VisionPatchElements: 588,
+		TextLayers:          24,
+		VisionLayers:        24,
+	}
+}
 
 func TestDefaultVulkanComputeRegistersOptimizedKernels(t *testing.T) {
 	c := DefaultVulkanCompute()
@@ -74,6 +92,17 @@ func TestPlanVulkanKernel(t *testing.T) {
 	if plan.WeightByte != wantBytes {
 		t.Fatalf("weight bytes=%d want %d", plan.WeightByte, wantBytes)
 	}
+
+	plan, ok = PlanVulkanKernel(VulkanOpFusedSwiGLU, "q8", 1024, 2048)
+	if !ok {
+		t.Fatal("expected fused swiglu plan")
+	}
+	if plan.Rows != 1024 || plan.GroupsX != 512 || plan.OutputBytes != 512*4 {
+		t.Fatalf("fused swiglu plan=%+v", plan)
+	}
+	if plan.WeightByte != int64(1024*2048+1024*4) || plan.InputBytes != 2048*4 {
+		t.Fatalf("fused swiglu bytes=%+v", plan)
+	}
 }
 
 func TestVulkanPipelineKeyReuse(t *testing.T) {
@@ -121,8 +150,48 @@ func TestPlanVulkanKernelRejectsInvalidShape(t *testing.T) {
 	if _, ok := PlanVulkanKernel(VulkanOpMatVec, "q8", 0, 1024); ok {
 		t.Fatal("expected invalid shape rejection")
 	}
+	if _, ok := PlanVulkanKernel(VulkanOpMatVec, "q8", maxUint32Int()+1, 1024); ok {
+		t.Fatal("expected uint32 push constant overflow rejection")
+	}
+	if _, ok := PlanVulkanKernel(VulkanOpMatVec, "f32", maxInt(), 2); ok {
+		t.Fatal("expected byte size overflow rejection")
+	}
+	if _, ok := PlanVulkanKernel(VulkanOpFusedSwiGLU, "q8", 513, 1024); ok {
+		t.Fatal("expected odd fused swiglu rows rejection")
+	}
 	if _, ok := PlanVulkanKernel("unknown", "q8", 1, 1024); ok {
 		t.Fatal("expected unknown op rejection")
+	}
+}
+
+func TestVulkanModelPlansRejectsOverflowShape(t *testing.T) {
+	plans := VulkanModelPlans(VulkanModelShape{
+		Quant:             "q4",
+		VocabSize:         32000,
+		HiddenSize:        2048,
+		IntermediateSize:  maxInt(),
+		NumAttentionHeads: 16,
+		NumKeyValueHeads:  4,
+		HeadDim:           128,
+		TextLayers:        1,
+	})
+	if len(plans) != 0 {
+		t.Fatalf("plans=%+v want none for overflow shape", plans)
+	}
+	plans = VulkanModelPlans(VulkanModelShape{
+		Quant:             "q4",
+		VocabSize:         32000,
+		HiddenSize:        2048,
+		IntermediateSize:  8192,
+		NumAttentionHeads: 16,
+		NumKeyValueHeads:  4,
+		HeadDim:           128,
+		TextLayers:        maxInt(),
+	})
+	for _, p := range plans {
+		if p.Repeat == maxInt() {
+			t.Fatalf("overflow repeat plan retained: %+v", p)
+		}
 	}
 }
 
@@ -482,6 +551,18 @@ func TestVulkanModelPlanSummary(t *testing.T) {
 		t.Fatal("expected bad timeline signal")
 	}
 	broken = cmdPlan
+	broken.Pipelines = append([]VulkanPipelinePlan(nil), cmdPlan.Pipelines...)
+	broken.Pipelines[1] = broken.Pipelines[0]
+	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
+		t.Fatal("expected duplicate pipeline")
+	}
+	broken = cmdPlan
+	broken.Pipelines = append([]VulkanPipelinePlan(nil), cmdPlan.Pipelines...)
+	broken.Pipelines[1].CacheKeyHash = broken.Pipelines[0].CacheKeyHash
+	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
+		t.Fatal("expected duplicate pipeline cache key")
+	}
+	broken = cmdPlan
 	broken.Allocations = append([]VulkanBufferAllocation(nil), cmdPlan.Allocations...)
 	broken.Allocations[0].AlignedBytes = broken.Allocations[0].Bytes - 1
 	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
@@ -504,6 +585,159 @@ func TestVulkanModelPlanSummary(t *testing.T) {
 	broken.DispatchBatches[0].PipelineIndex = len(cmdPlan.Pipelines)
 	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
 		t.Fatal("expected bad dispatch batch")
+	}
+	broken = cmdPlan
+	broken.Uploads = append([]VulkanBufferTransfer(nil), cmdPlan.Uploads...)
+	broken.Uploads[0].Direction = "device_to_host"
+	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
+		t.Fatal("expected bad upload transfer")
+	}
+	broken = cmdPlan
+	broken.Readbacks = append([]VulkanBufferTransfer(nil), cmdPlan.Readbacks...)
+	broken.Readbacks[0].Bytes++
+	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
+		t.Fatal("expected bad readback transfer")
+	}
+	broken = cmdPlan
+	broken.UploadBytes++
+	if reason := ValidateVulkanCommandPlan(broken); reason == "" {
+		t.Fatal("expected bad transfer byte total")
+	}
+}
+
+func TestVulkanFusedSwiGLUCommandResources(t *testing.T) {
+	shape := VulkanModelShape{
+		Quant:               "q4",
+		VocabSize:           32000,
+		HiddenSize:          2048,
+		IntermediateSize:    8192,
+		NumAttentionHeads:   16,
+		NumKeyValueHeads:    4,
+		HeadDim:             128,
+		VisionHiddenSize:    1024,
+		VisionIntermediate:  4096,
+		VisionPatchElements: 588,
+		TextLayers:          24,
+		VisionLayers:        24,
+	}
+	plans := VulkanModelPlans(shape)
+	cmdPlan := VulkanCommandPlanFromPlans(nil, VulkanPipelinePlanFromPlans(nil, plans), plans)
+	if reason := ValidateVulkanCommandPlan(cmdPlan); reason != "" {
+		t.Fatalf("invalid command plan: %s", reason)
+	}
+
+	planByName := map[string]VulkanPlan{}
+	for _, p := range plans {
+		planByName[p.Name] = p
+	}
+	cmdByName := map[string]VulkanCommand{}
+	for _, c := range cmdPlan.Commands {
+		cmdByName[c.Name] = c
+	}
+
+	assertDescriptorWritesMatchResources := func(name string, cmd VulkanCommand) {
+		t.Helper()
+		if len(cmd.DescriptorWrites) != len(cmd.Resources) {
+			t.Fatalf("%s descriptor writes=%+v resources=%+v", name, cmd.DescriptorWrites, cmd.Resources)
+		}
+		if cmd.DescriptorSet.DescriptorCount != len(cmd.Resources) {
+			t.Fatalf("%s descriptor set=%+v resources=%+v", name, cmd.DescriptorSet, cmd.Resources)
+		}
+		for i, w := range cmd.DescriptorWrites {
+			r := cmd.Resources[i]
+			if w.Binding != r.Binding || w.ResourceName != r.Name || w.RangeBytes != r.Bytes || w.Access != r.Access || w.DescriptorType != "storage_buffer" || w.OffsetBytes != 0 {
+				t.Fatalf("%s descriptor write=%+v resource=%+v", name, w, r)
+			}
+		}
+	}
+
+	textPlan := planByName["text.mlp_gate_up"]
+	textCmd := cmdByName["text.mlp_gate_up"]
+	if textPlan.Kernel.Op != VulkanOpFusedSwiGLU || textPlan.Quant != "q4" {
+		t.Fatalf("text fused swiglu plan=%+v", textPlan)
+	}
+	if textPlan.GroupsX != shape.IntermediateSize || textPlan.OutputBytes != int64(shape.IntermediateSize)*4 {
+		t.Fatalf("text fused swiglu output geometry=%+v", textPlan)
+	}
+	if len(textCmd.Resources) != 4 {
+		t.Fatalf("text fused swiglu resources=%+v", textCmd.Resources)
+	}
+	if textCmd.Resources[0].Name != "x" || textCmd.Resources[0].Bytes != textPlan.InputBytes || textCmd.Resources[0].Access != "readonly" {
+		t.Fatalf("text fused swiglu input=%+v plan=%+v", textCmd.Resources[0], textPlan)
+	}
+	if textCmd.Resources[1].Name != "w" || textCmd.Resources[1].Bytes != textPlan.WeightByte || textCmd.Resources[1].Access != "readonly" {
+		t.Fatalf("text fused swiglu weight=%+v plan=%+v", textCmd.Resources[1], textPlan)
+	}
+	if textCmd.Resources[2].Name != "scale" || textCmd.Resources[2].Bytes != int64(textPlan.Rows)*4 || textCmd.Resources[2].Access != "readonly" {
+		t.Fatalf("text fused swiglu scale=%+v plan=%+v", textCmd.Resources[2], textPlan)
+	}
+	if textCmd.Resources[3].Name != "out" || textCmd.Resources[3].Bytes != textPlan.OutputBytes || textCmd.Resources[3].Access != "writeonly" {
+		t.Fatalf("text fused swiglu output=%+v plan=%+v", textCmd.Resources[3], textPlan)
+	}
+	assertDescriptorWritesMatchResources("text fused swiglu", textCmd)
+
+	visionPlan := planByName["vision.mlp_gate_up"]
+	visionCmd := cmdByName["vision.mlp_gate_up"]
+	if visionPlan.Kernel.Op != VulkanOpFusedSwiGLU || visionPlan.Quant != "f32" {
+		t.Fatalf("vision fused swiglu plan=%+v", visionPlan)
+	}
+	if visionPlan.GroupsX != shape.VisionIntermediate || visionPlan.OutputBytes != int64(shape.VisionIntermediate)*4 {
+		t.Fatalf("vision fused swiglu output geometry=%+v", visionPlan)
+	}
+	if len(visionCmd.Resources) != 3 {
+		t.Fatalf("vision fused swiglu resources=%+v", visionCmd.Resources)
+	}
+	if visionCmd.Resources[0].Name != "x" || visionCmd.Resources[0].Bytes != visionPlan.InputBytes || visionCmd.Resources[0].Access != "readonly" {
+		t.Fatalf("vision fused swiglu input=%+v plan=%+v", visionCmd.Resources[0], visionPlan)
+	}
+	if visionCmd.Resources[1].Name != "w" || visionCmd.Resources[1].Bytes != visionPlan.WeightByte || visionCmd.Resources[1].Access != "readonly" {
+		t.Fatalf("vision fused swiglu weight=%+v plan=%+v", visionCmd.Resources[1], visionPlan)
+	}
+	if visionCmd.Resources[2].Name != "out" || visionCmd.Resources[2].Bytes != visionPlan.OutputBytes || visionCmd.Resources[2].Access != "writeonly" {
+		t.Fatalf("vision fused swiglu output=%+v plan=%+v", visionCmd.Resources[2], visionPlan)
+	}
+	assertDescriptorWritesMatchResources("vision fused swiglu", visionCmd)
+}
+
+func TestVulkanModelArtifactsForShapeMatchesSeparateBuilders(t *testing.T) {
+	shape := VulkanModelShape{
+		Quant:               "q4",
+		VocabSize:           32000,
+		HiddenSize:          2048,
+		IntermediateSize:    8192,
+		NumAttentionHeads:   16,
+		NumKeyValueHeads:    4,
+		HeadDim:             128,
+		VisionHiddenSize:    1024,
+		VisionIntermediate:  4096,
+		VisionPatchElements: 588,
+		TextLayers:          24,
+		VisionLayers:        24,
+	}
+	artifacts := VulkanModelArtifactsForShape(shape)
+	plans := VulkanModelPlans(shape)
+	summary := VulkanModelPlanSummaryFromPlans(plans, shape)
+	graph := VulkanModelExecutionGraphFromPlans(plans)
+	pipes := VulkanPipelinePlanFromPlans(nil, plans)
+	command := VulkanCommandPlanFromPlans(nil, pipes, plans)
+
+	if !reflect.DeepEqual(artifacts.Plans, plans) {
+		t.Fatalf("plans mismatch\nartifacts=%+v\nplans=%+v", artifacts.Plans, plans)
+	}
+	if !reflect.DeepEqual(artifacts.Summary, summary) {
+		t.Fatalf("summary mismatch\nartifacts=%+v\nsummary=%+v", artifacts.Summary, summary)
+	}
+	if !reflect.DeepEqual(artifacts.ExecutionGraph, graph) {
+		t.Fatalf("graph mismatch\nartifacts=%+v\ngraph=%+v", artifacts.ExecutionGraph, graph)
+	}
+	if !reflect.DeepEqual(artifacts.PipelinePlan, pipes) {
+		t.Fatalf("pipeline mismatch\nartifacts=%+v\npipes=%+v", artifacts.PipelinePlan, pipes)
+	}
+	if !reflect.DeepEqual(artifacts.CommandPlan, command) {
+		t.Fatalf("command mismatch\nartifacts=%+v\ncommand=%+v", artifacts.CommandPlan, command)
+	}
+	if reason := ValidateVulkanCommandPlan(artifacts.CommandPlan); reason != "" {
+		t.Fatalf("invalid command plan: %s", reason)
 	}
 }
 
@@ -595,20 +829,22 @@ func BenchmarkVulkanModelExecutionGraphInto(b *testing.B) {
 }
 
 func BenchmarkVulkanModelPipelinePlanInto(b *testing.B) {
-	shape := VulkanModelShape{
-		Quant:               "q4",
-		VocabSize:           32000,
-		HiddenSize:          2048,
-		IntermediateSize:    8192,
-		NumAttentionHeads:   16,
-		NumKeyValueHeads:    4,
-		HeadDim:             128,
-		VisionHiddenSize:    1024,
-		VisionIntermediate:  4096,
-		VisionPatchElements: 588,
-		TextLayers:          24,
-		VisionLayers:        24,
+	shape := benchmarkVulkanShape("q4")
+	plans := make([]VulkanPlan, 0, 10)
+	pipes := make([]VulkanPipelinePlan, 0, 6)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var nextPlans []VulkanPlan
+		pipes, nextPlans = VulkanModelPipelinePlanInto(plans, pipes, shape)
+		plans = nextPlans
+		if len(pipes) != 6 {
+			b.Fatal(pipes)
+		}
 	}
+}
+
+func BenchmarkVulkanModelPipelinePlanIntoF32(b *testing.B) {
+	shape := benchmarkVulkanShape("f32")
 	plans := make([]VulkanPlan, 0, 10)
 	pipes := make([]VulkanPipelinePlan, 0, 6)
 	b.ReportAllocs()
@@ -623,20 +859,7 @@ func BenchmarkVulkanModelPipelinePlanInto(b *testing.B) {
 }
 
 func BenchmarkVulkanModelCommandPlanInto(b *testing.B) {
-	shape := VulkanModelShape{
-		Quant:               "q4",
-		VocabSize:           32000,
-		HiddenSize:          2048,
-		IntermediateSize:    8192,
-		NumAttentionHeads:   16,
-		NumKeyValueHeads:    4,
-		HeadDim:             128,
-		VisionHiddenSize:    1024,
-		VisionIntermediate:  4096,
-		VisionPatchElements: 588,
-		TextLayers:          24,
-		VisionLayers:        24,
-	}
+	shape := benchmarkVulkanShape("q4")
 	plans := make([]VulkanPlan, 0, 10)
 	pipes := make([]VulkanPipelinePlan, 0, 6)
 	shaders := make([]VulkanShaderModulePlan, 0, 6)
@@ -669,6 +892,179 @@ func BenchmarkVulkanModelCommandPlanInto(b *testing.B) {
 		plans, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks = nextPlans, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks
 		if cmdPlan.CommandCount != 10 || cmdPlan.DispatchBatchCount != 9 || cmdPlan.PipelineCount != 6 || cmdPlan.ShaderModuleCount != 6 || cmdPlan.LayoutCount != 2 || cmdPlan.RecordCount != 40 || cmdPlan.BarrierCount != 35 || cmdPlan.AllocationCount != 35 || cmdPlan.UploadCount != 25 || cmdPlan.ReadbackCount != 10 {
 			b.Fatal(cmdPlan)
+		}
+	}
+}
+
+func BenchmarkVulkanModelCommandPlanIntoF32(b *testing.B) {
+	shape := benchmarkVulkanShape("f32")
+	plans := make([]VulkanPlan, 0, 10)
+	pipes := make([]VulkanPipelinePlan, 0, 6)
+	shaders := make([]VulkanShaderModulePlan, 0, 6)
+	layouts := make([]VulkanPipelineLayoutPlan, 0, 2)
+	cmds := make([]VulkanCommand, 0, 10)
+	batches := make([]VulkanDispatchBatch, 0, 10)
+	resources := make([]VulkanResource, 0, 30)
+	descriptors := make([]VulkanDescriptorWrite, 0, 30)
+	records := make([]VulkanCommandRecord, 0, 40)
+	barriers := make([]VulkanBufferBarrier, 0, 30)
+	allocations := make([]VulkanBufferAllocation, 0, 30)
+	uploads := make([]VulkanBufferTransfer, 0, 20)
+	readbacks := make([]VulkanBufferTransfer, 0, 10)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var nextPipes []VulkanPipelinePlan
+		var nextPlans []VulkanPlan
+		var nextShaders []VulkanShaderModulePlan
+		var nextLayouts []VulkanPipelineLayoutPlan
+		var nextCmds []VulkanCommand
+		var nextBatches []VulkanDispatchBatch
+		var nextResources []VulkanResource
+		var nextDescriptors []VulkanDescriptorWrite
+		var nextRecords []VulkanCommandRecord
+		var nextBarriers []VulkanBufferBarrier
+		var nextAllocations []VulkanBufferAllocation
+		var nextUploads []VulkanBufferTransfer
+		var nextReadbacks []VulkanBufferTransfer
+		cmdPlan, nextPlans, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks := VulkanModelCommandPlanInto(plans, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks, shape)
+		plans, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks = nextPlans, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks
+		if cmdPlan.CommandCount != 10 || cmdPlan.ResourceCount != 30 || cmdPlan.UploadCount != 20 || cmdPlan.ReadbackCount != 10 {
+			b.Fatal(cmdPlan)
+		}
+	}
+}
+
+func BenchmarkValidateVulkanCommandPlan(b *testing.B) {
+	shape := VulkanModelShape{
+		Quant:               "q4",
+		VocabSize:           32000,
+		HiddenSize:          2048,
+		IntermediateSize:    8192,
+		NumAttentionHeads:   16,
+		NumKeyValueHeads:    4,
+		HeadDim:             128,
+		VisionHiddenSize:    1024,
+		VisionIntermediate:  4096,
+		VisionPatchElements: 588,
+		TextLayers:          24,
+		VisionLayers:        24,
+	}
+	cmdPlan := VulkanModelCommandPlan(shape)
+	if reason := ValidateVulkanCommandPlan(cmdPlan); reason != "" {
+		b.Fatal(reason)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if reason := ValidateVulkanCommandPlan(cmdPlan); reason != "" {
+			b.Fatal(reason)
+		}
+	}
+}
+
+func BenchmarkVulkanModelArtifactsForShapeInto(b *testing.B) {
+	shape := benchmarkVulkanShape("q4")
+	plans := make([]VulkanPlan, 0, 10)
+	stages := make([]VulkanStageSummary, 0, 2)
+	pipes := make([]VulkanPipelinePlan, 0, 6)
+	shaders := make([]VulkanShaderModulePlan, 0, 6)
+	layouts := make([]VulkanPipelineLayoutPlan, 0, 2)
+	cmds := make([]VulkanCommand, 0, 10)
+	batches := make([]VulkanDispatchBatch, 0, 10)
+	resources := make([]VulkanResource, 0, 35)
+	descriptors := make([]VulkanDescriptorWrite, 0, 35)
+	records := make([]VulkanCommandRecord, 0, 40)
+	barriers := make([]VulkanBufferBarrier, 0, 35)
+	allocations := make([]VulkanBufferAllocation, 0, 35)
+	uploads := make([]VulkanBufferTransfer, 0, 25)
+	readbacks := make([]VulkanBufferTransfer, 0, 10)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var nextPlans []VulkanPlan
+		var nextStages []VulkanStageSummary
+		var nextPipes []VulkanPipelinePlan
+		var nextShaders []VulkanShaderModulePlan
+		var nextLayouts []VulkanPipelineLayoutPlan
+		var nextCmds []VulkanCommand
+		var nextBatches []VulkanDispatchBatch
+		var nextResources []VulkanResource
+		var nextDescriptors []VulkanDescriptorWrite
+		var nextRecords []VulkanCommandRecord
+		var nextBarriers []VulkanBufferBarrier
+		var nextAllocations []VulkanBufferAllocation
+		var nextUploads []VulkanBufferTransfer
+		var nextReadbacks []VulkanBufferTransfer
+		artifacts, nextPlans, nextStages, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks := VulkanModelArtifactsForShapeInto(plans, stages, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks, shape)
+		plans, stages, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks = nextPlans, nextStages, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks
+		if artifacts.Summary.PlanCount != 10 || artifacts.ExecutionGraph.Dispatches == 0 || artifacts.CommandPlan.CommandCount != 10 {
+			b.Fatal(artifacts)
+		}
+	}
+}
+
+func BenchmarkVulkanModelArtifactsForShapeIntoF32(b *testing.B) {
+	shape := benchmarkVulkanShape("f32")
+	plans := make([]VulkanPlan, 0, 10)
+	stages := make([]VulkanStageSummary, 0, 2)
+	pipes := make([]VulkanPipelinePlan, 0, 6)
+	shaders := make([]VulkanShaderModulePlan, 0, 6)
+	layouts := make([]VulkanPipelineLayoutPlan, 0, 2)
+	cmds := make([]VulkanCommand, 0, 10)
+	batches := make([]VulkanDispatchBatch, 0, 10)
+	resources := make([]VulkanResource, 0, 30)
+	descriptors := make([]VulkanDescriptorWrite, 0, 30)
+	records := make([]VulkanCommandRecord, 0, 40)
+	barriers := make([]VulkanBufferBarrier, 0, 30)
+	allocations := make([]VulkanBufferAllocation, 0, 30)
+	uploads := make([]VulkanBufferTransfer, 0, 20)
+	readbacks := make([]VulkanBufferTransfer, 0, 10)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		var nextPlans []VulkanPlan
+		var nextStages []VulkanStageSummary
+		var nextPipes []VulkanPipelinePlan
+		var nextShaders []VulkanShaderModulePlan
+		var nextLayouts []VulkanPipelineLayoutPlan
+		var nextCmds []VulkanCommand
+		var nextBatches []VulkanDispatchBatch
+		var nextResources []VulkanResource
+		var nextDescriptors []VulkanDescriptorWrite
+		var nextRecords []VulkanCommandRecord
+		var nextBarriers []VulkanBufferBarrier
+		var nextAllocations []VulkanBufferAllocation
+		var nextUploads []VulkanBufferTransfer
+		var nextReadbacks []VulkanBufferTransfer
+		artifacts, nextPlans, nextStages, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks := VulkanModelArtifactsForShapeInto(plans, stages, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks, shape)
+		plans, stages, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks = nextPlans, nextStages, nextPipes, nextShaders, nextLayouts, nextCmds, nextBatches, nextResources, nextDescriptors, nextRecords, nextBarriers, nextAllocations, nextUploads, nextReadbacks
+		if artifacts.CommandPlan.ResourceCount != 30 || artifacts.CommandPlan.UploadCount != 20 || artifacts.CommandPlan.CommandCount != 10 {
+			b.Fatal(artifacts.CommandPlan)
+		}
+	}
+}
+
+func BenchmarkVulkanModelArtifactsSeparateBuilders(b *testing.B) {
+	shape := VulkanModelShape{
+		Quant:               "q4",
+		VocabSize:           32000,
+		HiddenSize:          2048,
+		IntermediateSize:    8192,
+		NumAttentionHeads:   16,
+		NumKeyValueHeads:    4,
+		HeadDim:             128,
+		VisionHiddenSize:    1024,
+		VisionIntermediate:  4096,
+		VisionPatchElements: 588,
+		TextLayers:          24,
+		VisionLayers:        24,
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		plans := VulkanModelPlans(shape)
+		summary := VulkanModelPlanSummary(shape)
+		graph := VulkanModelExecutionGraph(shape)
+		pipes := VulkanModelPipelinePlan(shape)
+		command := VulkanModelCommandPlan(shape)
+		if len(plans) != 10 || summary.PlanCount != 10 || graph.Dispatches == 0 || len(pipes) != 6 || command.CommandCount != 10 {
+			b.Fatal(plans, summary, graph, pipes, command)
 		}
 	}
 }

@@ -22,6 +22,9 @@ func TestParseTokens(t *testing.T) {
 	if _, err := parseTokens("bad"); err == nil {
 		t.Fatal("expected bad token error")
 	}
+	if _, err := parseTokens("-1"); err == nil {
+		t.Fatal("expected negative token error")
+	}
 	if _, err := parseTokens(" , "); err == nil {
 		t.Fatal("expected empty token error")
 	}

@@ -30,6 +30,53 @@ func BenchmarkFloat32RowsF32(b *testing.B) {
 	}
 }
 
+func BenchmarkFloat32RowsBF16(b *testing.B) {
+	benchmarkFloat32RowsEncoded(b, "BF16")
+}
+
+func BenchmarkSafeShardPath(b *testing.B) {
+	dir := filepath.Join("C:", "models", "paddleocrvl")
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := safeShardPath(dir, "model-00001-of-00002.safetensors"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFloat32RowsF16(b *testing.B) {
+	benchmarkFloat32RowsEncoded(b, "F16")
+}
+
+func benchmarkFloat32RowsEncoded(b *testing.B, dtype string) {
+	dir := b.TempDir()
+	const rows, cols = 512, 1024
+	data := make([]byte, rows*cols*2)
+	for i := 0; i < len(data)/2; i++ {
+		binary.LittleEndian.PutUint16(data[i*2:], uint16(i))
+	}
+	writeSafetensorMetaForTest(b, filepath.Join(dir, "model.safetensors"), map[string]any{
+		"dtype":        dtype,
+		"shape":        []int64{rows, cols},
+		"data_offsets": []int{0, len(data)},
+	}, data)
+	sf, err := OpenModel(dir)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer sf.Close()
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := sf.Float32Rows("x.weight", func(row int, values []float32) error {
+			return nil
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkDecodeBF16(b *testing.B) {
 	raw := make([]byte, 2*512*1024)
 	out := make([]float32, len(raw)/2)

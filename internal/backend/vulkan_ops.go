@@ -311,6 +311,14 @@ type VulkanModelShape struct {
 	VisionLayers        int
 }
 
+type VulkanModelArtifacts struct {
+	Plans          []VulkanPlan         `json:"plans,omitempty"`
+	Summary        VulkanPlanSummary    `json:"summary"`
+	ExecutionGraph VulkanExecutionGraph `json:"execution_graph"`
+	PipelinePlan   []VulkanPipelinePlan `json:"pipeline_plan,omitempty"`
+	CommandPlan    VulkanCommandPlan    `json:"command_plan"`
+}
+
 func DefaultVulkanCompute() VulkanCompute {
 	return VulkanCompute{
 		Version:       1,
@@ -493,14 +501,7 @@ func ValidateVulkanCommandPlan(p VulkanCommandPlan) string {
 	if p.PipelineLifecycle.CreateCount != p.PipelineCount || p.PipelineLifecycle.DestroyCount != p.PipelineCount {
 		return "pipeline lifecycle count mismatch"
 	}
-	var totalAligned int64
-	for _, a := range p.Allocations {
-		totalAligned += a.AlignedBytes
-	}
-	if totalAligned != p.TotalBufferBytes {
-		return "total aligned buffer byte mismatch"
-	}
-	var batchDispatches, pipelineBinds, descriptorBinds, pushConstants int
+	var batchDispatches int
 	for i, b := range p.DispatchBatches {
 		if b.BatchIndex != i {
 			return "dispatch batch index mismatch"
@@ -524,11 +525,8 @@ func ValidateVulkanCommandPlan(p VulkanCommandPlan) string {
 			return "dispatch batch bind count mismatch"
 		}
 		batchDispatches += b.Dispatches
-		pipelineBinds += b.PipelineBindCount
-		descriptorBinds += b.DescriptorBindCount
-		pushConstants += b.PushConstantCount
 	}
-	if batchDispatches != p.Dispatches || pipelineBinds != p.PipelineBindCount || descriptorBinds != p.DescriptorBindCount || pushConstants != p.PushConstantCount {
+	if batchDispatches != p.Dispatches || p.PipelineBindCount != p.DispatchBatchCount || p.DescriptorBindCount != p.CommandCount || p.PushConstantCount != p.CommandCount {
 		return "dispatch batch totals mismatch"
 	}
 	for i, pipe := range p.Pipelines {
@@ -547,9 +545,22 @@ func ValidateVulkanCommandPlan(p VulkanCommandPlan) string {
 		if i >= p.PipelineCount {
 			return "pipeline index overflow"
 		}
+		for j := 0; j < i; j++ {
+			prev := p.Pipelines[j]
+			if prev.Key == pipe.Key && prev.Stage == pipe.Stage {
+				return "duplicate pipeline"
+			}
+			if prev.CacheKeyHash == pipe.CacheKeyHash {
+				return "duplicate pipeline cache key"
+			}
+		}
 	}
 	var dispatches int
+	var totalAligned int64
+	var uploadBytes, readbackBytes int64
 	resourceIndex := 0
+	uploadIndex := 0
+	readbackIndex := 0
 	for commandIndex, cmd := range p.Commands {
 		if cmd.PipelineIndex < 0 || cmd.PipelineIndex >= p.PipelineCount {
 			return "command pipeline index out of range"
@@ -582,12 +593,43 @@ func ValidateVulkanCommandPlan(p VulkanCommandPlan) string {
 			if a.AlignmentBytes <= 0 || a.AlignedBytes < a.Bytes || a.AlignedBytes%a.AlignmentBytes != 0 {
 				return "invalid aligned allocation"
 			}
+			if r.Role == "output" {
+				if readbackIndex >= p.ReadbackCount {
+					return "readback index out of range"
+				}
+				t := p.Readbacks[readbackIndex]
+				if t.CommandIndex != commandIndex || t.Binding != r.Binding || t.ResourceName != r.Name || t.Role != r.Role || t.Direction != "device_to_host" || t.Bytes != r.Bytes {
+					return "readback resource mismatch"
+				}
+				readbackBytes += t.Bytes
+				readbackIndex++
+			} else {
+				if uploadIndex >= p.UploadCount {
+					return "upload index out of range"
+				}
+				t := p.Uploads[uploadIndex]
+				if t.CommandIndex != commandIndex || t.Binding != r.Binding || t.ResourceName != r.Name || t.Role != r.Role || t.Direction != "host_to_device" || t.Bytes != r.Bytes {
+					return "upload resource mismatch"
+				}
+				uploadBytes += t.Bytes
+				uploadIndex++
+			}
+			totalAligned += a.AlignedBytes
 			resourceIndex++
 		}
 		dispatches += cmd.Dispatches
 	}
 	if resourceIndex != p.ResourceCount {
 		return "resource walk count mismatch"
+	}
+	if uploadIndex != p.UploadCount || readbackIndex != p.ReadbackCount {
+		return "transfer walk count mismatch"
+	}
+	if totalAligned != p.TotalBufferBytes {
+		return "total aligned buffer byte mismatch"
+	}
+	if uploadBytes != p.UploadBytes || readbackBytes != p.ReadbackBytes {
+		return "transfer byte mismatch"
 	}
 	if dispatches != p.Dispatches {
 		return "dispatch count mismatch"
@@ -660,34 +702,144 @@ func VulkanKernels() []VulkanKernel {
 func PlanVulkanKernel(op, quant string, rows, cols int) (VulkanPlan, bool) {
 	op = lowerASCII(trimASCIIWhitespace(op))
 	quant = normalizeVulkanQuant(quant)
-	if rows <= 0 || cols <= 0 {
+	if rows <= 0 || cols <= 0 || rows > maxUint32Int() || cols > maxUint32Int() {
 		return VulkanPlan{}, false
 	}
-	for _, k := range vulkanKernelRegistry {
-		if k.Op == op && k.Quant == quant {
-			return VulkanPlan{
-				Kernel: k,
-				PipelineKey: VulkanPipelineKey{
-					KernelName:        k.Name,
-					Op:                k.Op,
-					Quant:             k.Quant,
-					Workgroup:         k.Workgroup,
-					PushConstantBytes: k.PushConstantBytes,
-					BindingSignature:  k.BindingSignature,
-				},
-				GroupsX:     ceilDiv(rows, max(1, k.RowsPerWarp)),
-				GroupsY:     1,
-				Rows:        rows,
-				Cols:        cols,
-				Quant:       quant,
-				SharedByte:  k.Workgroup * 4,
-				WeightByte:  estimateVulkanWeightBytes(quant, rows, cols),
-				InputBytes:  int64(cols) * 4,
-				OutputBytes: int64(rows) * 4,
-			}, true
+	k, ok := vulkanKernelFor(op, quant)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	weightBytes, ok := estimateVulkanWeightBytesCheckedNormalized(quant, rows, cols)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	outputRows, ok := vulkanPlanOutputRows(op, rows)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	inputBytes, ok := checkedMulInt64(int64(cols), 4)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	outputBytes, ok := checkedMulInt64(int64(outputRows), 4)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	return VulkanPlan{
+		Kernel: k,
+		PipelineKey: VulkanPipelineKey{
+			KernelName:        k.Name,
+			Op:                k.Op,
+			Quant:             k.Quant,
+			Workgroup:         k.Workgroup,
+			PushConstantBytes: k.PushConstantBytes,
+			BindingSignature:  k.BindingSignature,
+		},
+		GroupsX:     ceilDiv(outputRows, max(1, k.RowsPerWarp)),
+		GroupsY:     1,
+		Rows:        rows,
+		Cols:        cols,
+		Quant:       quant,
+		SharedByte:  k.Workgroup * 4,
+		WeightByte:  weightBytes,
+		InputBytes:  inputBytes,
+		OutputBytes: outputBytes,
+	}, true
+}
+
+func planVulkanKernelNormalized(op, quant string, rows, cols int) (VulkanPlan, bool) {
+	if rows <= 0 || cols <= 0 || rows > maxUint32Int() || cols > maxUint32Int() {
+		return VulkanPlan{}, false
+	}
+	k, ok := vulkanKernelFor(op, quant)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	weightBytes, ok := estimateVulkanWeightBytesCheckedNormalized(quant, rows, cols)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	outputRows, ok := vulkanPlanOutputRows(op, rows)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	inputBytes, ok := checkedMulInt64(int64(cols), 4)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	outputBytes, ok := checkedMulInt64(int64(outputRows), 4)
+	if !ok {
+		return VulkanPlan{}, false
+	}
+	return VulkanPlan{
+		Kernel: k,
+		PipelineKey: VulkanPipelineKey{
+			KernelName:        k.Name,
+			Op:                k.Op,
+			Quant:             k.Quant,
+			Workgroup:         k.Workgroup,
+			PushConstantBytes: k.PushConstantBytes,
+			BindingSignature:  k.BindingSignature,
+		},
+		GroupsX:     ceilDiv(outputRows, max(1, k.RowsPerWarp)),
+		GroupsY:     1,
+		Rows:        rows,
+		Cols:        cols,
+		Quant:       quant,
+		SharedByte:  k.Workgroup * 4,
+		WeightByte:  weightBytes,
+		InputBytes:  inputBytes,
+		OutputBytes: outputBytes,
+	}, true
+}
+
+func vulkanPlanOutputRows(op string, rows int) (int, bool) {
+	if op != VulkanOpFusedSwiGLU {
+		return rows, true
+	}
+	if rows <= 0 || rows%2 != 0 {
+		return 0, false
+	}
+	return rows / 2, true
+}
+
+func vulkanKernelFor(op, quant string) (VulkanKernel, bool) {
+	switch op {
+	case VulkanOpMatVec:
+		switch quant {
+		case "f32":
+			return vulkanKernelRegistry[0], true
+		case "q8":
+			return vulkanKernelRegistry[1], true
+		case "q6":
+			return vulkanKernelRegistry[2], true
+		case "q4":
+			return vulkanKernelRegistry[3], true
+		}
+	case VulkanOpFusedQKV:
+		switch quant {
+		case "f32":
+			return vulkanKernelRegistry[4], true
+		case "q8":
+			return vulkanKernelRegistry[5], true
+		case "q6":
+			return vulkanKernelRegistry[6], true
+		case "q4":
+			return vulkanKernelRegistry[7], true
+		}
+	case VulkanOpFusedSwiGLU:
+		switch quant {
+		case "f32":
+			return vulkanKernelRegistry[8], true
+		case "q8":
+			return vulkanKernelRegistry[9], true
+		case "q6":
+			return vulkanKernelRegistry[10], true
+		case "q4":
+			return vulkanKernelRegistry[11], true
 		}
 	}
-	return VulkanPlan{}, false
+	return VulkanKernel{}, false
 }
 
 func VulkanModelPlans(shape VulkanModelShape) []VulkanPlan {
@@ -696,45 +848,71 @@ func VulkanModelPlans(shape VulkanModelShape) []VulkanPlan {
 
 func VulkanModelPlansInto(dst []VulkanPlan, shape VulkanModelShape) []VulkanPlan {
 	q := normalizeVulkanQuant(shape.Quant)
-	if q == "f32" && shape.Quant != "" && lowerASCII(trimASCIIWhitespace(shape.Quant)) != "f32" {
-		q = normalizeVulkanQuant(shape.Quant)
-	}
 	if shape.HeadDim == 0 && shape.NumAttentionHeads != 0 {
 		shape.HeadDim = shape.HiddenSize / shape.NumAttentionHeads
 	}
 	if shape.NumKeyValueHeads == 0 {
 		shape.NumKeyValueHeads = shape.NumAttentionHeads
 	}
-	qRows := shape.NumAttentionHeads * shape.HeadDim
-	kvRows := shape.NumKeyValueHeads * shape.HeadDim
+	qRows, ok := checkedMulInt(shape.NumAttentionHeads, shape.HeadDim)
+	if !ok {
+		return dst[:0]
+	}
+	kvRows, ok := checkedMulInt(shape.NumKeyValueHeads, shape.HeadDim)
+	if !ok {
+		return dst[:0]
+	}
+	qkvRows, ok := checkedAddInt(qRows, kvRows)
+	if ok {
+		qkvRows, ok = checkedAddInt(qkvRows, kvRows)
+	}
+	if !ok {
+		return dst[:0]
+	}
+	mlpRows, ok := checkedMulInt(shape.IntermediateSize, 2)
+	if !ok {
+		return dst[:0]
+	}
+	visionQKVRows, ok := checkedMulInt(shape.VisionHiddenSize, 3)
+	if !ok {
+		return dst[:0]
+	}
+	visionMLPRows, ok := checkedMulInt(shape.VisionIntermediate, 2)
+	if !ok {
+		return dst[:0]
+	}
 	out := dst[:0]
 	if cap(out) < 10 {
 		out = make([]VulkanPlan, 0, 10)
 	}
-	appendPlan := func(name, op, quant string, rows, cols, repeat int) {
-		p, ok := PlanVulkanKernel(op, quant, rows, cols)
+	appendPlan := func(name, stage, op, quant string, rows, cols, repeat int) {
+		p, ok := planVulkanKernelNormalized(op, quant, rows, cols)
 		if !ok {
 			return
 		}
 		p.Name = name
-		p.Stage = vulkanPlanStage(name)
+		p.Stage = stage
 		if repeat < 1 {
 			repeat = 1
 		}
 		p.Repeat = repeat
-		p.Dispatches = repeat * p.GroupsX * max(1, p.GroupsY)
+		dispatches, ok := checkedDispatches(repeat, p.GroupsX, max(1, p.GroupsY))
+		if !ok {
+			return
+		}
+		p.Dispatches = dispatches
 		out = append(out, p)
 	}
-	appendPlan("text.qkv", VulkanOpFusedQKV, q, qRows+kvRows+kvRows, shape.HiddenSize, shape.TextLayers)
-	appendPlan("text.o_proj", VulkanOpMatVec, q, shape.HiddenSize, qRows, shape.TextLayers)
-	appendPlan("text.mlp_gate_up", VulkanOpFusedSwiGLU, q, shape.IntermediateSize*2, shape.HiddenSize, shape.TextLayers)
-	appendPlan("text.mlp_down", VulkanOpMatVec, q, shape.HiddenSize, shape.IntermediateSize, shape.TextLayers)
-	appendPlan("text.lm_head", VulkanOpMatVec, q, shape.VocabSize, shape.HiddenSize, 1)
-	appendPlan("vision.patch", VulkanOpMatVec, "f32", shape.VisionHiddenSize, shape.VisionPatchElements, 1)
-	appendPlan("vision.qkv", VulkanOpFusedQKV, "f32", shape.VisionHiddenSize*3, shape.VisionHiddenSize, shape.VisionLayers)
-	appendPlan("vision.o_proj", VulkanOpMatVec, "f32", shape.VisionHiddenSize, shape.VisionHiddenSize, shape.VisionLayers)
-	appendPlan("vision.mlp_gate_up", VulkanOpFusedSwiGLU, "f32", shape.VisionIntermediate*2, shape.VisionHiddenSize, shape.VisionLayers)
-	appendPlan("vision.mlp_down", VulkanOpMatVec, "f32", shape.VisionHiddenSize, shape.VisionIntermediate, shape.VisionLayers)
+	appendPlan("text.qkv", "text", VulkanOpFusedQKV, q, qkvRows, shape.HiddenSize, shape.TextLayers)
+	appendPlan("text.o_proj", "text", VulkanOpMatVec, q, shape.HiddenSize, qRows, shape.TextLayers)
+	appendPlan("text.mlp_gate_up", "text", VulkanOpFusedSwiGLU, q, mlpRows, shape.HiddenSize, shape.TextLayers)
+	appendPlan("text.mlp_down", "text", VulkanOpMatVec, q, shape.HiddenSize, shape.IntermediateSize, shape.TextLayers)
+	appendPlan("text.lm_head", "text", VulkanOpMatVec, q, shape.VocabSize, shape.HiddenSize, 1)
+	appendPlan("vision.patch", "vision", VulkanOpMatVec, "f32", shape.VisionHiddenSize, shape.VisionPatchElements, 1)
+	appendPlan("vision.qkv", "vision", VulkanOpFusedQKV, "f32", visionQKVRows, shape.VisionHiddenSize, shape.VisionLayers)
+	appendPlan("vision.o_proj", "vision", VulkanOpMatVec, "f32", shape.VisionHiddenSize, shape.VisionHiddenSize, shape.VisionLayers)
+	appendPlan("vision.mlp_gate_up", "vision", VulkanOpFusedSwiGLU, "f32", visionMLPRows, shape.VisionHiddenSize, shape.VisionLayers)
+	appendPlan("vision.mlp_down", "vision", VulkanOpMatVec, "f32", shape.VisionHiddenSize, shape.VisionIntermediate, shape.VisionLayers)
 	return out
 }
 
@@ -767,6 +945,25 @@ func VulkanModelPipelinePlan(shape VulkanModelShape) []VulkanPipelinePlan {
 func VulkanModelPipelinePlanInto(planDst []VulkanPlan, pipeDst []VulkanPipelinePlan, shape VulkanModelShape) ([]VulkanPipelinePlan, []VulkanPlan) {
 	plans := VulkanModelPlansInto(planDst, shape)
 	return VulkanPipelinePlanFromPlans(pipeDst, plans), plans
+}
+
+func VulkanModelArtifactsForShape(shape VulkanModelShape) VulkanModelArtifacts {
+	artifacts, _, _, _, _, _, _, _, _, _, _, _, _, _, _ := VulkanModelArtifactsForShapeInto(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, shape)
+	return artifacts
+}
+
+func VulkanModelArtifactsForShapeInto(planDst []VulkanPlan, stageDst []VulkanStageSummary, pipeDst []VulkanPipelinePlan, shaderDst []VulkanShaderModulePlan, layoutDst []VulkanPipelineLayoutPlan, cmdDst []VulkanCommand, batchDst []VulkanDispatchBatch, resourceDst []VulkanResource, descriptorDst []VulkanDescriptorWrite, recordDst []VulkanCommandRecord, barrierDst []VulkanBufferBarrier, allocationDst []VulkanBufferAllocation, uploadDst []VulkanBufferTransfer, readbackDst []VulkanBufferTransfer, shape VulkanModelShape) (VulkanModelArtifacts, []VulkanPlan, []VulkanStageSummary, []VulkanPipelinePlan, []VulkanShaderModulePlan, []VulkanPipelineLayoutPlan, []VulkanCommand, []VulkanDispatchBatch, []VulkanResource, []VulkanDescriptorWrite, []VulkanCommandRecord, []VulkanBufferBarrier, []VulkanBufferAllocation, []VulkanBufferTransfer, []VulkanBufferTransfer) {
+	plans := VulkanModelPlansInto(planDst, shape)
+	pipes := VulkanPipelinePlanFromPlans(pipeDst, plans)
+	summary, graph, stages := vulkanModelSummaryGraphFromPlansPipelinesInto(stageDst, plans, pipes, shape)
+	command, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks := VulkanCommandPlanFromPlansInto(shaderDst, layoutDst, cmdDst, batchDst, resourceDst, descriptorDst, recordDst, barrierDst, allocationDst, uploadDst, readbackDst, pipes, plans)
+	return VulkanModelArtifacts{
+		Plans:          plans,
+		Summary:        summary,
+		ExecutionGraph: graph,
+		PipelinePlan:   pipes,
+		CommandPlan:    command,
+	}, plans, stages, pipes, shaders, layouts, cmds, batches, resources, descriptors, records, barriers, allocations, uploads, readbacks
 }
 
 func VulkanPipelinePlanFromPlans(dst []VulkanPipelinePlan, plans []VulkanPlan) []VulkanPipelinePlan {
@@ -897,10 +1094,9 @@ func vulkanShaderModuleIndex(keys *[16]string, count *int, kernelName string) in
 }
 
 func vulkanPipelineBindings(key VulkanPipelineKey) []VulkanBinding {
-	for _, k := range vulkanKernelRegistry {
-		if k.Name == key.KernelName && k.BindingSignature == key.BindingSignature {
-			return k.Bindings
-		}
+	k, ok := vulkanKernelByName(key.KernelName)
+	if ok && k.BindingSignature == key.BindingSignature {
+		return k.Bindings
 	}
 	return nil
 }
@@ -939,10 +1135,31 @@ func vulkanQuantBits(q string) int {
 }
 
 func vulkanKernelByName(name string) (VulkanKernel, bool) {
-	for _, k := range vulkanKernelRegistry {
-		if k.Name == name {
-			return k, true
-		}
+	switch name {
+	case "matvec_f32_wg256":
+		return vulkanKernelRegistry[0], true
+	case "matvec_q8_wg256":
+		return vulkanKernelRegistry[1], true
+	case "matvec_q6_wg256":
+		return vulkanKernelRegistry[2], true
+	case "matvec_q4_wg256":
+		return vulkanKernelRegistry[3], true
+	case "fused_qkv_f32_wg256":
+		return vulkanKernelRegistry[4], true
+	case "fused_qkv_q8_wg256":
+		return vulkanKernelRegistry[5], true
+	case "fused_qkv_q6_wg256":
+		return vulkanKernelRegistry[6], true
+	case "fused_qkv_q4_wg256":
+		return vulkanKernelRegistry[7], true
+	case "fused_swiglu_f32_wg256":
+		return vulkanKernelRegistry[8], true
+	case "fused_swiglu_q8_wg256":
+		return vulkanKernelRegistry[9], true
+	case "fused_swiglu_q6_wg256":
+		return vulkanKernelRegistry[10], true
+	case "fused_swiglu_q4_wg256":
+		return vulkanKernelRegistry[11], true
 	}
 	return VulkanKernel{}, false
 }
@@ -992,10 +1209,14 @@ func VulkanCommandPlanFromPlansInto(shaderDst []VulkanShaderModulePlan, layoutDs
 		records = make([]VulkanCommandRecord, 0, len(plans)*4)
 	}
 	resources := resourceDst[:0]
-	needResources := 0
+	f32Plans := 0
 	for _, p := range plans {
-		needResources += len(p.Kernel.Bindings)
+		if p.Quant == "f32" {
+			f32Plans++
+		}
 	}
+	needResources := len(plans)*4 - f32Plans
+	needUploads := len(plans)*3 - f32Plans
 	if cap(resources) < needResources {
 		resources = make([]VulkanResource, 0, needResources)
 	}
@@ -1012,8 +1233,8 @@ func VulkanCommandPlanFromPlansInto(shaderDst []VulkanShaderModulePlan, layoutDs
 		allocations = make([]VulkanBufferAllocation, 0, needResources)
 	}
 	uploads := uploadDst[:0]
-	if cap(uploads) < needResources {
-		uploads = make([]VulkanBufferTransfer, 0, needResources)
+	if cap(uploads) < needUploads {
+		uploads = make([]VulkanBufferTransfer, 0, needUploads)
 	}
 	readbacks := readbackDst[:0]
 	if cap(readbacks) < len(plans) {
@@ -1054,7 +1275,8 @@ func VulkanCommandPlanFromPlansInto(shaderDst []VulkanShaderModulePlan, layoutDs
 		resources = vulkanCommandResourcesInto(resources, p)
 		cmd.Resources = resources[start:len(resources)]
 		descriptorStart := len(descriptors)
-		descriptors = vulkanDescriptorWritesInto(descriptors, cmd.Resources)
+		var totalBufferBytes, uploadBytes, readbackBytes int64
+		descriptors, barriers, allocations, uploads, readbacks, totalBufferBytes, uploadBytes, readbackBytes = vulkanCommandResourceArtifactsInto(descriptors, barriers, allocations, uploads, readbacks, len(cmds), cmd.Resources)
 		cmd.DescriptorWrites = descriptors[descriptorStart:len(descriptors)]
 		layoutIdx := -1
 		if pipeIdx >= 0 && pipeIdx < len(pipes) {
@@ -1069,14 +1291,14 @@ func VulkanCommandPlanFromPlansInto(shaderDst []VulkanShaderModulePlan, layoutDs
 		cmd.PushConstants = VulkanPushConstants{Rows: uint32(p.Rows), Cols: uint32(p.Cols), Bytes: p.Kernel.PushConstantBytes}
 		cmds = append(cmds, cmd)
 		commandIndex := len(cmds) - 1
-		records = vulkanCommandRecordsInto(records, commandIndex, cmd, pipes)
-		barriers = vulkanBufferBarriersInto(barriers, commandIndex, cmd.Resources)
-		allocations = vulkanBufferAllocationsInto(allocations, commandIndex, cmd.Resources)
-		uploads, readbacks = vulkanBufferTransfersInto(uploads, readbacks, commandIndex, cmd.Resources)
+		records = vulkanCommandRecordsInto(records, commandIndex, cmd)
+		out.TotalBufferBytes += totalBufferBytes
+		out.UploadBytes += uploadBytes
+		out.ReadbackBytes += readbackBytes
 		out.Dispatches += dispatches
 	}
 	out.Commands = cmds
-	batches = vulkanDispatchBatchesInto(batches, cmds, pipes)
+	batches = vulkanDispatchBatchesInto(batches, cmds)
 	out.DispatchBatches = batches
 	out.Records = records
 	out.Barriers = barriers
@@ -1095,20 +1317,9 @@ func VulkanCommandPlanFromPlansInto(shaderDst []VulkanShaderModulePlan, layoutDs
 	out.ReadbackCount = len(readbacks)
 	out.ResourceCount = len(resources)
 	out.DescriptorWriteCount = len(descriptors)
-	for _, a := range allocations {
-		out.TotalBufferBytes += a.AlignedBytes
-	}
-	for _, u := range uploads {
-		out.UploadBytes += u.Bytes
-	}
-	for _, r := range readbacks {
-		out.ReadbackBytes += r.Bytes
-	}
-	for _, b := range batches {
-		out.PipelineBindCount += b.PipelineBindCount
-		out.DescriptorBindCount += b.DescriptorBindCount
-		out.PushConstantCount += b.PushConstantCount
-	}
+	out.PipelineBindCount = len(batches)
+	out.DescriptorBindCount = len(cmds)
+	out.PushConstantCount = len(cmds)
 	out.DescriptorPool = vulkanDescriptorPoolPlan(out.CommandCount, out.DescriptorWriteCount)
 	out.CommandPool = vulkanCommandPoolPlan(out.CommandCount)
 	out.QueueSubmit = vulkanQueueSubmitPlan(out.CommandPool.CommandBufferCount)
@@ -1145,13 +1356,10 @@ func vulkanCommandResourcesInto(dst []VulkanResource, p VulkanPlan) []VulkanReso
 	return dst
 }
 
-func vulkanDispatchBatchesInto(dst []VulkanDispatchBatch, cmds []VulkanCommand, pipes []VulkanPipelinePlan) []VulkanDispatchBatch {
+func vulkanDispatchBatchesInto(dst []VulkanDispatchBatch, cmds []VulkanCommand) []VulkanDispatchBatch {
 	out := dst[:0]
 	for i, cmd := range cmds {
-		layoutIdx := -1
-		if cmd.PipelineIndex >= 0 && cmd.PipelineIndex < len(pipes) {
-			layoutIdx = pipes[cmd.PipelineIndex].LayoutIndex
-		}
+		layoutIdx := cmd.DescriptorSet.LayoutIndex
 		if len(out) > 0 {
 			last := &out[len(out)-1]
 			if last.PipelineIndex == cmd.PipelineIndex && last.LayoutIndex == layoutIdx && last.CommandStart+last.CommandCount == i {
@@ -1191,11 +1399,18 @@ func vulkanResourceFromBinding(b VulkanBinding, bytes int64) VulkanResource {
 	}
 }
 
-func vulkanDescriptorWritesInto(dst []VulkanDescriptorWrite, resources []VulkanResource) []VulkanDescriptorWrite {
-	start := len(dst)
-	dst = dst[:start+len(resources)]
+func vulkanCommandResourceArtifactsInto(descriptorDst []VulkanDescriptorWrite, barrierDst []VulkanBufferBarrier, allocationDst []VulkanBufferAllocation, uploadDst []VulkanBufferTransfer, readbackDst []VulkanBufferTransfer, commandIndex int, resources []VulkanResource) ([]VulkanDescriptorWrite, []VulkanBufferBarrier, []VulkanBufferAllocation, []VulkanBufferTransfer, []VulkanBufferTransfer, int64, int64, int64) {
+	descriptorStart := len(descriptorDst)
+	barrierStart := len(barrierDst)
+	allocationStart := len(allocationDst)
+	descriptorDst = descriptorDst[:descriptorStart+len(resources)]
+	barrierDst = barrierDst[:barrierStart+len(resources)]
+	allocationDst = allocationDst[:allocationStart+len(resources)]
+	standardBindings := len(resources) == 3 || len(resources) == 4
+	lastResource := len(resources) - 1
+	var totalBufferBytes, uploadBytes, readbackBytes int64
 	for i, r := range resources {
-		dst[start+i] = VulkanDescriptorWrite{
+		descriptorDst[descriptorStart+i] = VulkanDescriptorWrite{
 			Binding:        r.Binding,
 			DescriptorType: "storage_buffer",
 			ResourceName:   r.Name,
@@ -1203,15 +1418,77 @@ func vulkanDescriptorWritesInto(dst []VulkanDescriptorWrite, resources []VulkanR
 			RangeBytes:     r.Bytes,
 			Access:         r.Access,
 		}
+		b := VulkanBufferBarrier{
+			CommandIndex: commandIndex,
+			Binding:      r.Binding,
+			ResourceName: r.Name,
+			Role:         r.Role,
+			Bytes:        r.Bytes,
+		}
+		isOutput := r.Role == "output"
+		alignmentBytes := vulkanStorageBufferAlignment(r)
+		if standardBindings {
+			isOutput = i == lastResource
+			if i == 1 {
+				alignmentBytes = 256
+			} else {
+				alignmentBytes = 64
+			}
+		}
+		if isOutput {
+			b.SrcStage = "compute_shader"
+			b.DstStage = "compute_shader"
+			b.SrcAccess = "shader_write"
+			b.DstAccess = "shader_read"
+		} else {
+			b.SrcStage = "host"
+			b.DstStage = "compute_shader"
+			b.SrcAccess = "host_write"
+			b.DstAccess = "shader_read"
+		}
+		barrierDst[barrierStart+i] = b
+		a := VulkanBufferAllocation{
+			CommandIndex:   commandIndex,
+			Binding:        r.Binding,
+			ResourceName:   r.Name,
+			Role:           r.Role,
+			Bytes:          r.Bytes,
+			AlignmentBytes: alignmentBytes,
+		}
+		a.AlignedBytes = alignInt64(r.Bytes, a.AlignmentBytes)
+		if isOutput {
+			a.Usage = "storage_buffer|transfer_src"
+			a.MemoryProperties = "device_local"
+			readbackDst = append(readbackDst, VulkanBufferTransfer{
+				CommandIndex: commandIndex,
+				Binding:      r.Binding,
+				ResourceName: r.Name,
+				Role:         r.Role,
+				Direction:    "device_to_host",
+				Bytes:        r.Bytes,
+			})
+			readbackBytes += r.Bytes
+		} else {
+			a.Usage = "storage_buffer|transfer_dst"
+			a.MemoryProperties = "host_visible|device_local"
+			uploadDst = append(uploadDst, VulkanBufferTransfer{
+				CommandIndex: commandIndex,
+				Binding:      r.Binding,
+				ResourceName: r.Name,
+				Role:         r.Role,
+				Direction:    "host_to_device",
+				Bytes:        r.Bytes,
+			})
+			uploadBytes += r.Bytes
+		}
+		allocationDst[allocationStart+i] = a
+		totalBufferBytes += a.AlignedBytes
 	}
-	return dst
+	return descriptorDst, barrierDst, allocationDst, uploadDst, readbackDst, totalBufferBytes, uploadBytes, readbackBytes
 }
 
-func vulkanCommandRecordsInto(dst []VulkanCommandRecord, commandIndex int, cmd VulkanCommand, pipes []VulkanPipelinePlan) []VulkanCommandRecord {
-	layoutIdx := -1
-	if cmd.PipelineIndex >= 0 && cmd.PipelineIndex < len(pipes) {
-		layoutIdx = pipes[cmd.PipelineIndex].LayoutIndex
-	}
+func vulkanCommandRecordsInto(dst []VulkanCommandRecord, commandIndex int, cmd VulkanCommand) []VulkanCommandRecord {
+	layoutIdx := cmd.DescriptorSet.LayoutIndex
 	start := len(dst)
 	dst = dst[:start+4]
 	dst[start] = VulkanCommandRecord{
@@ -1246,58 +1523,6 @@ func vulkanCommandRecordsInto(dst []VulkanCommandRecord, commandIndex int, cmd V
 	return dst
 }
 
-func vulkanBufferBarriersInto(dst []VulkanBufferBarrier, commandIndex int, resources []VulkanResource) []VulkanBufferBarrier {
-	start := len(dst)
-	dst = dst[:start+len(resources)]
-	for i, r := range resources {
-		b := VulkanBufferBarrier{
-			CommandIndex: commandIndex,
-			Binding:      r.Binding,
-			ResourceName: r.Name,
-			Role:         r.Role,
-			Bytes:        r.Bytes,
-		}
-		if r.Access == "writeonly" {
-			b.SrcStage = "compute_shader"
-			b.DstStage = "compute_shader"
-			b.SrcAccess = "shader_write"
-			b.DstAccess = "shader_read"
-		} else {
-			b.SrcStage = "host"
-			b.DstStage = "compute_shader"
-			b.SrcAccess = "host_write"
-			b.DstAccess = "shader_read"
-		}
-		dst[start+i] = b
-	}
-	return dst
-}
-
-func vulkanBufferAllocationsInto(dst []VulkanBufferAllocation, commandIndex int, resources []VulkanResource) []VulkanBufferAllocation {
-	start := len(dst)
-	dst = dst[:start+len(resources)]
-	for i, r := range resources {
-		a := VulkanBufferAllocation{
-			CommandIndex: commandIndex,
-			Binding:      r.Binding,
-			ResourceName: r.Name,
-			Role:         r.Role,
-			Bytes:        r.Bytes,
-		}
-		a.AlignmentBytes = vulkanStorageBufferAlignment(r)
-		a.AlignedBytes = alignInt64(r.Bytes, a.AlignmentBytes)
-		if r.Role == "output" {
-			a.Usage = "storage_buffer|transfer_src"
-			a.MemoryProperties = "device_local"
-		} else {
-			a.Usage = "storage_buffer|transfer_dst"
-			a.MemoryProperties = "host_visible|device_local"
-		}
-		dst[start+i] = a
-	}
-	return dst
-}
-
 func vulkanStorageBufferAlignment(r VulkanResource) int64 {
 	switch r.Role {
 	case "weight":
@@ -1318,26 +1543,6 @@ func alignInt64(v, alignment int64) int64 {
 		return v
 	}
 	return v + alignment - rem
-}
-
-func vulkanBufferTransfersInto(uploadDst, readbackDst []VulkanBufferTransfer, commandIndex int, resources []VulkanResource) ([]VulkanBufferTransfer, []VulkanBufferTransfer) {
-	for _, r := range resources {
-		t := VulkanBufferTransfer{
-			CommandIndex: commandIndex,
-			Binding:      r.Binding,
-			ResourceName: r.Name,
-			Role:         r.Role,
-			Bytes:        r.Bytes,
-		}
-		if r.Role == "output" {
-			t.Direction = "device_to_host"
-			readbackDst = append(readbackDst, t)
-		} else {
-			t.Direction = "host_to_device"
-			uploadDst = append(uploadDst, t)
-		}
-	}
-	return uploadDst, readbackDst
 }
 
 func vulkanDescriptorPoolPlan(commandCount, descriptorWriteCount int) VulkanDescriptorPoolPlan {
@@ -1394,20 +1599,19 @@ func vulkanFencePlan(submitCount int) VulkanFencePlan {
 }
 
 func vulkanPipelineCachePlan(pipes []VulkanPipelinePlan) VulkanPipelineCachePlan {
-	var layoutRefs, shaderRefs int
+	var refs int
 	var hash uint64 = 14695981039346656037
 	for _, p := range pipes {
-		layoutRefs += p.PlanRefs
-		shaderRefs += p.PlanRefs
+		refs += p.PlanRefs
 		hash ^= p.CacheKeyHash + 0x9e3779b97f4a7c15 + (hash << 6) + (hash >> 2)
 	}
 	return VulkanPipelineCachePlan{
 		CacheKeyHash: hash,
 		EntryCount:   len(pipes),
 		CreateCount:  len(pipes),
-		ReuseCount:   max(0, layoutRefs-len(pipes)),
-		LayoutRefs:   layoutRefs,
-		ShaderRefs:   shaderRefs,
+		ReuseCount:   max(0, refs-len(pipes)),
+		LayoutRefs:   refs,
+		ShaderRefs:   refs,
 		Persistable:  len(pipes) > 0,
 	}
 }
@@ -1460,6 +1664,32 @@ func vulkanResourceBytes(p VulkanPlan, role string) int64 {
 }
 
 func vulkanPipelineIndex(pipes []VulkanPipelinePlan, key VulkanPipelineKey, stage string) int {
+	if len(pipes) == 6 {
+		idx := -1
+		switch stage {
+		case "text":
+			switch key.KernelName {
+			case "fused_qkv_f32_wg256", "fused_qkv_q8_wg256", "fused_qkv_q6_wg256", "fused_qkv_q4_wg256":
+				idx = 0
+			case "matvec_f32_wg256", "matvec_q8_wg256", "matvec_q6_wg256", "matvec_q4_wg256":
+				idx = 1
+			case "fused_swiglu_f32_wg256", "fused_swiglu_q8_wg256", "fused_swiglu_q6_wg256", "fused_swiglu_q4_wg256":
+				idx = 2
+			}
+		case "vision":
+			switch key.KernelName {
+			case "matvec_f32_wg256":
+				idx = 3
+			case "fused_qkv_f32_wg256":
+				idx = 4
+			case "fused_swiglu_f32_wg256":
+				idx = 5
+			}
+		}
+		if idx >= 0 && pipes[idx].Key == key && pipes[idx].Stage == stage {
+			return idx
+		}
+	}
 	for i := range pipes {
 		if pipes[i].Key == key && pipes[i].Stage == stage {
 			return i
@@ -1474,6 +1704,113 @@ func VulkanModelExecutionGraphFromPlans(plans []VulkanPlan) VulkanExecutionGraph
 }
 
 func VulkanModelExecutionGraphFromPlansInto(stageDst []VulkanStageSummary, plans []VulkanPlan) (VulkanExecutionGraph, []VulkanStageSummary) {
+	var graph VulkanExecutionGraph
+	stages := stageDst[:0]
+	if cap(stages) < 2 {
+		stages = make([]VulkanStageSummary, 0, 2)
+	}
+	textIdx, visionIdx := -1, -1
+	var allKeys, textKeys, visionKeys [16]VulkanPipelineKey
+	allPipelineCount, textPipelineCount, visionPipelineCount := 0, 0, 0
+	hasOtherStage := false
+	for _, p := range plans {
+		stageName := p.Stage
+		if stageName == "" {
+			stageName = vulkanPlanStage(p.Name)
+		}
+		addUniqueVulkanPipelineKey(&allKeys, &allPipelineCount, p.PipelineKey)
+		idx := -1
+		switch stageName {
+		case "text":
+			addUniqueVulkanPipelineKey(&textKeys, &textPipelineCount, p.PipelineKey)
+			idx = textIdx
+			if idx < 0 {
+				stages = append(stages, VulkanStageSummary{Name: stageName})
+				idx = len(stages) - 1
+				textIdx = idx
+			}
+		case "vision":
+			addUniqueVulkanPipelineKey(&visionKeys, &visionPipelineCount, p.PipelineKey)
+			idx = visionIdx
+			if idx < 0 {
+				stages = append(stages, VulkanStageSummary{Name: stageName})
+				idx = len(stages) - 1
+				visionIdx = idx
+			}
+		default:
+			hasOtherStage = true
+			stages = append(stages, VulkanStageSummary{Name: stageName})
+			idx = len(stages) - 1
+		}
+		addVulkanPlanToStage(&stages[idx], p)
+	}
+	graph.Stages = stages
+	graph.PipelineCount = allPipelineCount
+	for i := range stages {
+		switch stages[i].Name {
+		case "text":
+			stages[i].PipelineCount = textPipelineCount
+		case "vision":
+			stages[i].PipelineCount = visionPipelineCount
+		default:
+			if hasOtherStage {
+				stages[i].PipelineCount = countUniqueVulkanPipelineKeys(plans, stages[i].Name)
+			}
+		}
+	}
+	for _, st := range stages {
+		graph.PlanCount += st.PlanCount
+		graph.Dispatches += st.Dispatches
+		graph.WeightBytes += st.WeightBytes
+		graph.InputBytes += st.InputBytes
+		graph.OutputBytes += st.OutputBytes
+		graph.SharedBytes += st.SharedBytes
+	}
+	return graph, stages
+}
+
+func addUniqueVulkanPipelineKey(keys *[16]VulkanPipelineKey, count *int, key VulkanPipelineKey) {
+	for i := 0; i < *count; i++ {
+		if keys[i] == key {
+			return
+		}
+	}
+	if *count < len(keys) {
+		keys[*count] = key
+	}
+	*count++
+}
+
+func VulkanModelPlanSummaryFromPlans(plans []VulkanPlan, shape VulkanModelShape) VulkanPlanSummary {
+	var st VulkanPlanSummary
+	st.Plans = plans
+	st.PlanCount = len(plans)
+	st.TextLayers = shape.TextLayers
+	st.VisionLayers = shape.VisionLayers
+	var keys [16]VulkanPipelineKey
+	pipelineCount := 0
+	for _, p := range plans {
+		addUniqueVulkanPipelineKey(&keys, &pipelineCount, p.PipelineKey)
+		repeat := p.Repeat
+		if repeat < 1 {
+			repeat = 1
+		}
+		dispatches := p.Dispatches
+		if dispatches == 0 {
+			dispatches = repeat * p.GroupsX * max(1, p.GroupsY)
+		}
+		st.Dispatches += dispatches
+		st.WeightBytes += p.WeightByte * int64(repeat)
+		st.InputBytes += p.InputBytes * int64(repeat)
+		st.OutputBytes += p.OutputBytes * int64(repeat)
+		st.SharedBytes += int64(p.SharedByte) * int64(dispatches)
+	}
+	st.PipelineCount = pipelineCount
+	return st
+}
+
+func vulkanModelSummaryGraphFromPlansPipelinesInto(stageDst []VulkanStageSummary, plans []VulkanPlan, pipes []VulkanPipelinePlan, shape VulkanModelShape) (VulkanPlanSummary, VulkanExecutionGraph, []VulkanStageSummary) {
+	var summary VulkanPlanSummary
 	var graph VulkanExecutionGraph
 	stages := stageDst[:0]
 	if cap(stages) < 2 {
@@ -1507,10 +1844,13 @@ func VulkanModelExecutionGraphFromPlansInto(stageDst []VulkanStageSummary, plans
 		}
 		addVulkanPlanToStage(&stages[idx], p)
 	}
-	graph.Stages = stages
-	graph.PipelineCount = countUniqueVulkanPipelineKeys(plans, "")
-	for i := range stages {
-		stages[i].PipelineCount = countUniqueVulkanPipelineKeys(plans, stages[i].Name)
+	for _, p := range pipes {
+		for i := range stages {
+			if stages[i].Name == p.Stage {
+				stages[i].PipelineCount++
+				break
+			}
+		}
 	}
 	for _, st := range stages {
 		graph.PlanCount += st.PlanCount
@@ -1520,32 +1860,19 @@ func VulkanModelExecutionGraphFromPlansInto(stageDst []VulkanStageSummary, plans
 		graph.OutputBytes += st.OutputBytes
 		graph.SharedBytes += st.SharedBytes
 	}
-	return graph, stages
-}
-
-func VulkanModelPlanSummaryFromPlans(plans []VulkanPlan, shape VulkanModelShape) VulkanPlanSummary {
-	var st VulkanPlanSummary
-	st.Plans = plans
-	st.PlanCount = len(plans)
-	st.PipelineCount = countUniqueVulkanPipelineKeys(plans, "")
-	st.TextLayers = shape.TextLayers
-	st.VisionLayers = shape.VisionLayers
-	for _, p := range plans {
-		repeat := p.Repeat
-		if repeat < 1 {
-			repeat = 1
-		}
-		dispatches := p.Dispatches
-		if dispatches == 0 {
-			dispatches = repeat * p.GroupsX * max(1, p.GroupsY)
-		}
-		st.Dispatches += dispatches
-		st.WeightBytes += p.WeightByte * int64(repeat)
-		st.InputBytes += p.InputBytes * int64(repeat)
-		st.OutputBytes += p.OutputBytes * int64(repeat)
-		st.SharedBytes += int64(p.SharedByte) * int64(dispatches)
-	}
-	return st
+	graph.Stages = stages
+	graph.PipelineCount = len(pipes)
+	summary.Plans = plans
+	summary.PlanCount = len(plans)
+	summary.PipelineCount = len(pipes)
+	summary.Dispatches = graph.Dispatches
+	summary.WeightBytes = graph.WeightBytes
+	summary.InputBytes = graph.InputBytes
+	summary.OutputBytes = graph.OutputBytes
+	summary.SharedBytes = graph.SharedBytes
+	summary.TextLayers = shape.TextLayers
+	summary.VisionLayers = shape.VisionLayers
+	return summary, graph, stages
 }
 
 func countUniqueVulkanPipelineKeys(plans []VulkanPlan, stage string) int {
@@ -1632,21 +1959,105 @@ func ceilDiv(a, b int) int {
 }
 
 func estimateVulkanWeightBytes(quant string, rows, cols int) int64 {
+	n, _ := estimateVulkanWeightBytesChecked(quant, rows, cols)
+	return n
+}
+
+func estimateVulkanWeightBytesChecked(quant string, rows, cols int) (int64, bool) {
+	return estimateVulkanWeightBytesCheckedNormalized(normalizeVulkanQuant(quant), rows, cols)
+}
+
+func estimateVulkanWeightBytesCheckedNormalized(quant string, rows, cols int) (int64, bool) {
 	if rows <= 0 || cols <= 0 {
-		return 0
+		return 0, true
 	}
-	elements := int64(rows) * int64(cols)
-	scale := int64(rows) * 4
-	switch normalizeVulkanQuant(quant) {
+	elements, ok := checkedMulInt64(int64(rows), int64(cols))
+	if !ok {
+		return 0, false
+	}
+	scale, ok := checkedMulInt64(int64(rows), 4)
+	if !ok {
+		return 0, false
+	}
+	switch quant {
 	case "q8":
-		return elements + scale
+		return checkedAddInt64(elements, scale)
 	case "q6":
-		return (elements*6+7)/8 + scale
+		bits, ok := checkedMulInt64(elements, 6)
+		if !ok {
+			return 0, false
+		}
+		bits, ok = checkedAddInt64(bits, 7)
+		if !ok {
+			return 0, false
+		}
+		return checkedAddInt64(bits/8, scale)
 	case "q4":
-		return (elements+1)/2 + scale
+		packed, ok := checkedAddInt64(elements, 1)
+		if !ok {
+			return 0, false
+		}
+		return checkedAddInt64(packed/2, scale)
 	default:
-		return elements * 4
+		return checkedMulInt64(elements, 4)
 	}
+}
+
+func checkedDispatches(repeat, groupsX, groupsY int) (int, bool) {
+	n, ok := checkedMulInt(repeat, groupsX)
+	if !ok {
+		return 0, false
+	}
+	return checkedMulInt(n, groupsY)
+}
+
+func checkedMulInt(a, b int) (int, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	if a != 0 && b > maxInt()/a {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func checkedAddInt(a, b int) (int, bool) {
+	if a < 0 || b < 0 || a > maxInt()-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedMulInt64(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	if a != 0 && b > maxInt64()/a {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func checkedAddInt64(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 || a > maxInt64()-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
+}
+
+func maxInt64() int64 {
+	return int64(^uint64(0) >> 1)
+}
+
+func maxUint32Int() int {
+	if ^uint(0)>>32 == 0 {
+		return maxInt()
+	}
+	return int(^uint32(0))
 }
 
 const vulkanMatVecF32GLSL = `#version 450

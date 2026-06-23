@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"os"
@@ -37,6 +38,12 @@ func TestNormalizeAPIURL(t *testing.T) {
 func TestNormalizeAPIURLRejectsEmpty(t *testing.T) {
 	if _, err := normalizeAPIURL(" "); err == nil {
 		t.Fatal("expected empty URL error")
+	}
+}
+
+func TestNormalizeAPIURLRejectsUnsupportedScheme(t *testing.T) {
+	if _, err := normalizeAPIURL("ftp://example.test/v1/ocr"); err == nil || !strings.Contains(err.Error(), "http or https") {
+		t.Fatalf("err=%v want scheme error", err)
 	}
 }
 
@@ -78,6 +85,16 @@ func TestResponseErrorPrefersJSONError(t *testing.T) {
 	}
 }
 
+func TestResponseErrorTruncatesPlainText(t *testing.T) {
+	err := responseError(http.StatusBadGateway, []byte(strings.Repeat("x", maxErrorTextBytes+100)))
+	if err == nil {
+		t.Fatal("expected response error")
+	}
+	if got := err.Error(); !strings.Contains(got, "[truncated]") || len(got) > maxErrorTextBytes+128 {
+		t.Fatalf("err len=%d text=%q", len(got), got)
+	}
+}
+
 func TestRequestContextDefaultsAndExpires(t *testing.T) {
 	ctx, cancel := requestContext(0)
 	defer cancel()
@@ -91,6 +108,39 @@ func TestRequestContextDefaultsAndExpires(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("context expired too early")
 	default:
+	}
+}
+
+func TestNormalizeMaxNewTokens(t *testing.T) {
+	if got := normalizeMaxNewTokens(0); got != defaultMaxNew {
+		t.Fatalf("default max_new=%d", got)
+	}
+	if got := normalizeMaxNewTokens(7); got != 7 {
+		t.Fatalf("max_new=%d", got)
+	}
+	if got := normalizeMaxNewTokens(maxClientMaxNew + 1); got != maxClientMaxNew {
+		t.Fatalf("clamped max_new=%d", got)
+	}
+}
+
+func TestNormalizeTimeoutSecs(t *testing.T) {
+	if got := normalizeTimeoutSecs(0); got != defaultTimeout {
+		t.Fatalf("default timeout=%d", got)
+	}
+	if got := normalizeTimeoutSecs(7); got != 7 {
+		t.Fatalf("timeout=%d", got)
+	}
+	if got := normalizeTimeoutSecs(maxTimeoutSecs + 1); got != maxTimeoutSecs {
+		t.Fatalf("clamped timeout=%d", got)
+	}
+}
+
+func TestSafeDefaultFilename(t *testing.T) {
+	if got := safeDefaultFilename(`C:\tmp\result.json`, "fallback.txt"); got != "result.json" {
+		t.Fatalf("filename=%q", got)
+	}
+	if got := safeDefaultFilename(" ", "fallback.txt"); got != "fallback.txt" {
+		t.Fatalf("fallback filename=%q", got)
 	}
 }
 
@@ -113,6 +163,49 @@ func TestCheckFileSize(t *testing.T) {
 	}
 	if err := checkFileSize(path, 3, "test"); err == nil || !strings.Contains(err.Error(), "too large") {
 		t.Fatalf("checkFileSize err=%v want too large", err)
+	}
+	if err := checkFileSize(t.TempDir(), maxUploadBytes, "test"); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("checkFileSize dir err=%v want regular file", err)
+	}
+}
+
+func TestImageDataURLFromBytes(t *testing.T) {
+	got := imageDataURLFromBytes([]byte("image"), "image/png")
+	want := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("image"))
+	if got != want {
+		t.Fatalf("data url=%q want %q", got, want)
+	}
+}
+
+func BenchmarkImageDataURLFromBytes(b *testing.B) {
+	data := make([]byte, 1<<20)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got := imageDataURLFromBytes(data, "image/png")
+		if len(got) == 0 {
+			b.Fatal("empty data url")
+		}
+	}
+}
+
+func BenchmarkImageDataURLFromBytesOldConcat(b *testing.B) {
+	data := make([]byte, 1<<20)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	b.SetBytes(int64(len(data)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got := "data:image/png;base64," + base64.StdEncoding.EncodeToString(data)
+		if len(got) == 0 {
+			b.Fatal("empty data url")
+		}
 	}
 }
 

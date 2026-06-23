@@ -8,11 +8,17 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"unsafe"
+
+	"paddleocrvl-go/internal/jsonutil"
 )
 
 const maxHeaderBytes = 256 << 20
+const maxIndexBytes = 16 << 20
+const maxTensorCount = 1 << 20
+const maxShapeDims = 8
 
 type TensorMeta struct {
 	DType       string   `json:"dtype"`
@@ -75,8 +81,18 @@ func OpenSetFile(path string) (*Set, error) {
 }
 
 func OpenSetIndex(path string) (*Set, error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > maxIndexBytes {
+		return nil, fmt.Errorf("safetensors index too large: %d bytes > %d", st.Size(), maxIndexBytes)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := jsonutil.RejectDuplicateKeys(b, path); err != nil {
 		return nil, err
 	}
 	var idx indexFile
@@ -86,14 +102,30 @@ func OpenSetIndex(path string) (*Set, error) {
 	if len(idx.WeightMap) == 0 {
 		return nil, fmt.Errorf("%s has empty weight_map", path)
 	}
+	if err := validateTensorCount(len(idx.WeightMap)); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	dir := filepath.Dir(path)
 	files := make(map[string]*File, 4)
 	tensorFile := make(map[string]string, len(idx.WeightMap))
 	tensors := make(map[string]TensorMeta, len(idx.WeightMap))
 	for tensorName, shard := range idx.WeightMap {
+		if err := validateTensorName(tensorName); err != nil {
+			for _, f := range files {
+				_ = f.Close()
+			}
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
 		sf := files[shard]
 		if sf == nil {
-			sf, err = Open(filepath.Join(dir, shard))
+			shardPath, err := safeShardPath(dir, shard)
+			if err != nil {
+				for _, f := range files {
+					_ = f.Close()
+				}
+				return nil, err
+			}
+			sf, err = Open(shardPath)
 			if err != nil {
 				for _, f := range files {
 					_ = f.Close()
@@ -115,9 +147,39 @@ func OpenSetIndex(path string) (*Set, error) {
 	return &Set{files: files, tensorFile: tensorFile, Tensors: tensors}, nil
 }
 
+func safeShardPath(dir, shard string) (string, error) {
+	if shard == "" || strings.ContainsAny(shard, `/\`) || !safeShardFileName(shard) {
+		return "", fmt.Errorf("unsafe shard path %q", shard)
+	}
+	sep := string(filepath.Separator)
+	if strings.HasSuffix(dir, sep) {
+		return dir + shard, nil
+	}
+	return dir + sep + shard, nil
+}
+
+func safeShardFileName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func Open(path string) (*File, error) {
 	f, err := os.Open(path)
 	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
 		return nil, err
 	}
 	var nbuf [8]byte
@@ -135,8 +197,20 @@ func Open(path string) (*File, error) {
 		f.Close()
 		return nil, err
 	}
+	if err := jsonutil.RejectDuplicateKeys(header, path); err != nil {
+		f.Close()
+		return nil, err
+	}
 	raw := map[string]json.RawMessage{}
 	if err := json.Unmarshal(header, &raw); err != nil {
+		f.Close()
+		return nil, err
+	}
+	tensorCount := len(raw)
+	if _, ok := raw["__metadata__"]; ok {
+		tensorCount--
+	}
+	if err := validateTensorCount(tensorCount); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -145,14 +219,75 @@ func Open(path string) (*File, error) {
 		if k == "__metadata__" {
 			continue
 		}
+		if err := validateTensorName(k); err != nil {
+			f.Close()
+			return nil, err
+		}
 		var tm TensorMeta
 		if err := json.Unmarshal(v, &tm); err != nil {
 			f.Close()
 			return nil, fmt.Errorf("%s: %w", k, err)
 		}
+		if err := validateTensorMeta(k, tm, st.Size()-(8+headerLen)); err != nil {
+			f.Close()
+			return nil, err
+		}
 		tensors[k] = tm
 	}
 	return &File{f: f, dataStart: 8 + headerLen, Tensors: tensors}, nil
+}
+
+func validateTensorCount(count int) error {
+	if count > maxTensorCount {
+		return fmt.Errorf("safetensors tensor count too large: %d > %d", count, maxTensorCount)
+	}
+	return nil
+}
+
+func validateTensorName(name string) error {
+	if name == "" {
+		return fmt.Errorf("safetensors tensor name must not be empty")
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] < 0x20 || name[i] == 0x7f {
+			return fmt.Errorf("safetensors tensor name contains control character")
+		}
+	}
+	return nil
+}
+
+func validateTensorMeta(name string, meta TensorMeta, dataBytes int64) error {
+	size, err := tensorDataBytes(meta)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	start, end := meta.DataOffsets[0], meta.DataOffsets[1]
+	if start < 0 || end < start {
+		return fmt.Errorf("%s: invalid data_offsets %v", name, meta.DataOffsets)
+	}
+	if end-start != size {
+		return fmt.Errorf("%s: data_offsets size %d does not match tensor size %d", name, end-start, size)
+	}
+	if end > dataBytes {
+		return fmt.Errorf("%s: data_offsets %v exceed file data size %d", name, meta.DataOffsets, dataBytes)
+	}
+	return nil
+}
+
+func tensorDataBytes(meta TensorMeta) (int64, error) {
+	elemSize, err := dtypeSize(meta.DType)
+	if err != nil {
+		return 0, err
+	}
+	countInt, err := checkedElemCount(meta.Shape)
+	if err != nil {
+		return 0, err
+	}
+	count := int64(countInt)
+	if count > math.MaxInt64/int64(elemSize) {
+		return 0, fmt.Errorf("tensor byte size overflows int64")
+	}
+	return count * int64(elemSize), nil
 }
 
 func (s *Set) Close() error {
@@ -271,8 +406,8 @@ func (sf *File) readEncodedFloat32At(out []float32, off int64, dtype string) err
 	}
 	blockElems := min(len(out), targetBytes/2)
 	needRaw := blockElems * 2
-	raw := getEncodedRawBuffer(needRaw)
-	defer putEncodedRawBuffer(raw)
+	raw, rawHandle := getEncodedRawBuffer(needRaw)
+	defer putEncodedRawBuffer(rawHandle, raw)
 	done := 0
 	for done < len(out) {
 		n := min(len(out)-done, blockElems)
@@ -291,26 +426,28 @@ func (sf *File) readEncodedFloat32At(out []float32, off int64, dtype string) err
 	return nil
 }
 
-func getEncodedRawBuffer(n int) []byte {
+func getEncodedRawBuffer(n int) ([]byte, *[]byte) {
 	if n <= 0 {
-		return nil
+		return nil, nil
 	}
 	if v := encodedRawBufferPool.Get(); v != nil {
 		p := v.(*[]byte)
 		if cap(*p) >= n {
-			return (*p)[:n]
+			return (*p)[:n], p
 		}
 	}
-	return make([]byte, n)
+	p := new([]byte)
+	*p = make([]byte, n)
+	return *p, p
 }
 
-func putEncodedRawBuffer(buf []byte) {
+func putEncodedRawBuffer(p *[]byte, buf []byte) {
 	const maxEncodedRawBuffer = 1 << 20
-	if cap(buf) == 0 || cap(buf) > maxEncodedRawBuffer {
+	if p == nil || cap(buf) == 0 || cap(buf) > maxEncodedRawBuffer {
 		return
 	}
-	buf = buf[:0]
-	encodedRawBufferPool.Put(&buf)
+	*p = buf[:0]
+	encodedRawBufferPool.Put(p)
 }
 
 func (sf *File) Float32Rows(name string, fn func(row int, values []float32) error) ([]int64, error) {
@@ -369,13 +506,9 @@ func (sf *File) float32RowsF32Block(meta TensorMeta, shape []int64, cols, rowByt
 	rowsPerBlock := float32RowsPerBlock(rows, rowBytes)
 	need := rowsPerBlock * cols
 	usePool := buf == nil
+	var poolHandle *[]float32
 	if buf == nil {
-		if v := float32RowsBufferPool.Get(); v != nil {
-			p := v.(*[]float32)
-			if cap(*p) >= need {
-				buf = (*p)[:need]
-			}
-		}
+		buf, poolHandle = getFloat32RowsBuffer(need)
 	}
 	if len(buf) < need {
 		buf = make([]float32, need)
@@ -383,7 +516,7 @@ func (sf *File) float32RowsF32Block(meta TensorMeta, shape []int64, cols, rowByt
 		buf = buf[:need]
 	}
 	if usePool {
-		defer putFloat32RowsBuffer(buf)
+		defer putFloat32RowsBuffer(poolHandle, buf)
 	}
 	base := sf.dataStart + meta.DataOffsets[0]
 	for r := 0; r < rows; {
@@ -410,20 +543,23 @@ func (sf *File) float32RowsEncodedBlock(meta TensorMeta, shape []int64, cols, ro
 	rows := int(shape[0])
 	rowsPerBlock := float32RowsPerBlock(rows, rowBytes)
 	needRaw := rowsPerBlock * rowBytes
-	if len(raw) < needRaw {
+	useRawPool := raw == nil
+	var rawHandle *[]byte
+	if raw == nil {
+		raw, rawHandle = getEncodedRawBuffer(needRaw)
+	} else if len(raw) < needRaw {
 		raw = make([]byte, needRaw)
 	} else {
 		raw = raw[:needRaw]
 	}
+	if useRawPool {
+		defer putEncodedRawBuffer(rawHandle, raw)
+	}
 	values := floatBuf
 	usePool := values == nil
+	var valueHandle *[]float32
 	if values == nil {
-		if v := float32RowsBufferPool.Get(); v != nil {
-			p := v.(*[]float32)
-			if cap(*p) >= cols {
-				values = (*p)[:cols]
-			}
-		}
+		values, valueHandle = getFloat32RowsBuffer(cols)
 	}
 	if len(values) < cols {
 		values = make([]float32, cols)
@@ -431,7 +567,7 @@ func (sf *File) float32RowsEncodedBlock(meta TensorMeta, shape []int64, cols, ro
 		values = values[:cols]
 	}
 	if usePool {
-		defer putFloat32RowsBuffer(values)
+		defer putFloat32RowsBuffer(valueHandle, values)
 	}
 	base := sf.dataStart + meta.DataOffsets[0]
 	for r := 0; r < rows; {
@@ -454,13 +590,28 @@ func (sf *File) float32RowsEncodedBlock(meta TensorMeta, shape []int64, cols, ro
 	return shape, nil
 }
 
-func putFloat32RowsBuffer(buf []float32) {
+func getFloat32RowsBuffer(n int) ([]float32, *[]float32) {
+	if n <= 0 {
+		return nil, nil
+	}
+	if v := float32RowsBufferPool.Get(); v != nil {
+		p := v.(*[]float32)
+		if cap(*p) >= n {
+			return (*p)[:n], p
+		}
+	}
+	p := new([]float32)
+	*p = make([]float32, n)
+	return *p, p
+}
+
+func putFloat32RowsBuffer(p *[]float32, buf []float32) {
 	const maxPooledFloat32RowsBuffer = 1 << 20
-	if cap(buf) == 0 || cap(buf) > maxPooledFloat32RowsBuffer {
+	if p == nil || cap(buf) == 0 || cap(buf) > maxPooledFloat32RowsBuffer {
 		return
 	}
-	buf = buf[:0]
-	float32RowsBufferPool.Put(&buf)
+	*p = buf[:0]
+	float32RowsBufferPool.Put(p)
 }
 
 func float32RowsPerBlock(rows, rowBytes int) int {
@@ -701,11 +852,43 @@ func decodeF16(out []float32, raw []byte) {
 }
 
 func elemCount(shape []int64) int {
-	n := int64(1)
-	for _, d := range shape {
-		n *= d
+	n, err := checkedElemCount64(shape)
+	if err != nil || n > int64(maxInt()) {
+		return 0
 	}
 	return int(n)
+}
+
+func checkedElemCount64(shape []int64) (int64, error) {
+	if len(shape) > maxShapeDims {
+		return 0, fmt.Errorf("shape has too many dimensions: %d", len(shape))
+	}
+	n := int64(1)
+	for _, d := range shape {
+		if d < 0 {
+			return 0, fmt.Errorf("shape contains negative dimension %d", d)
+		}
+		if d != 0 && n > math.MaxInt64/d {
+			return 0, fmt.Errorf("shape element count overflows int64")
+		}
+		n *= d
+	}
+	return n, nil
+}
+
+func checkedElemCount(shape []int64) (int, error) {
+	n, err := checkedElemCount64(shape)
+	if err != nil {
+		return 0, err
+	}
+	if n > int64(maxInt()) {
+		return 0, fmt.Errorf("shape element count overflows int")
+	}
+	return int(n), nil
+}
+
+func maxInt() int {
+	return int(^uint(0) >> 1)
 }
 
 var f16ValueTable = func() [1 << 16]float32 {

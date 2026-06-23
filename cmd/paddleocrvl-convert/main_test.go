@@ -34,6 +34,17 @@ func TestNormalizedQuant(t *testing.T) {
 	}
 }
 
+func TestValidateQuant(t *testing.T) {
+	for _, q := range []string{"", "f32", " Q8 ", "q6", "q4"} {
+		if err := validateQuant(q); err != nil {
+			t.Fatalf("quant %q err=%v", q, err)
+		}
+	}
+	if err := validateQuant("auto"); err == nil {
+		t.Fatal("expected unsupported quantization error")
+	}
+}
+
 func TestMetadataUint64(t *testing.T) {
 	meta := map[string]any{"x": uint64(7), "y": "bad"}
 	if got := metadataUint64(meta, "x"); got != 7 {

@@ -57,6 +57,30 @@ func BenchmarkTopKCandidates(b *testing.B) {
 	}
 }
 
+func BenchmarkRankedCandidatesTopK(b *testing.B) {
+	logits := make([]float32, 128000)
+	for i := range logits {
+		logits[i] = float32(i%997) / 997
+	}
+	scratch := &generationScratch{}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rankedCandidatesScratch(logits, 50, scratch)
+	}
+}
+
+func BenchmarkRankedCandidatesFull(b *testing.B) {
+	logits := make([]float32, 8192)
+	for i := range logits {
+		logits[i] = float32(i%997) / 997
+	}
+	scratch := &generationScratch{}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rankedCandidatesScratch(logits, 0, scratch)
+	}
+}
+
 func BenchmarkSampleTopK(b *testing.B) {
 	logits := make([]float32, 128000)
 	for i := range logits {

@@ -29,6 +29,20 @@ func TestTopKCandidatesSorted(t *testing.T) {
 	}
 }
 
+func TestSortTokenScoresDescSmall(t *testing.T) {
+	got := []tokenScore{
+		{id: 0, score: 0.5},
+		{id: 1, score: 3},
+		{id: 2, score: -1},
+		{id: 3, score: 2},
+	}
+	sortTokenScoresDesc(got)
+	want := []tokenScore{{id: 1, score: 3}, {id: 3, score: 2}, {id: 0, score: 0.5}, {id: 2, score: -1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sorted candidates = %#v want %#v", got, want)
+	}
+}
+
 func TestTopKCandidatesUnsortedContainsTopK(t *testing.T) {
 	logits := []float32{0.5, 9, -1, 7, 3, 8, 2}
 	got, maxScore := topKCandidatesUnsortedWithMax(logits, 3, nil)
@@ -163,6 +177,14 @@ func BenchmarkIsEOSShortList(b *testing.B) {
 	}
 }
 
+func BenchmarkIsEOSFourIDs(b *testing.B) {
+	ids := []int{2, 100257, 100258, 100259}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchEOS = isEOS(i&7, ids)
+	}
+}
+
 func TestRankedCandidatesTopKZeroSortsAll(t *testing.T) {
 	logits := []float32{2, 5, 1}
 	got := rankedCandidates(logits, 0)
@@ -190,6 +212,12 @@ func TestValidateGenerateOptions(t *testing.T) {
 	if err := ValidateGenerateOptions(GenerateOptions{TopK: -1}); err == nil {
 		t.Fatal("expected top_k error")
 	}
+	if err := ValidateGenerateOptions(GenerateOptions{EOSTokenIDs: []int{2, -1}}); err == nil {
+		t.Fatal("expected eos_token_ids error")
+	}
+	if err := ValidateGenerateOptions(GenerateOptions{EOSTokenIDs: make([]int, maxEOSTokenIDs+1)}); err == nil {
+		t.Fatal("expected eos_token_ids length error")
+	}
 }
 
 func TestGenerateWithOptionsZeroNewReturnsInputCopy(t *testing.T) {
@@ -205,6 +233,52 @@ func TestGenerateWithOptionsZeroNewReturnsInputCopy(t *testing.T) {
 	input[0] = 9
 	if res.Tokens[0] != 1 {
 		t.Fatalf("result aliased input: %v", res.Tokens)
+	}
+}
+
+func TestGenerateWithOptionsRejectsInvalidOptions(t *testing.T) {
+	rt := &Runtime{}
+	if _, err := rt.GenerateWithOptions(context.Background(), []int{1}, GenerateOptions{MaxNewTokens: -1}); err == nil {
+		t.Fatal("expected max_new_tokens error")
+	}
+	if _, err := rt.GenerateWithImageOptions(context.Background(), []int{1}, "missing.png", GenerateOptions{Temperature: math.NaN()}); err == nil {
+		t.Fatal("expected temperature error")
+	}
+	if _, err := rt.GenerateWithImageBytesOptions(context.Background(), []int{1}, []byte("not an image"), GenerateOptions{TopK: -1}); err == nil {
+		t.Fatal("expected top_k error")
+	}
+}
+
+func TestGenerateWithOptionsRejectsNegativeInputToken(t *testing.T) {
+	rt := &Runtime{}
+	if _, err := rt.GenerateWithOptions(context.Background(), []int{-1}, GenerateOptions{MaxNewTokens: 0}); err == nil {
+		t.Fatal("expected input token error")
+	}
+	if _, err := rt.GenerateWithImageOptions(context.Background(), []int{-1}, "missing.png", GenerateOptions{MaxNewTokens: 0}); err == nil {
+		t.Fatal("expected image input token error")
+	}
+	if _, err := rt.GenerateWithImageBytesOptions(context.Background(), []int{-1}, nil, GenerateOptions{MaxNewTokens: 0}); err == nil {
+		t.Fatal("expected image bytes input token error")
+	}
+}
+
+func TestGenerateWithOptionsRejectsEmptyInputWhenGenerating(t *testing.T) {
+	rt := &Runtime{}
+	res, err := rt.GenerateWithOptions(context.Background(), nil, GenerateOptions{MaxNewTokens: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Tokens) != 0 || res.PromptTokens != 0 {
+		t.Fatalf("res=%+v want empty zero-token result", res)
+	}
+	if _, err := rt.GenerateWithOptions(context.Background(), nil, GenerateOptions{MaxNewTokens: 1}); err == nil {
+		t.Fatal("expected empty input error")
+	}
+	if _, err := rt.GenerateWithImageOptions(context.Background(), nil, "missing.png", GenerateOptions{MaxNewTokens: 1}); err == nil {
+		t.Fatal("expected image empty input error")
+	}
+	if _, err := rt.GenerateWithImageBytesOptions(context.Background(), nil, []byte("not an image"), GenerateOptions{MaxNewTokens: 1}); err == nil {
+		t.Fatal("expected image bytes empty input error")
 	}
 }
 

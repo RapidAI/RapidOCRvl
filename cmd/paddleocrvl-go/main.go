@@ -95,8 +95,8 @@ func main() {
 	if *statsOnly {
 		cpu := backend.CPU()
 		if *outputJSON {
-			cmdPlan := rt.VulkanCommandPlan()
-			cmdPlanErr := backend.ValidateVulkanCommandPlan(cmdPlan)
+			vulkanArtifacts := rt.VulkanArtifactsView()
+			cmdPlanErr := rt.VulkanCommandPlanValidation()
 			writeJSON(cliStats{
 				RequestedQuantization: rt.RequestedQuantization(),
 				Quantization:          rt.Quantization(),
@@ -109,11 +109,11 @@ func main() {
 				CPU:                   cpu,
 				Memory:                backend.Memory(),
 				Backends:              backendSel,
-				VulkanPlans:           rt.VulkanPlans(),
-				VulkanPlanSummary:     rt.VulkanPlanSummary(),
-				VulkanExecutionGraph:  rt.VulkanExecutionGraph(),
-				VulkanPipelinePlan:    rt.VulkanPipelinePlan(),
-				VulkanCommandPlan:     cmdPlan,
+				VulkanPlans:           vulkanArtifacts.Plans,
+				VulkanPlanSummary:     vulkanArtifacts.Summary,
+				VulkanExecutionGraph:  vulkanArtifacts.ExecutionGraph,
+				VulkanPipelinePlan:    vulkanArtifacts.PipelinePlan,
+				VulkanCommandPlan:     vulkanArtifacts.CommandPlan,
 				VulkanCommandPlanOK:   cmdPlanErr == "",
 				VulkanCommandPlanErr:  cmdPlanErr,
 				VisionLoaded:          rt.VisionLoaded(),
@@ -274,6 +274,9 @@ func parseTokens(s string) ([]int, error) {
 		id, err := strconv.Atoi(p)
 		if err != nil {
 			return nil, fmt.Errorf("bad token %q: %w", p, err)
+		}
+		if id < 0 {
+			return nil, fmt.Errorf("token ids must not be negative: %d", id)
 		}
 		ids = append(ids, id)
 	}

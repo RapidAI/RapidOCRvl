@@ -2,6 +2,7 @@ package model
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"runtime"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 	"paddleocrvl-go/internal/tensor"
 	"paddleocrvl-go/internal/vision"
 )
+
+const maxVisionShapeCacheEntries = 16
 
 type visionLayerWeights struct {
 	ln1w, ln1b []float32
@@ -61,6 +64,16 @@ func (rt *Runtime) EncodeImage(path string) ([][]float32, error) {
 
 func (rt *Runtime) PreloadVision() error {
 	return rt.ensureVisionWeights()
+}
+
+func (rt *Runtime) validateVisionReadyConfig() error {
+	if rt == nil || rt.cfg == nil {
+		return fmt.Errorf("runtime config not initialized")
+	}
+	if rt.cfg.VisionConfig.NumHiddenLayers <= 0 {
+		return fmt.Errorf("config vision_config.num_hidden_layers must be > 0 for image encoding")
+	}
+	return validateRuntimeVisionConfig(rt.cfg.VisionConfig)
 }
 
 func (rt *Runtime) VisionLoaded() bool {
@@ -181,6 +194,9 @@ func (rt *Runtime) ensureVisionScratchEmbed(s *visionScratch) {
 }
 
 func (rt *Runtime) ensureVisionWeights() error {
+	if err := rt.validateVisionReadyConfig(); err != nil {
+		return err
+	}
 	rt.visionMu.Lock()
 	defer rt.visionMu.Unlock()
 	if rt.visionLoaded {
@@ -313,15 +329,13 @@ func (rt *Runtime) visionEmbeddings(pp *vision.Preprocessed) [][]float32 {
 
 func (rt *Runtime) visionEmbeddingsInto(out [][]float32, pp *vision.Preprocessed) [][]float32 {
 	pos := rt.interpolateVisionPos(pp.Grid.H, pp.Grid.W)
-	tensor.MatRowsBias(out, pp.Patches, rt.vision.patchW, rt.vision.patchB, rt.cfg.VisionConfig.HiddenSize, len(pp.Patches[0]))
 	if len(out) == len(pos) {
-		for i, row := range out {
-			tensor.AddInPlace(row, pos[i])
-		}
-	} else {
-		for i, row := range out {
-			tensor.AddInPlace(row, pos[i%len(pos)])
-		}
+		tensor.MatRowsBiasAddRows(out, pp.Patches, rt.vision.patchW, rt.vision.patchB, pos, rt.cfg.VisionConfig.HiddenSize, len(pp.Patches[0]))
+		return out
+	}
+	tensor.MatRowsBias(out, pp.Patches, rt.vision.patchW, rt.vision.patchB, rt.cfg.VisionConfig.HiddenSize, len(pp.Patches[0]))
+	for i, row := range out {
+		tensor.AddInPlace(row, pos[i%len(pos)])
 	}
 	return out
 }
@@ -381,11 +395,14 @@ func (rt *Runtime) interpolateVisionPos(h, w int) [][]float32 {
 	}
 	rt.visionPosMu.Lock()
 	if rt.visionPosCache == nil {
-		rt.visionPosCache = map[[2]int][][]float32{}
+		rt.visionPosCache = make(map[[2]int][][]float32, maxVisionShapeCacheEntries)
 	}
 	if cached := rt.visionPosCache[key]; cached != nil {
 		rt.visionPosMu.Unlock()
 		return cached
+	}
+	if len(rt.visionPosCache) >= maxVisionShapeCacheEntries {
+		rt.visionPosCache = make(map[[2]int][][]float32, maxVisionShapeCacheEntries)
 	}
 	rt.visionPosCache[key] = out
 	rt.visionPosMu.Unlock()
@@ -450,6 +467,13 @@ func (rt *Runtime) visionAttention(x [][]float32, lw visionLayerWeights, grid vi
 func visionAttentionScores(scores, q []float32, rows [][]float32, offset, dim int, scale float32) {
 	if dim == 128 {
 		i := 0
+		for ; i+3 < len(scores); i += 4 {
+			s0, s1, s2, s3 := dotAt128QuadRows(q, rows[i], rows[i+1], rows[i+2], rows[i+3], offset)
+			scores[i] = s0 * scale
+			scores[i+1] = s1 * scale
+			scores[i+2] = s2 * scale
+			scores[i+3] = s3 * scale
+		}
 		for ; i+1 < len(scores); i += 2 {
 			s0, s1 := dotAt128PairRows(q, rows[i], rows[i+1], offset)
 			scores[i] = s0 * scale
@@ -462,6 +486,13 @@ func visionAttentionScores(scores, q []float32, rows [][]float32, offset, dim in
 	}
 	if dim == 64 {
 		i := 0
+		for ; i+3 < len(scores); i += 4 {
+			s0, s1, s2, s3 := dotAt64QuadRows(q, rows[i], rows[i+1], rows[i+2], rows[i+3], offset)
+			scores[i] = s0 * scale
+			scores[i+1] = s1 * scale
+			scores[i+2] = s2 * scale
+			scores[i+3] = s3 * scale
+		}
 		for ; i+1 < len(scores); i += 2 {
 			s0, s1 := dotAt64PairRows(q, rows[i], rows[i+1], offset)
 			scores[i] = s0 * scale
@@ -475,6 +506,48 @@ func visionAttentionScores(scores, q []float32, rows [][]float32, offset, dim in
 	for i := range scores {
 		scores[i] = dotAt(q, rows[i], offset, dim) * scale
 	}
+}
+
+func dotAt128QuadRows(a, row0, row1, row2, row3 []float32, offset int) (float32, float32, float32, float32) {
+	b0 := row0[offset : offset+128]
+	b1 := row1[offset : offset+128]
+	b2 := row2[offset : offset+128]
+	b3 := row3[offset : offset+128]
+	var s00, s01, s10, s11, s20, s21, s30, s31 float32
+	for i := 0; i < 128; i += 8 {
+		a0, a1, a2, a3 := a[i], a[i+1], a[i+2], a[i+3]
+		a4, a5, a6, a7 := a[i+4], a[i+5], a[i+6], a[i+7]
+		s00 += a0*b0[i] + a1*b0[i+1] + a2*b0[i+2] + a3*b0[i+3]
+		s01 += a4*b0[i+4] + a5*b0[i+5] + a6*b0[i+6] + a7*b0[i+7]
+		s10 += a0*b1[i] + a1*b1[i+1] + a2*b1[i+2] + a3*b1[i+3]
+		s11 += a4*b1[i+4] + a5*b1[i+5] + a6*b1[i+6] + a7*b1[i+7]
+		s20 += a0*b2[i] + a1*b2[i+1] + a2*b2[i+2] + a3*b2[i+3]
+		s21 += a4*b2[i+4] + a5*b2[i+5] + a6*b2[i+6] + a7*b2[i+7]
+		s30 += a0*b3[i] + a1*b3[i+1] + a2*b3[i+2] + a3*b3[i+3]
+		s31 += a4*b3[i+4] + a5*b3[i+5] + a6*b3[i+6] + a7*b3[i+7]
+	}
+	return s00 + s01, s10 + s11, s20 + s21, s30 + s31
+}
+
+func dotAt64QuadRows(a, row0, row1, row2, row3 []float32, offset int) (float32, float32, float32, float32) {
+	b0 := row0[offset : offset+64]
+	b1 := row1[offset : offset+64]
+	b2 := row2[offset : offset+64]
+	b3 := row3[offset : offset+64]
+	var s00, s01, s10, s11, s20, s21, s30, s31 float32
+	for i := 0; i < 64; i += 8 {
+		a0, a1, a2, a3 := a[i], a[i+1], a[i+2], a[i+3]
+		a4, a5, a6, a7 := a[i+4], a[i+5], a[i+6], a[i+7]
+		s00 += a0*b0[i] + a1*b0[i+1] + a2*b0[i+2] + a3*b0[i+3]
+		s01 += a4*b0[i+4] + a5*b0[i+5] + a6*b0[i+6] + a7*b0[i+7]
+		s10 += a0*b1[i] + a1*b1[i+1] + a2*b1[i+2] + a3*b1[i+3]
+		s11 += a4*b1[i+4] + a5*b1[i+5] + a6*b1[i+6] + a7*b1[i+7]
+		s20 += a0*b2[i] + a1*b2[i+1] + a2*b2[i+2] + a3*b2[i+3]
+		s21 += a4*b2[i+4] + a5*b2[i+5] + a6*b2[i+6] + a7*b2[i+7]
+		s30 += a0*b3[i] + a1*b3[i+1] + a2*b3[i+2] + a3*b3[i+3]
+		s31 += a4*b3[i+4] + a5*b3[i+5] + a6*b3[i+6] + a7*b3[i+7]
+	}
+	return s00 + s01, s10 + s11, s20 + s21, s30 + s31
 }
 
 func dotAt128PairRows(a, row0, row1 []float32, offset int) (float32, float32) {
@@ -549,11 +622,14 @@ func (rt *Runtime) cachedVisionRoPETables(grid vision.Grid, hd int) visionRoPETa
 	tables := newVisionRoPETables(grid, hd)
 	rt.visionRoPEMu.Lock()
 	if rt.visionRoPECache == nil {
-		rt.visionRoPECache = map[[3]int]visionRoPETables{}
+		rt.visionRoPECache = make(map[[3]int]visionRoPETables, maxVisionShapeCacheEntries)
 	}
 	if cached := rt.visionRoPECache[key]; cached.h != nil || cached.w != nil {
 		rt.visionRoPEMu.Unlock()
 		return cached
+	}
+	if len(rt.visionRoPECache) >= maxVisionShapeCacheEntries {
+		rt.visionRoPECache = make(map[[3]int]visionRoPETables, maxVisionShapeCacheEntries)
 	}
 	rt.visionRoPECache[key] = tables
 	rt.visionRoPEMu.Unlock()
@@ -588,10 +664,8 @@ func applyVisionRoPEPair(q, k [][]float32, grid vision.Grid, heads, hd int, rope
 		ropeH, ropeW := rope.h[hy], rope.w[wx]
 		for h := 0; h < heads; h++ {
 			base := h * hd
-			applyAxisRoPEWithTableAt(qr, base, half, ropeH)
-			applyAxisRoPEWithTableAt(qr, base+half, half, ropeW)
-			applyAxisRoPEWithTableAt(kr, base, half, ropeH)
-			applyAxisRoPEWithTableAt(kr, base+half, half, ropeW)
+			applyAxisRoPEPairWithTableAt(qr, kr, base, half, ropeH)
+			applyAxisRoPEPairWithTableAt(qr, kr, base+half, half, ropeW)
 		}
 		wx++
 		if wx == grid.W {
@@ -601,6 +675,41 @@ func applyVisionRoPEPair(q, k [][]float32, grid vision.Grid, heads, hd int, rope
 				hy = 0
 			}
 		}
+	}
+}
+
+func applyAxisRoPEPairWithTableAt(q, k []float32, start, axisLen int, table []ropePair) {
+	half := axisLen / 2
+	other := start + half
+	q0 := q[start:other]
+	q1 := q[other : other+half]
+	k0 := k[start:other]
+	k1 := k[other : other+half]
+	i := 0
+	for ; i+1 < half; i += 2 {
+		cs, sn := table[i].cos, table[i].sin
+		qa, qb := q0[i], q1[i]
+		ka, kb := k0[i], k1[i]
+		q0[i] = qa*cs - qb*sn
+		q1[i] = qb*cs + qa*sn
+		k0[i] = ka*cs - kb*sn
+		k1[i] = kb*cs + ka*sn
+		cs, sn = table[i+1].cos, table[i+1].sin
+		qa, qb = q0[i+1], q1[i+1]
+		ka, kb = k0[i+1], k1[i+1]
+		q0[i+1] = qa*cs - qb*sn
+		q1[i+1] = qb*cs + qa*sn
+		k0[i+1] = ka*cs - kb*sn
+		k1[i+1] = kb*cs + ka*sn
+	}
+	for ; i < half; i++ {
+		cs, sn := table[i].cos, table[i].sin
+		qa, qb := q0[i], q1[i]
+		ka, kb := k0[i], k1[i]
+		q0[i] = qa*cs - qb*sn
+		q1[i] = qb*cs + qa*sn
+		k0[i] = ka*cs - kb*sn
+		k1[i] = kb*cs + ka*sn
 	}
 }
 
@@ -695,6 +804,14 @@ func weightedValueSum(dst []float32, rows [][]float32, offset, dim int, weights 
 	if len(weights) == 2 {
 		a1 := weights[1]
 		x1 := rows[1][offset : offset+dim]
+		if dim == 128 {
+			weightedValueSum2_128(dst, x, x1, a, a1)
+			return
+		}
+		if dim == 64 {
+			weightedValueSum2_64(dst, x, x1, a, a1)
+			return
+		}
 		i := 0
 		for ; i+7 < dim; i += 8 {
 			dst[i] = a*x[i] + a1*x1[i]
@@ -715,6 +832,14 @@ func weightedValueSum(dst []float32, rows [][]float32, offset, dim int, weights 
 		a1, a2 := weights[1], weights[2]
 		x1 := rows[1][offset : offset+dim]
 		x2 := rows[2][offset : offset+dim]
+		if dim == 128 {
+			weightedValueSum3_128(dst, x, x1, x2, a, a1, a2)
+			return
+		}
+		if dim == 64 {
+			weightedValueSum3_64(dst, x, x1, x2, a, a1, a2)
+			return
+		}
 		i := 0
 		for ; i+7 < dim; i += 8 {
 			dst[i] = a*x[i] + a1*x1[i] + a2*x2[i]
@@ -736,6 +861,14 @@ func weightedValueSum(dst []float32, rows [][]float32, offset, dim int, weights 
 		x1 := rows[1][offset : offset+dim]
 		x2 := rows[2][offset : offset+dim]
 		x3 := rows[3][offset : offset+dim]
+		if dim == 128 {
+			weightedValueSum4_128(dst, x, x1, x2, x3, a, a1, a2, a3)
+			return
+		}
+		if dim == 64 {
+			weightedValueSum4_64(dst, x, x1, x2, x3, a, a1, a2, a3)
+			return
+		}
 		i := 0
 		for ; i+7 < dim; i += 8 {
 			dst[i] = a*x[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
@@ -968,8 +1101,9 @@ func (rt *Runtime) projectImage(x [][]float32, grid vision.Grid) [][]float32 {
 		return out
 	}
 	work := rows * vd * td
-	if work >= 1<<18 && rows >= 4 {
-		workers := min(runtime.GOMAXPROCS(0), rows)
+	gomax := runtime.GOMAXPROCS(0)
+	if work >= 1<<18 && rows >= 4 && gomax > 1 {
+		workers := min(gomax, rows)
 		if vd*td < 1<<20 {
 			workers = min(workers, 8)
 		}

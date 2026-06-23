@@ -9,8 +9,16 @@ import (
 const parallelWork = 1 << 18
 
 func MatVec(out, x, w []float32, rows, cols int) {
-	if rows*cols >= parallelWork && rows >= 4 {
-		matVecParallel(out, x, w, rows, cols)
+	if cols == 16 {
+		matVecSerial16(out, x, w, rows)
+		return
+	}
+	if shouldParallelMatVec(rows*cols, rows) {
+		parallelForMatVec(rows, func(start, end int) {
+			for r := start; r < end; r++ {
+				out[r] = dotF32(w[r*cols:(r+1)*cols], x)
+			}
+		})
 		return
 	}
 	for r := 0; r < rows; r++ {
@@ -20,17 +28,40 @@ func MatVec(out, x, w []float32, rows, cols int) {
 
 func FusedMatVec3(outA, outB, outC, x, wa, wb, wc []float32, rowsA, rowsB, rowsC, cols int) {
 	totalRows := rowsA + rowsB + rowsC
-	if rowsA == rowsB && rowsB == rowsC && totalRows*cols < parallelWork {
-		fusedMatVec3EqualRowsSerial(outA, outB, outC, x, wa, wb, wc, cols, 0, rowsA)
-		return
+	if rowsA == rowsB && rowsB == rowsC {
+		if shouldParallelFusedMatVec3EqualRows(totalRows*cols, rowsA) {
+			parallelForFusedMatVec3EqualRows(rowsA, func(start, end int) {
+				fusedMatVec3EqualRowsSerial(outA, outB, outC, x, wa, wb, wc, cols, start, end)
+			})
+			return
+		}
+		if totalRows*cols < parallelWork {
+			fusedMatVec3EqualRowsSerial(outA, outB, outC, x, wa, wb, wc, cols, 0, rowsA)
+			return
+		}
 	}
-	if totalRows*cols >= parallelWork && totalRows >= 4 {
+	if shouldParallel(totalRows*cols, totalRows) {
 		parallelFor(totalRows, func(start, end int) {
 			fusedMatVec3Serial(outA, outB, outC, x, wa, wb, wc, rowsA, rowsB, cols, start, end)
 		})
 		return
 	}
 	fusedMatVec3Serial(outA, outB, outC, x, wa, wb, wc, rowsA, rowsB, cols, 0, totalRows)
+}
+
+func shouldParallelFusedMatVec3EqualRows(work, rows int) bool {
+	if work >= parallelWork/2 && rows >= 256 && rows <= 512 {
+		return shouldParallel(parallelWork, rows)
+	}
+	return false
+}
+
+func parallelForFusedMatVec3EqualRows(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelFor(rows, fn)
 }
 
 func fusedMatVec3EqualRowsSerial(outA, outB, outC, x, wa, wb, wc []float32, cols, start, end int) {
@@ -60,20 +91,48 @@ func fusedMatVec3Serial(outA, outB, outC, x, wa, wb, wc []float32, rowsA, rowsB,
 }
 
 func MatVecBias(out, x, w, bias []float32, rows, cols int) {
-	if rows*cols >= parallelWork && rows >= 4 {
-		matVecBiasParallel(out, x, w, bias, rows, cols)
+	if cols == 16 {
+		matVecBiasSerial16(out, x, w, bias, rows)
+		return
+	}
+	if shouldParallelMatVec(rows*cols, rows) {
+		parallelForMatVec(rows, func(start, end int) {
+			for r := start; r < end; r++ {
+				out[r] = dotF32(w[r*cols:(r+1)*cols], x) + bias[r]
+			}
+		})
 		return
 	}
 	matVecBiasSerial(out, x, w, bias, rows, cols)
 }
 
 func MatVecBiasSerial(out, x, w, bias []float32, rows, cols int) {
+	if cols == 16 {
+		matVecBiasSerial16(out, x, w, bias, rows)
+		return
+	}
+	if cols == 588 {
+		matVecBiasSerial588(out, x, w, bias, rows)
+		return
+	}
 	matVecBiasSerial(out, x, w, bias, rows, cols)
 }
 
 func MatRowsBias(out [][]float32, xs [][]float32, w, bias []float32, rows, cols int) {
 	work := len(xs) * rows * cols
-	if work < parallelWork || len(xs) == 1 {
+	if !shouldParallel(work, len(xs)) || len(xs) == 1 {
+		if cols == 16 {
+			for i := range xs {
+				matVecBiasSerial16(out[i], xs[i], w, bias, rows)
+			}
+			return
+		}
+		if cols == 588 {
+			for i := range xs {
+				matVecBiasSerial588(out[i], xs[i], w, bias, rows)
+			}
+			return
+		}
 		for i := range xs {
 			if len(xs) == 1 {
 				MatVecBias(out[i], xs[i], w, bias, rows, cols)
@@ -87,9 +146,59 @@ func MatRowsBias(out [][]float32, xs [][]float32, w, bias []float32, rows, cols 
 	if rows*cols < 1<<16 {
 		workers = min(workers, 8)
 	}
+	if cols == 16 {
+		parallelForMax(len(xs), workers, func(start, end int) {
+			for i := start; i < end; i++ {
+				matVecBiasSerial16(out[i], xs[i], w, bias, rows)
+			}
+		})
+		return
+	}
+	if cols == 588 {
+		parallelForMax(len(xs), workers, func(start, end int) {
+			for i := start; i < end; i++ {
+				matVecBiasSerial588(out[i], xs[i], w, bias, rows)
+			}
+		})
+		return
+	}
 	parallelForMax(len(xs), workers, func(start, end int) {
 		for i := start; i < end; i++ {
 			matVecBiasSerial(out[i], xs[i], w, bias, rows, cols)
+		}
+	})
+}
+
+func MatRowsBiasAddRows(out [][]float32, xs [][]float32, w, bias []float32, add [][]float32, rows, cols int) {
+	if len(add) == 0 {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+		return
+	}
+	if len(add) != len(xs) {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+		for i := range xs {
+			AddInPlace(out[i], add[i%len(add)])
+		}
+		return
+	}
+	if cols != 588 {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+		for i := range xs {
+			AddInPlace(out[i], add[i])
+		}
+		return
+	}
+	work := len(xs) * rows * cols
+	if !shouldParallel(work, len(xs)) || len(xs) == 1 {
+		for i := range xs {
+			matVecBiasAddSerial588(out[i], xs[i], w, bias, add[i], rows)
+		}
+		return
+	}
+	workers := runtime.GOMAXPROCS(0)
+	parallelForMax(len(xs), workers, func(start, end int) {
+		for i := start; i < end; i++ {
+			matVecBiasAddSerial588(out[i], xs[i], w, bias, add[i], rows)
 		}
 	})
 }
@@ -100,7 +209,7 @@ func MatRowsBias3(outA, outB, outC, xs [][]float32, wa, ba, wb, bb, wc, bc []flo
 	}
 	work := len(xs) * (rowsA + rowsB + rowsC) * cols
 	if rowsA == rowsB && rowsB == rowsC {
-		if work < parallelWork || len(xs) == 1 {
+		if !shouldParallel(work, len(xs)) || len(xs) == 1 {
 			for i := range xs {
 				matVecBias3EqualRowsSerial(outA[i], outB[i], outC[i], xs[i], wa, ba, wb, bb, wc, bc, rowsA, cols)
 			}
@@ -113,7 +222,7 @@ func MatRowsBias3(outA, outB, outC, xs [][]float32, wa, ba, wb, bb, wc, bc []flo
 		})
 		return
 	}
-	if work < parallelWork || len(xs) == 1 {
+	if !shouldParallel(work, len(xs)) || len(xs) == 1 {
 		for i := range xs {
 			matVecBias3Serial(outA[i], outB[i], outC[i], xs[i], wa, ba, wb, bb, wc, bc, rowsA, rowsB, rowsC, cols)
 		}
@@ -152,30 +261,37 @@ func matVecBias3Serial(outA, outB, outC, x, wa, ba, wb, bb, wc, bc []float32, ro
 	}
 }
 
-func FusedSwiGLUF32Scratch(out, x, gate, up, down []float32, rows, cols, outRows int, tmpG, tmpU []float32) {
+func FusedSwiGLUF32Scratch(out, x, gate, up, down []float32, rows, cols, outRows int, tmpG []float32) {
 	tmpG = tmpG[:rows]
-	tmpU = tmpU[:rows]
 	work := rows * cols * 2
-	if work >= parallelWork && rows >= 4 {
-		fusedGateUpParallel(tmpG, tmpU, x, gate, up, rows, cols)
+	if shouldParallel(work, rows) {
+		fusedSwiGLUGateUpParallel(tmpG, x, gate, up, rows, cols)
 	} else {
-		fusedGateUpSerial(tmpG, tmpU, x, gate, up, 0, rows, cols)
+		fusedSwiGLUGateUpSerial(tmpG, x, gate, up, 0, rows, cols)
 	}
-	SiLUMulInPlace(tmpG, tmpU)
 	MatVec(out, tmpG, down, outRows, rows)
 }
 
-func fusedGateUpParallel(tmpG, tmpU, x, gate, up []float32, rows, cols int) {
-	parallelFor(rows, func(start, end int) {
-		fusedGateUpSerial(tmpG, tmpU, x, gate, up, start, end, cols)
+func fusedSwiGLUGateUpParallel(tmpG, x, gate, up []float32, rows, cols int) {
+	parallelForGateUp(rows, func(start, end int) {
+		fusedSwiGLUGateUpSerial(tmpG, x, gate, up, start, end, cols)
 	})
 }
 
-func fusedGateUpSerial(tmpG, tmpU, x, gate, up []float32, start, end, cols int) {
+func fusedSwiGLUGateUpSerial(tmpG, x, gate, up []float32, start, end, cols int) {
 	for r := start; r < end; r++ {
 		base := r * cols
-		tmpG[r], tmpU[r] = dotF32Pair(gate[base:base+cols], up[base:base+cols], x)
+		g, u := dotF32Pair(gate[base:base+cols], up[base:base+cols], x)
+		tmpG[r] = SiLU(g) * u
 	}
+}
+
+func parallelForGateUp(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelFor(rows, fn)
 }
 
 func matVecParallel(out, x, w []float32, rows, cols int) {
@@ -189,6 +305,13 @@ func matVecParallel(out, x, w []float32, rows, cols int) {
 func matVecSerial(out, x, w []float32, rows, cols int) {
 	for r := 0; r < rows; r++ {
 		out[r] = dotF32(w[r*cols:(r+1)*cols], x)
+	}
+}
+
+func matVecSerial16(out, x, w []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 16
+		out[r] = dotF32_16(w[base:base+16], x)
 	}
 }
 
@@ -206,8 +329,51 @@ func matVecBiasSerial(out, x, w, bias []float32, rows, cols int) {
 	}
 }
 
+func matVecBiasSerial16(out, x, w, bias []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 16
+		out[r] = dotF32_16(w[base:base+16], x) + bias[r]
+	}
+}
+
+func matVecBiasSerial588(out, x, w, bias []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 588
+		out[r] = dotF32_588(w[base:base+588], x) + bias[r]
+	}
+}
+
+func matVecBiasAddSerial588(out, x, w, bias, add []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 588
+		out[r] = dotF32_588(w[base:base+588], x) + bias[r] + add[r]
+	}
+}
+
 func parallelFor(n int, fn func(start, end int)) {
 	parallelForMax(n, runtime.GOMAXPROCS(0), fn)
+}
+
+func shouldParallel(work, units int) bool {
+	if work < parallelWork || units < 4 {
+		return false
+	}
+	return runtime.GOMAXPROCS(0) > 1
+}
+
+func shouldParallelMatVec(work, rows int) bool {
+	if work >= parallelWork/2 && rows >= 512 {
+		return shouldParallel(parallelWork, rows)
+	}
+	return shouldParallel(work, rows)
+}
+
+func parallelForMatVec(rows int, fn func(start, end int)) {
+	if rows <= 512 {
+		parallelForMax(rows, 8, fn)
+		return
+	}
+	parallelFor(rows, fn)
 }
 
 func parallelForMax(n, maxWorkers int, fn func(start, end int)) {
@@ -248,6 +414,37 @@ func dotF32(a, b []float32) float32 {
 	for ; i < n; i++ {
 		sum += a[i] * b[i]
 	}
+	return sum
+}
+
+func dotF32_16(a, b []float32) float32 {
+	s0 := a[0]*b[0] + a[8]*b[8]
+	s1 := a[1]*b[1] + a[9]*b[9]
+	s2 := a[2]*b[2] + a[10]*b[10]
+	s3 := a[3]*b[3] + a[11]*b[11]
+	s4 := a[4]*b[4] + a[12]*b[12]
+	s5 := a[5]*b[5] + a[13]*b[13]
+	s6 := a[6]*b[6] + a[14]*b[14]
+	s7 := a[7]*b[7] + a[15]*b[15]
+	return (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+}
+
+func dotF32_588(a, b []float32) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	for i := 0; i < 576; i += 16 {
+		s0 += a[i]*b[i] + a[i+8]*b[i+8]
+		s1 += a[i+1]*b[i+1] + a[i+9]*b[i+9]
+		s2 += a[i+2]*b[i+2] + a[i+10]*b[i+10]
+		s3 += a[i+3]*b[i+3] + a[i+11]*b[i+11]
+		s4 += a[i+4]*b[i+4] + a[i+12]*b[i+12]
+		s5 += a[i+5]*b[i+5] + a[i+13]*b[i+13]
+		s6 += a[i+6]*b[i+6] + a[i+14]*b[i+14]
+		s7 += a[i+7]*b[i+7] + a[i+15]*b[i+15]
+	}
+	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	sum += a[576]*b[576] + a[577]*b[577] + a[578]*b[578] + a[579]*b[579]
+	sum += a[580]*b[580] + a[581]*b[581] + a[582]*b[582] + a[583]*b[583]
+	sum += a[584]*b[584] + a[585]*b[585] + a[586]*b[586] + a[587]*b[587]
 	return sum
 }
 
@@ -422,7 +619,6 @@ func AddRMSNorm(out, dst, add, weight []float32, eps float32) {
 
 func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
-	var q0, q1, q2, q3, q4, q5, q6, q7 float32
 	i := 0
 	n := len(dst)
 	for ; i+7 < n; i += 8 {
@@ -450,29 +646,40 @@ func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 		s5 += v5
 		s6 += v6
 		s7 += v7
-		q0 += v0 * v0
-		q1 += v1 * v1
-		q2 += v2 * v2
-		q3 += v3 * v3
-		q4 += v4 * v4
-		q5 += v5 * v5
-		q6 += v6 * v6
-		q7 += v7 * v7
 	}
 	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
-	sumsq := (q0 + q1) + (q2 + q3) + (q4 + q5) + (q6 + q7)
 	for ; i < n; i++ {
 		v := dst[i] + add[i]
 		dst[i] = v
 		sum += v
-		sumsq += v * v
 	}
 	mean := sum / float32(n)
-	variance := sumsq/float32(n) - mean*mean
-	if variance < 0 {
-		variance = 0
+	s0, s1, s2, s3, s4, s5, s6, s7 = 0, 0, 0, 0, 0, 0, 0, 0
+	i = 0
+	for ; i+7 < n; i += 8 {
+		d0 := dst[i] - mean
+		d1 := dst[i+1] - mean
+		d2 := dst[i+2] - mean
+		d3 := dst[i+3] - mean
+		d4 := dst[i+4] - mean
+		d5 := dst[i+5] - mean
+		d6 := dst[i+6] - mean
+		d7 := dst[i+7] - mean
+		s0 += d0 * d0
+		s1 += d1 * d1
+		s2 += d2 * d2
+		s3 += d3 * d3
+		s4 += d4 * d4
+		s5 += d5 * d5
+		s6 += d6 * d6
+		s7 += d7 * d7
 	}
-	scale := float32(1 / math.Sqrt(float64(variance)+float64(eps)))
+	variance := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < n; i++ {
+		d := dst[i] - mean
+		variance += d * d
+	}
+	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
 	i = 0
 	for ; i+7 < n; i += 8 {
 		out[i] = (dst[i]-mean)*scale*weight[i] + bias[i]
@@ -490,8 +697,7 @@ func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 }
 
 func AddThenLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
-	AddInPlace(dst, add)
-	LayerNorm(out, dst, weight, bias, eps)
+	AddLayerNorm(out, dst, add, weight, bias, eps)
 }
 
 func RMSNorm(out, x, weight []float32, eps float32) {
@@ -639,7 +845,7 @@ func GELUTanhInPlace(x []float32) {
 }
 
 func GELUTanhRowsInPlace(x [][]float32) {
-	if len(x) > 1 && len(x)*len(x[0]) >= parallelWork {
+	if len(x) > 1 && shouldParallel(len(x)*len(x[0]), len(x)) {
 		workers := runtime.GOMAXPROCS(0)
 		if len(x[0]) < 1024 {
 			workers = min(workers, 8)
@@ -917,71 +1123,9 @@ func max32(a, b float32) float32 {
 }
 
 func Argmax(x []float32) int {
-	n := len(x)
 	best := 0
 	bestVal := x[0]
-	i := 1
-	var i0, i1, i2, i3, i4, i5, i6, i7 int
-	var v0, v1, v2, v3, v4, v5, v6, v7 = bestVal, bestVal, bestVal, bestVal, bestVal, bestVal, bestVal, bestVal
-	for ; i+7 < n; i += 8 {
-		if x[i] > v0 {
-			i0 = i
-			v0 = x[i]
-		}
-		if x[i+1] > v1 {
-			i1 = i + 1
-			v1 = x[i+1]
-		}
-		if x[i+2] > v2 {
-			i2 = i + 2
-			v2 = x[i+2]
-		}
-		if x[i+3] > v3 {
-			i3 = i + 3
-			v3 = x[i+3]
-		}
-		if x[i+4] > v4 {
-			i4 = i + 4
-			v4 = x[i+4]
-		}
-		if x[i+5] > v5 {
-			i5 = i + 5
-			v5 = x[i+5]
-		}
-		if x[i+6] > v6 {
-			i6 = i + 6
-			v6 = x[i+6]
-		}
-		if x[i+7] > v7 {
-			i7 = i + 7
-			v7 = x[i+7]
-		}
-	}
-	if v0 > bestVal {
-		best, bestVal = i0, v0
-	}
-	if v1 > bestVal {
-		best, bestVal = i1, v1
-	}
-	if v2 > bestVal {
-		best, bestVal = i2, v2
-	}
-	if v3 > bestVal {
-		best, bestVal = i3, v3
-	}
-	if v4 > bestVal {
-		best, bestVal = i4, v4
-	}
-	if v5 > bestVal {
-		best, bestVal = i5, v5
-	}
-	if v6 > bestVal {
-		best, bestVal = i6, v6
-	}
-	if v7 > bestVal {
-		best, bestVal = i7, v7
-	}
-	for ; i < n; i++ {
+	for i := 1; i < len(x); i++ {
 		if x[i] > bestVal {
 			best = i
 			bestVal = x[i]

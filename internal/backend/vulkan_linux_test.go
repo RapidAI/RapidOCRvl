@@ -101,6 +101,37 @@ func TestReadVulkanICD(t *testing.T) {
 	}
 }
 
+func TestReadVulkanICDRejectsHugeManifest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxVulkanICDManifestBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readVulkanICD(path); ok {
+		t.Fatal("expected huge manifest rejection")
+	}
+}
+
+func TestReadVulkanICDRejectsDuplicateJSONKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "driver.json")
+	body := []byte(`{"ICD":{"library_path":"a.so","library_path":"b.so","api_version":"1.3.0"}}`)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readVulkanICD(path); ok {
+		t.Fatal("expected duplicate JSON key rejection")
+	}
+}
+
 func TestResolveICDLibraryPath(t *testing.T) {
 	manifest := filepath.Join("tmp", "icd.d", "driver.json")
 	if got := resolveICDLibraryPath(manifest, "libvulkan_test.so"); got != "libvulkan_test.so" {

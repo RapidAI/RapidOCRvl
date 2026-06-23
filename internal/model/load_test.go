@@ -7,12 +7,20 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
+	"paddleocrvl-go/internal/backend"
 	"paddleocrvl-go/internal/config"
 	"paddleocrvl-go/internal/gguf"
 	"paddleocrvl-go/internal/tensor"
 )
+
+var benchmarkVulkanArtifacts backend.VulkanModelArtifacts
+var benchmarkVulkanPlans []backend.VulkanPlan
+var benchmarkVulkanSummary backend.VulkanPlanSummary
+var benchmarkVulkanGraph backend.VulkanExecutionGraph
+var benchmarkVulkanPipelines []backend.VulkanPipelinePlan
 
 func TestOpenOrConvertGGUFAutoPrefersQ4ThenQ6ThenQ8(t *testing.T) {
 	dir := t.TempDir()
@@ -303,6 +311,245 @@ func TestRuntimeVulkanPlansUseConfigShape(t *testing.T) {
 	if cmdPlan.CommandCount == 0 || cmdPlan.PipelineCount != len(pipes) || cmdPlan.Dispatches != graph.Dispatches {
 		t.Fatalf("command plan=%+v pipes=%+v graph=%+v", cmdPlan, pipes, graph)
 	}
+	if !rt.vulkanPlanCache.valid || len(rt.vulkanPlanCache.plans) != 10 || rt.vulkanPlanCache.command.CommandCount == 0 {
+		t.Fatalf("missing vulkan plan cache: %+v", rt.vulkanPlanCache)
+	}
+	plans[0].Name = "mutated"
+	st.Plans[0].Name = "mutated"
+	graph.Stages[0].Name = "mutated"
+	pipes[0].Stage = "mutated"
+	cmdPlan.Commands[0].Name = "mutated"
+	cmdPlan.Commands[0].Resources[0].Name = "mutated"
+	cmdPlan.Layouts[0].Bindings[0].Name = "mutated"
+	cmdPlan.Pipelines[0].Stage = "mutated"
+	cmdPlan.ShaderModules[0].KernelName = "mutated"
+	cmdPlan.DispatchBatches[0].Stage = "mutated"
+	cmdPlan.Records[0].Op = "mutated"
+	cmdPlan.Barriers[0].ResourceName = "mutated"
+	cmdPlan.Allocations[0].ResourceName = "mutated"
+	cmdPlan.Uploads[0].ResourceName = "mutated"
+	cmdPlan.Readbacks[0].ResourceName = "mutated"
+	if got := rt.VulkanPlans()[0].Name; got != "text.qkv" {
+		t.Fatalf("cached plans mutated: %q", got)
+	}
+	nextCmd := rt.VulkanCommandPlan()
+	if nextCmd.Commands[0].Name == "mutated" || nextCmd.Commands[0].Resources[0].Name == "mutated" || nextCmd.Layouts[0].Bindings[0].Name == "mutated" || nextCmd.Pipelines[0].Stage == "mutated" || nextCmd.ShaderModules[0].KernelName == "mutated" || nextCmd.DispatchBatches[0].Stage == "mutated" || nextCmd.Records[0].Op == "mutated" || nextCmd.Barriers[0].ResourceName == "mutated" || nextCmd.Allocations[0].ResourceName == "mutated" || nextCmd.Uploads[0].ResourceName == "mutated" || nextCmd.Readbacks[0].ResourceName == "mutated" {
+		t.Fatalf("cached command plan mutated: %+v", nextCmd.Commands[0])
+	}
+	artifacts := rt.VulkanArtifacts()
+	if len(artifacts.Plans) != 10 || artifacts.Summary.PlanCount != 10 || len(artifacts.ExecutionGraph.Stages) != 2 || len(artifacts.PipelinePlan) != nextCmd.PipelineCount || artifacts.CommandPlan.CommandCount != nextCmd.CommandCount {
+		t.Fatalf("artifacts=%+v", artifacts)
+	}
+	artifacts.Plans[0].Name = "mutated"
+	artifacts.Summary.Plans[0].Name = "mutated"
+	artifacts.ExecutionGraph.Stages[0].Name = "mutated"
+	artifacts.PipelinePlan[0].Stage = "mutated"
+	artifacts.CommandPlan.Pipelines[0].Stage = "mutated"
+	artifacts.CommandPlan.Commands[0].Name = "mutated"
+	artifacts.CommandPlan.Commands[0].Resources[0].Name = "mutated"
+	artifacts.CommandPlan.Layouts[0].Bindings[0].Name = "mutated"
+	nextArtifacts := rt.VulkanArtifacts()
+	if nextArtifacts.Plans[0].Name == "mutated" || nextArtifacts.ExecutionGraph.Stages[0].Name == "mutated" || nextArtifacts.PipelinePlan[0].Stage == "mutated" || nextArtifacts.CommandPlan.Pipelines[0].Stage == "mutated" || nextArtifacts.CommandPlan.Commands[0].Name == "mutated" || nextArtifacts.CommandPlan.Commands[0].Resources[0].Name == "mutated" || nextArtifacts.CommandPlan.Layouts[0].Bindings[0].Name == "mutated" {
+		t.Fatalf("cached artifacts mutated: %+v", nextArtifacts)
+	}
+	view := rt.VulkanArtifactsView()
+	if len(view.Plans) != 10 || view.Summary.PlanCount != len(view.Plans) || len(view.Summary.Plans) != len(view.Plans) || len(view.ExecutionGraph.Stages) != 2 || len(view.PipelinePlan) != view.CommandPlan.PipelineCount || view.CommandPlan.CommandCount != nextCmd.CommandCount {
+		t.Fatalf("view=%+v", view)
+	}
+	if got := rt.VulkanCommandPlanValidation(); got != "" {
+		t.Fatalf("command plan validation=%q", got)
+	}
+	rt.quantization = "f32"
+	f32Plans := rt.VulkanPlans()
+	if len(f32Plans) != 10 || f32Plans[0].Quant != "f32" || !rt.vulkanPlanCache.valid || rt.vulkanPlanCache.shape.Quant != "f32" {
+		t.Fatalf("cache did not refresh for f32 quant: plans=%+v cache=%+v", f32Plans, rt.vulkanPlanCache)
+	}
+	rt.cfg.HiddenSize = 256
+	rt.cfg.NumAttentionHeads = 8
+	rt.cfg.HeadDim = 32
+	shapePlans := rt.VulkanPlans()
+	if len(shapePlans) != 10 || shapePlans[0].Cols != 256 || shapePlans[0].Rows != 384 || rt.vulkanPlanCache.shape.HiddenSize != 256 {
+		t.Fatalf("cache did not refresh for shape change: plans=%+v cache=%+v", shapePlans, rt.vulkanPlanCache)
+	}
+}
+
+func TestRuntimeVulkanPlanCacheConcurrentAccess(t *testing.T) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	const workers = 16
+	const iterations = 64
+	var wg sync.WaitGroup
+	errCh := make(chan string, workers)
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				view := rt.VulkanArtifactsView()
+				if len(view.Plans) != 10 || view.CommandPlan.CommandCount != 10 || view.Summary.PlanCount != 10 {
+					errCh <- "bad artifacts view"
+					return
+				}
+				if got := rt.VulkanCommandPlanValidation(); got != "" {
+					errCh <- got
+					return
+				}
+				cmd := rt.VulkanCommandPlan()
+				if cmd.CommandCount != 10 || len(cmd.Commands) != 10 || len(cmd.Commands[0].Resources) == 0 {
+					errCh <- "bad command plan"
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatal(err)
+	}
+	if !rt.vulkanPlanCache.valid || len(rt.vulkanPlanCache.plans) != 10 {
+		t.Fatalf("cache=%+v", rt.vulkanPlanCache)
+	}
+}
+
+func BenchmarkRuntimeVulkanArtifacts(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	benchmarkVulkanArtifacts = rt.VulkanArtifacts()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanArtifacts = rt.VulkanArtifacts()
+	}
+}
+
+func BenchmarkRuntimeVulkanArtifactsF32(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("f32")
+	benchmarkVulkanArtifacts = rt.VulkanArtifacts()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanArtifacts = rt.VulkanArtifacts()
+	}
+}
+
+func BenchmarkRuntimeVulkanPlans(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	benchmarkVulkanPlans = rt.VulkanPlans()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanPlans = rt.VulkanPlans()
+	}
+}
+
+func BenchmarkRuntimeVulkanPlanSummary(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	benchmarkVulkanSummary = rt.VulkanPlanSummary()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanSummary = rt.VulkanPlanSummary()
+	}
+}
+
+func BenchmarkRuntimeVulkanExecutionGraph(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	benchmarkVulkanGraph = rt.VulkanExecutionGraph()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanGraph = rt.VulkanExecutionGraph()
+	}
+}
+
+func BenchmarkRuntimeVulkanPipelinePlan(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	benchmarkVulkanPipelines = rt.VulkanPipelinePlan()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanPipelines = rt.VulkanPipelinePlan()
+	}
+}
+
+func BenchmarkRuntimeVulkanArtifactsView(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	benchmarkVulkanArtifacts = rt.VulkanArtifactsView()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanArtifacts = rt.VulkanArtifactsView()
+	}
+}
+
+func BenchmarkRuntimeVulkanArtifactsViewF32(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("f32")
+	benchmarkVulkanArtifacts = rt.VulkanArtifactsView()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkVulkanArtifacts = rt.VulkanArtifactsView()
+	}
+}
+
+func BenchmarkRuntimeVulkanCommandPlan(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	cmd := rt.VulkanCommandPlan()
+	if cmd.CommandCount != 10 {
+		b.Fatal(cmd)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		cmd = rt.VulkanCommandPlan()
+	}
+	benchmarkVulkanArtifacts.CommandPlan = cmd
+}
+
+func BenchmarkRuntimeVulkanCommandPlanF32(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("f32")
+	cmd := rt.VulkanCommandPlan()
+	if cmd.CommandCount != 10 {
+		b.Fatal(cmd)
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		cmd = rt.VulkanCommandPlan()
+	}
+	benchmarkVulkanArtifacts.CommandPlan = cmd
+}
+
+func BenchmarkRuntimeVulkanCommandPlanValidation(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("q4")
+	_ = rt.VulkanCommandPlanValidation()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if got := rt.VulkanCommandPlanValidation(); got != "" {
+			b.Fatal(got)
+		}
+	}
+}
+
+func BenchmarkRuntimeVulkanCommandPlanValidationF32(b *testing.B) {
+	rt := benchmarkRuntimeWithVulkanShape("f32")
+	_ = rt.VulkanCommandPlanValidation()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if got := rt.VulkanCommandPlanValidation(); got != "" {
+			b.Fatal(got)
+		}
+	}
+}
+
+func benchmarkRuntimeWithVulkanShape(quant string) *Runtime {
+	return &Runtime{
+		quantization: quant,
+		cfg: &config.Config{
+			VocabSize:         32000,
+			HiddenSize:        2048,
+			IntermediateSize:  8192,
+			NumAttentionHeads: 16,
+			NumKeyValueHeads:  4,
+			HeadDim:           128,
+			NumHiddenLayers:   24,
+			VisionConfig: config.Vision{
+				HiddenSize:       1024,
+				IntermediateSize: 4096,
+				PatchSize:        14,
+				NumHiddenLayers:  24,
+			},
+		},
+	}
 }
 
 func TestReleaseCachedTextWeightMapEntriesKeepsCachedSlices(t *testing.T) {
@@ -341,6 +588,8 @@ var configForReleaseTest = config.Config{
 	NumHiddenLayers:  1,
 }
 
+var benchmarkConfigSink *config.Config
+
 func BenchmarkWeightStatsCached(b *testing.B) {
 	rt := &Runtime{weightStats: WeightStats{F32Tensors: 42, F32Bytes: 1024, TotalBytes: 1024}}
 	b.ResetTimer()
@@ -360,6 +609,22 @@ func BenchmarkWeightStatsComputed(b *testing.B) {
 	}
 }
 
+func BenchmarkConfigView(b *testing.B) {
+	rt := &Runtime{cfg: validRuntimeConfigForTest()}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkConfigSink = rt.ConfigView()
+	}
+}
+
+func BenchmarkConfigCopy(b *testing.B) {
+	rt := &Runtime{cfg: validRuntimeConfigForTest()}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		benchmarkConfigSink = rt.Config()
+	}
+}
+
 func TestCleanWeightPath(t *testing.T) {
 	got := cleanWeightPath(filepath.Join(".", "model.gguf"))
 	if !filepath.IsAbs(got) {
@@ -367,6 +632,100 @@ func TestCleanWeightPath(t *testing.T) {
 	}
 	if filepath.Base(got) != "model.gguf" {
 		t.Fatalf("path=%q", got)
+	}
+}
+
+func TestValidateRuntimeConfigRejectsInvalidShapes(t *testing.T) {
+	cfg := validRuntimeConfigForTest()
+	cfg.NumKeyValueHeads = 3
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected kv head divisibility error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.RopeTheta = math.Inf(1)
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected rope theta error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.HeadDim = 3
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected hidden/head dimension error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.MaxPositionEmb = -1
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected max position error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.ImageTokenID = -1
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected image token id error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.VisionConfig.NumHiddenLayers = 1
+	cfg.VisionConfig.NumAttentionHeads = 0
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected vision attention heads error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.VisionConfig.NumHiddenLayers = 1
+	cfg.VisionConfig.ImageSize = -1
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected vision image size error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.VocabSize = maxIntForModelTest()
+	cfg.HiddenSize = 2
+	cfg.NumAttentionHeads = 1
+	cfg.NumKeyValueHeads = 1
+	cfg.HeadDim = 2
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected vocab/hidden overflow error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.IntermediateSize = maxIntForModelTest()
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected hidden/intermediate overflow error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.VisionConfig.NumHiddenLayers = 1
+	cfg.VisionConfig.HiddenSize = maxIntForModelTest()
+	cfg.VisionConfig.NumAttentionHeads = 1
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected vision hidden overflow error")
+	}
+	cfg = validRuntimeConfigForTest()
+	cfg.VisionConfig.NumHiddenLayers = 1
+	cfg.VisionConfig.PatchSize = maxIntForModelTest()
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected vision patch overflow error")
+	}
+}
+
+func maxIntForModelTest() int {
+	return int(^uint(0) >> 1)
+}
+
+func validRuntimeConfigForTest() *config.Config {
+	return &config.Config{
+		VocabSize:         2,
+		HiddenSize:        4,
+		IntermediateSize:  8,
+		NumHiddenLayers:   1,
+		NumAttentionHeads: 2,
+		NumKeyValueHeads:  1,
+		HeadDim:           2,
+		RMSNormEps:        1e-6,
+		RopeTheta:         10000,
+		VisionConfig: config.Vision{
+			NumHiddenLayers:   0,
+			HiddenSize:        4,
+			IntermediateSize:  8,
+			NumAttentionHeads: 2,
+			PatchSize:         14,
+			SpatialMergeSize:  2,
+			LayerNormEps:      1e-6,
+		},
 	}
 }
 

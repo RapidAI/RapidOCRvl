@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -70,6 +71,51 @@ func TestEncodeDecodeBPEAndSpecials(t *testing.T) {
 	}
 	if text := tok.Decode(nil, true); text != "" {
 		t.Fatalf("Decode(empty)=%q", text)
+	}
+}
+
+func TestLoadRejectsInvalidTokenIDs(t *testing.T) {
+	for _, body := range []string{
+		`{"model":{"vocab":{"x":-1},"merges":[]}}`,
+		`{"model":{"vocab":{"x":16777217},"merges":[]}}`,
+		`{"added_tokens":[{"id":16777217,"content":"<s>","special":true}],"model":{"vocab":{"x":0},"merges":[]}}`,
+		`{"model":{"vocab":{"x":0,"y":0},"merges":[]}}`,
+		`{"added_tokens":[{"id":0,"content":"<s>","special":true}],"model":{"vocab":{"x":0},"merges":[]}}`,
+		`{"added_tokens":[{"id":1,"content":"<s>","special":true},{"id":2,"content":"<s>","special":true}],"model":{"vocab":{"x":0},"merges":[]}}`,
+	} {
+		dir := t.TempDir()
+		writeTokenizer(t, dir, body)
+		if _, err := Load(dir); err == nil {
+			t.Fatalf("expected invalid tokenizer error for %s", body)
+		}
+	}
+}
+
+func TestLoadRejectsDuplicateJSONKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "top-level",
+			body: `{"model":{"vocab":{"x":0},"merges":[]},"model":{"vocab":{"y":1},"merges":[]}}`,
+		},
+		{
+			name: "vocab",
+			body: `{"model":{"vocab":{"x":0,"x":1},"merges":[]}}`,
+		},
+		{
+			name: "added-token",
+			body: `{"added_tokens":[{"id":1,"content":"<s>","content":"</s>","special":true}],"model":{"vocab":{"x":0},"merges":[]}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTokenizer(t, dir, tc.body)
+			if _, err := Load(dir); err == nil || !strings.Contains(err.Error(), "duplicate JSON key") {
+				t.Fatalf("err=%v want duplicate JSON key", err)
+			}
+		})
 	}
 }
 
@@ -145,6 +191,52 @@ func TestEncodeReadOnlyReturnsCachedSlice(t *testing.T) {
 	copied := tok.Encode("hi")
 	if &copied[0] == &second[0] {
 		t.Fatalf("Encode returned cached readonly slice")
+	}
+}
+
+func TestEncodeCacheSkipsOversizedTokenResults(t *testing.T) {
+	tok := &Tokenizer{
+		Vocab:       map[string]int{"a": 1},
+		cache:       map[string][]int{},
+		encodeCache: map[string][]int{},
+	}
+	ids := make([]int, maxCacheableTokenLen+1)
+	tok.storeEncodeCache("big", ids)
+	if stats := tok.CacheStats(); stats.EncodeEntries != 0 {
+		t.Fatalf("oversized encode cache stored stats=%+v", stats)
+	}
+	got := tok.encodeNormal(strings.Repeat("a", maxCacheableTokenLen+1))
+	if len(got) != maxCacheableTokenLen+1 {
+		t.Fatalf("len=%d", len(got))
+	}
+	if stats := tok.CacheStats(); stats.NormalEntries != 0 {
+		t.Fatalf("oversized normal cache stored stats=%+v", stats)
+	}
+	tok.storeEncodeCache("small", ids[:maxCacheableTokenLen])
+	if stats := tok.CacheStats(); stats.EncodeEntries != 1 {
+		t.Fatalf("small encode cache skipped stats=%+v", stats)
+	}
+}
+
+func TestEncodeNormalCacheSkipsOversizedInput(t *testing.T) {
+	tok := &Tokenizer{
+		Vocab:       map[string]int{"a": 1},
+		cache:       map[string][]int{},
+		encodeCache: map[string][]int{},
+	}
+	long := strings.Repeat("a", maxCacheableInputLen+1)
+	if got := tok.encodeNormal(long); len(got) != len(long) {
+		t.Fatalf("len=%d want %d", len(got), len(long))
+	}
+	if stats := tok.CacheStats(); stats.NormalEntries != 0 {
+		t.Fatalf("oversized input cached stats=%+v", stats)
+	}
+	short := strings.Repeat("a", maxCacheableInputLen)
+	if got := tok.encodeNormal(short); len(got) != len(short) {
+		t.Fatalf("len=%d want %d", len(got), len(short))
+	}
+	if stats := tok.CacheStats(); stats.NormalEntries != 1 {
+		t.Fatalf("cacheable input skipped stats=%+v", stats)
 	}
 }
 

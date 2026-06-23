@@ -46,6 +46,46 @@ func TestDotAt64PairAtMatchesScalar(t *testing.T) {
 	}
 }
 
+func TestDotAt128QuadAtMatchesScalar(t *testing.T) {
+	q := make([]float32, 128)
+	keys := make([]float32, 5*160)
+	for i := range q {
+		q[i] = float32(i%17-8) / 17
+	}
+	for i := range keys {
+		keys[i] = float32(i%19-9) / 19
+	}
+	offset0, offset1, offset2, offset3 := 16, 176, 336, 496
+	got0, got1, got2, got3 := dotAt128QuadAt(q, keys, offset0, offset1, offset2, offset3)
+	want0 := dotAt128(q, keys, offset0)
+	want1 := dotAt128(q, keys, offset1)
+	want2 := dotAt128(q, keys, offset2)
+	want3 := dotAt128(q, keys, offset3)
+	if math.Abs(float64(got0-want0)) > 1e-5 || math.Abs(float64(got1-want1)) > 1e-5 || math.Abs(float64(got2-want2)) > 1e-5 || math.Abs(float64(got3-want3)) > 1e-5 {
+		t.Fatalf("quad=(%f,%f,%f,%f) scalar=(%f,%f,%f,%f)", got0, got1, got2, got3, want0, want1, want2, want3)
+	}
+}
+
+func TestDotAt64QuadAtMatchesScalar(t *testing.T) {
+	q := make([]float32, 64)
+	keys := make([]float32, 5*96)
+	for i := range q {
+		q[i] = float32(i%17-8) / 17
+	}
+	for i := range keys {
+		keys[i] = float32(i%19-9) / 19
+	}
+	offset0, offset1, offset2, offset3 := 16, 112, 208, 304
+	got0, got1, got2, got3 := dotAt64QuadAt(q, keys, offset0, offset1, offset2, offset3)
+	want0 := dotAt(q, keys, offset0, 64)
+	want1 := dotAt(q, keys, offset1, 64)
+	want2 := dotAt(q, keys, offset2, 64)
+	want3 := dotAt(q, keys, offset3, 64)
+	if math.Abs(float64(got0-want0)) > 1e-5 || math.Abs(float64(got1-want1)) > 1e-5 || math.Abs(float64(got2-want2)) > 1e-5 || math.Abs(float64(got3-want3)) > 1e-5 {
+		t.Fatalf("quad=(%f,%f,%f,%f) scalar=(%f,%f,%f,%f)", got0, got1, got2, got3, want0, want1, want2, want3)
+	}
+}
+
 func TestDotAt128PairRowsMatchesScalar(t *testing.T) {
 	q := make([]float32, 128)
 	row0 := make([]float32, 192)
@@ -66,6 +106,32 @@ func TestDotAt128PairRowsMatchesScalar(t *testing.T) {
 	}
 }
 
+func TestDotAt128QuadRowsMatchesScalar(t *testing.T) {
+	q := make([]float32, 128)
+	row0 := make([]float32, 192)
+	row1 := make([]float32, 192)
+	row2 := make([]float32, 192)
+	row3 := make([]float32, 192)
+	for i := range q {
+		q[i] = float32(i%17-8) / 17
+	}
+	for i := range row0 {
+		row0[i] = float32(i%19-9) / 19
+		row1[i] = float32(i%23-11) / 23
+		row2[i] = float32(i%29-14) / 29
+		row3[i] = float32(i%31-15) / 31
+	}
+	offset := 32
+	got0, got1, got2, got3 := dotAt128QuadRows(q, row0, row1, row2, row3, offset)
+	want0 := dotAt128(q, row0, offset)
+	want1 := dotAt128(q, row1, offset)
+	want2 := dotAt128(q, row2, offset)
+	want3 := dotAt128(q, row3, offset)
+	if math.Abs(float64(got0-want0)) > 1e-5 || math.Abs(float64(got1-want1)) > 1e-5 || math.Abs(float64(got2-want2)) > 1e-5 || math.Abs(float64(got3-want3)) > 1e-5 {
+		t.Fatalf("quad=(%f,%f,%f,%f) scalar=(%f,%f,%f,%f)", got0, got1, got2, got3, want0, want1, want2, want3)
+	}
+}
+
 func TestDotAt64PairRowsMatchesScalar(t *testing.T) {
 	q := make([]float32, 64)
 	row0 := make([]float32, 96)
@@ -83,6 +149,32 @@ func TestDotAt64PairRowsMatchesScalar(t *testing.T) {
 	want1 := dotAt(q, row1, offset, 64)
 	if math.Abs(float64(got0-want0)) > 1e-5 || math.Abs(float64(got1-want1)) > 1e-5 {
 		t.Fatalf("pair=(%f,%f) scalar=(%f,%f)", got0, got1, want0, want1)
+	}
+}
+
+func TestDotAt64QuadRowsMatchesScalar(t *testing.T) {
+	q := make([]float32, 64)
+	row0 := make([]float32, 96)
+	row1 := make([]float32, 96)
+	row2 := make([]float32, 96)
+	row3 := make([]float32, 96)
+	for i := range q {
+		q[i] = float32(i%17-8) / 17
+	}
+	for i := range row0 {
+		row0[i] = float32(i%19-9) / 19
+		row1[i] = float32(i%23-11) / 23
+		row2[i] = float32(i%29-14) / 29
+		row3[i] = float32(i%31-15) / 31
+	}
+	offset := 32
+	got0, got1, got2, got3 := dotAt64QuadRows(q, row0, row1, row2, row3, offset)
+	want0 := dotAt(q, row0, offset, 64)
+	want1 := dotAt(q, row1, offset, 64)
+	want2 := dotAt(q, row2, offset, 64)
+	want3 := dotAt(q, row3, offset, 64)
+	if math.Abs(float64(got0-want0)) > 1e-5 || math.Abs(float64(got1-want1)) > 1e-5 || math.Abs(float64(got2-want2)) > 1e-5 || math.Abs(float64(got3-want3)) > 1e-5 {
+		t.Fatalf("quad=(%f,%f,%f,%f) scalar=(%f,%f,%f,%f)", got0, got1, got2, got3, want0, want1, want2, want3)
 	}
 }
 
@@ -220,6 +312,29 @@ func BenchmarkWeightedCacheValueSumDim64Len2(b *testing.B) {
 		cache.append(k, v)
 	}
 	weights := []float32{0.75, 0.25}
+	dst := make([]float32, dim)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		weightedCacheValueSum(dst, cache, 3, dim, weights)
+	}
+}
+
+func BenchmarkWeightedCacheValueSumDim64Len3(b *testing.B) {
+	heads, dim, tokens := 8, 64, 3
+	cache := &kvCache{
+		kvDim: heads * dim,
+		k:     make([]float32, 0, tokens*heads*dim),
+		v:     make([]float32, 0, tokens*heads*dim),
+	}
+	k := make([]float32, heads*dim)
+	v := make([]float32, heads*dim)
+	for t := 0; t < tokens; t++ {
+		for i := range v {
+			v[i] = float32((t+i)%17-8) / 17
+		}
+		cache.append(k, v)
+	}
+	weights := []float32{0.5, 0.3, 0.2}
 	dst := make([]float32, dim)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -609,6 +724,10 @@ func BenchmarkCacheAttentionSplitLen3(b *testing.B) {
 	benchmarkCacheAttentionSplit(b, 128, 3)
 }
 
+func BenchmarkCacheAttentionDispatchLen3(b *testing.B) {
+	benchmarkCacheAttentionDispatch(b, 128, 3)
+}
+
 func BenchmarkCacheAttentionSmallLen4(b *testing.B) {
 	benchmarkCacheAttentionSmall(b, 128, 4)
 }
@@ -625,12 +744,32 @@ func BenchmarkCacheAttentionSplitDim64Len2(b *testing.B) {
 	benchmarkCacheAttentionSplit(b, 64, 2)
 }
 
+func BenchmarkCacheAttentionSmallDim64Len3(b *testing.B) {
+	benchmarkCacheAttentionSmall(b, 64, 3)
+}
+
+func BenchmarkCacheAttentionSplitDim64Len3(b *testing.B) {
+	benchmarkCacheAttentionSplit(b, 64, 3)
+}
+
+func BenchmarkCacheAttentionDispatchDim64Len3(b *testing.B) {
+	benchmarkCacheAttentionDispatch(b, 64, 3)
+}
+
 func BenchmarkCacheAttentionSmallDim64Len4(b *testing.B) {
 	benchmarkCacheAttentionSmall(b, 64, 4)
 }
 
 func BenchmarkCacheAttentionSplitDim64Len4(b *testing.B) {
 	benchmarkCacheAttentionSplit(b, 64, 4)
+}
+
+func BenchmarkCacheAttentionDispatchLen4(b *testing.B) {
+	benchmarkCacheAttentionDispatch(b, 128, 4)
+}
+
+func BenchmarkCacheAttentionDispatchDim64Len4(b *testing.B) {
+	benchmarkCacheAttentionDispatch(b, 64, 4)
 }
 
 func benchmarkCacheAttentionSmall(b *testing.B, dim, tokens int) {
@@ -653,6 +792,28 @@ func benchmarkCacheAttentionSplit(b *testing.B, dim, tokens int) {
 		cacheAttentionScores(scores, q, cache, 3, dim, scale)
 		tensor.SoftmaxInPlace(scores)
 		weightedCacheValueSum(dst, cache, 3, dim, scores)
+	}
+}
+
+func benchmarkCacheAttentionDispatch(b *testing.B, dim, tokens int) {
+	cache, q := buildCacheAttentionBenchInput(tokens, 8, dim)
+	dst := make([]float32, dim)
+	scores := make([]float32, tokens)
+	scale := float32(1 / math.Sqrt(float64(dim)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		switch {
+		case cache.len == 2:
+			cacheAttentionLen2(dst, q, cache, 3, dim, scale)
+		case cache.len == 3:
+			cacheAttentionLen3(dst, q, cache, 3, dim, scale)
+		case cache.len == 4 && (dim == 128 || dim == 64):
+			cacheAttentionLen4(dst, q, cache, 3, dim, scale)
+		default:
+			cacheAttentionScores(scores, q, cache, 3, dim, scale)
+			tensor.SoftmaxInPlace(scores)
+			weightedCacheValueSum(dst, cache, 3, dim, scores)
+		}
 	}
 }
 
@@ -750,6 +911,60 @@ func BenchmarkWeightedValueSumDim64Len2(b *testing.B) {
 		}
 	}
 	weights := []float32{0.75, 0.25}
+	dst := make([]float32, dim)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		weightedValueSum(dst, xs, 3*dim, dim, weights)
+	}
+}
+
+func BenchmarkWeightedValueSumLen3(b *testing.B) {
+	rows, heads, dim := 3, 8, 128
+	width := heads * dim
+	xs := make([][]float32, rows)
+	for r := range xs {
+		xs[r] = make([]float32, width)
+		for i := range xs[r] {
+			xs[r][i] = float32((r+i)%17-8) / 17
+		}
+	}
+	weights := []float32{0.5, 0.3, 0.2}
+	dst := make([]float32, dim)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		weightedValueSum(dst, xs, 3*dim, dim, weights)
+	}
+}
+
+func BenchmarkWeightedValueSumDim64Len3(b *testing.B) {
+	rows, heads, dim := 3, 8, 64
+	width := heads * dim
+	xs := make([][]float32, rows)
+	for r := range xs {
+		xs[r] = make([]float32, width)
+		for i := range xs[r] {
+			xs[r][i] = float32((r+i)%17-8) / 17
+		}
+	}
+	weights := []float32{0.5, 0.3, 0.2}
+	dst := make([]float32, dim)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		weightedValueSum(dst, xs, 3*dim, dim, weights)
+	}
+}
+
+func BenchmarkWeightedValueSumLen4(b *testing.B) {
+	rows, heads, dim := 4, 8, 128
+	width := heads * dim
+	xs := make([][]float32, rows)
+	for r := range xs {
+		xs[r] = make([]float32, width)
+		for i := range xs[r] {
+			xs[r][i] = float32((r+i)%17-8) / 17
+		}
+	}
+	weights := []float32{0.4, 0.3, 0.2, 0.1}
 	dst := make([]float32, dim)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

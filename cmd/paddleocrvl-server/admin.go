@@ -23,6 +23,9 @@ import (
 	"time"
 
 	"paddleocrvl-go/internal/backend"
+	"paddleocrvl-go/internal/config"
+	"paddleocrvl-go/internal/jsonutil"
+	"paddleocrvl-go/internal/model"
 )
 
 type adminConfigFile struct {
@@ -59,6 +62,7 @@ type adminState struct {
 	mu       sync.RWMutex
 	path     string
 	cfg      adminConfigFile
+	loadErr  error
 	sessions map[string]time.Time
 	rates    map[string]apiKeyRateWindow
 	logins   map[string]loginFailureWindow
@@ -144,9 +148,17 @@ var (
 
 func loadAdminState(path string) *adminState {
 	st := &adminState{path: path, sessions: make(map[string]time.Time), rates: make(map[string]apiKeyRateWindow), logins: make(map[string]loginFailureWindow)}
+	if info, err := os.Stat(path); err == nil && info.Size() > adminConfigFileLimit {
+		st.loadErr = fmt.Errorf("load admin config %s: file too large: %d bytes > %d", path, info.Size(), adminConfigFileLimit)
+		return st
+	}
 	b, err := os.ReadFile(path)
 	if err == nil {
-		_ = json.Unmarshal(b, &st.cfg)
+		if err := jsonutil.RejectDuplicateKeys(b, path); err != nil {
+			st.loadErr = fmt.Errorf("load admin config %s: %w", path, err)
+		} else if err := json.Unmarshal(b, &st.cfg); err != nil {
+			st.loadErr = fmt.Errorf("load admin config %s: %w", path, err)
+		}
 	}
 	return st
 }
@@ -293,6 +305,9 @@ func normalizeAdminUser(user string) (string, error) {
 }
 
 func (a *adminState) createAPIKeyLocked(name string, quota, ratePerMin int64) (string, managedAPIKey, error) {
+	if len(a.cfg.APIKeys) >= maxAdminAPIKeys {
+		return "", managedAPIKey{}, fmt.Errorf("api key limit exceeded: %d", maxAdminAPIKeys)
+	}
 	name, err := normalizeAPIKeyName(name)
 	if err != nil {
 		return "", managedAPIKey{}, err
@@ -674,6 +689,7 @@ var llmsTXTBufferPool = sync.Pool{New: func() any {
 	b := make([]byte, 0, len(llmsTXTParts[0])+len(llmsTXTBasePlaceholder)*7)
 	return &b
 }}
+var maxLLMSTXTBufferPoolCap = llmsTXTBaseCap() + maxLLMSTXTBufferExtra
 
 func writeLLMsTXT(w io.Writer, base string) {
 	p := llmsTXTBufferPool.Get().(*[]byte)
@@ -693,8 +709,7 @@ func writeLLMsTXT(w io.Writer, base string) {
 		buf = append(buf, part...)
 	}
 	_, _ = w.Write(buf)
-	*p = buf
-	llmsTXTBufferPool.Put(p)
+	putLLMSTXTBuffer(p, buf)
 }
 
 func writeLLMsTXTForRequest(w io.Writer, r *http.Request) {
@@ -719,12 +734,31 @@ func writeLLMsTXTForRequest(w io.Writer, r *http.Request) {
 		buf = append(buf, part...)
 	}
 	_, _ = w.Write(buf)
-	*p = buf
+	putLLMSTXTBuffer(p, buf)
+}
+
+func putLLMSTXTBuffer(p *[]byte, buf []byte) {
+	if cap(buf) > maxLLMSTXTBufferPoolCap {
+		return
+	}
+	*p = buf[:0]
 	llmsTXTBufferPool.Put(p)
+}
+
+func llmsTXTBaseCap() int {
+	n := 0
+	for _, part := range llmsTXTParts {
+		n += len(part)
+	}
+	return n + len(llmsTXTBasePlaceholder)*(len(llmsTXTParts)-1)
 }
 
 const openAPIBasePlaceholder = "__PADDLEOCRVL_BASE_URL__"
 const adminRequestLimit int64 = 4 << 20
+const adminConfigFileLimit int64 = 4 << 20
+const maxAdminAPIKeys = 1024
+const maxLLMSTXTBufferExtra = 4 << 10
+const maxOpenAPIResponseBufferExtra = 4 << 10
 
 var openAPIJSONParts = buildOpenAPIJSONParts()
 var openAPIResponseBufferPool = sync.Pool{New: func() any {
@@ -754,8 +788,7 @@ func writeOpenAPIJSON(w http.ResponseWriter, base string) {
 	p := openAPIResponseBufferPool.Get().(*[]byte)
 	buf := appendOpenAPIJSON((*p)[:0], base)
 	_, _ = w.Write(buf)
-	*p = buf
-	openAPIResponseBufferPool.Put(p)
+	putOpenAPIResponseBuffer(p, buf)
 }
 
 func writeOpenAPIJSONForRequest(w http.ResponseWriter, r *http.Request) {
@@ -778,7 +811,15 @@ func writeOpenAPIJSONForRequest(w http.ResponseWriter, r *http.Request) {
 	buf = append(buf, openAPIJSONParts[1]...)
 	buf = append(buf, '\n')
 	_, _ = w.Write(buf)
-	*p = buf
+	putOpenAPIResponseBuffer(p, buf)
+}
+
+func putOpenAPIResponseBuffer(p *[]byte, buf []byte) {
+	maxCap := len(openAPIJSONParts[0]) + len(openAPIBasePlaceholder) + len(openAPIJSONParts[1]) + maxOpenAPIResponseBufferExtra
+	if cap(buf) > maxCap {
+		return
+	}
+	*p = buf[:0]
 	openAPIResponseBufferPool.Put(p)
 }
 
@@ -1488,7 +1529,7 @@ func (s *server) adminKeysCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.admin.mu.Unlock()
 	if err != nil {
-		if strings.Contains(err.Error(), "api key name") {
+		if strings.Contains(err.Error(), "api key name") || strings.Contains(err.Error(), "api key limit exceeded") {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -1967,19 +2008,21 @@ func (w *statusRecorder) auditError() string {
 }
 
 func clientIP(r *http.Request) string {
-	if forwarded := trimASCIIForm(firstHeaderValue(r.Header, "X-Forwarded-For")); forwarded != "" {
-		if i := strings.IndexByte(forwarded, ','); i >= 0 {
-			forwarded = forwarded[:i]
-		}
-		if ip := trimASCIIForm(forwarded); ip != "" {
-			if validIPv4Literal(ip) || strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
-				return ip
+	if trustForwardedHeaders(r) {
+		if forwarded := trimASCIIForm(firstHeaderValue(r.Header, "X-Forwarded-For")); forwarded != "" {
+			if i := strings.IndexByte(forwarded, ','); i >= 0 {
+				forwarded = forwarded[:i]
+			}
+			if ip := trimASCIIForm(forwarded); ip != "" {
+				if validIPv4Literal(ip) || strings.Contains(ip, ":") && net.ParseIP(ip) != nil {
+					return ip
+				}
 			}
 		}
-	}
-	if realIP := trimASCIIForm(firstHeaderValue2(r.Header, "X-Real-Ip", "X-Real-IP")); realIP != "" {
-		if validIPv4Literal(realIP) || strings.Contains(realIP, ":") && net.ParseIP(realIP) != nil {
-			return realIP
+		if realIP := trimASCIIForm(firstHeaderValue2(r.Header, "X-Real-Ip", "X-Real-IP")); realIP != "" {
+			if validIPv4Literal(realIP) || strings.Contains(realIP, ":") && net.ParseIP(realIP) != nil {
+				return realIP
+			}
 		}
 	}
 	if host, ok := splitHostPortASCII(r.RemoteAddr); ok {
@@ -1991,6 +2034,15 @@ func clientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return r.RemoteAddr
+}
+
+func trustForwardedHeaders(r *http.Request) bool {
+	host := r.RemoteAddr
+	if h, ok := splitHostPortASCII(host); ok {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func firstHeaderValue(h http.Header, key string) string {
@@ -2080,6 +2132,13 @@ func validateModelDir(dir string) error {
 			return fmt.Errorf("missing %s", name)
 		}
 	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return fmt.Errorf("invalid config.json: %w", err)
+	}
+	if err := model.ValidateRuntimeConfig(cfg); err != nil {
+		return fmt.Errorf("invalid config.json: %w", err)
+	}
 	weights := []string{"model.gguf", "model-q8.gguf", "model-q6.gguf", "model-q4.gguf", "model.safetensors", "model.safetensors.index.json"}
 	for _, name := range weights {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
@@ -2098,6 +2157,14 @@ func validateAdminConfigBackup(cfg adminConfigFile) error {
 	}
 	if !validSalt(cfg.PasswordSalt) || !validSHA256Hex(cfg.PasswordHash) {
 		return fmt.Errorf("backup password hash is invalid")
+	}
+	if cfg.APIKeyHash != "" || cfg.APIKeySalt != "" || cfg.APIKeyPreview != "" {
+		if !validSalt(cfg.APIKeySalt) || !validSHA256Hex(cfg.APIKeyHash) || !validAPIKeyPreview(cfg.APIKeyPreview) {
+			return fmt.Errorf("backup legacy API key metadata is invalid")
+		}
+	}
+	if len(cfg.APIKeys) > maxAdminAPIKeys {
+		return fmt.Errorf("backup contains too many API keys: %d > %d", len(cfg.APIKeys), maxAdminAPIKeys)
 	}
 	seenIDs := make(map[string]struct{}, len(cfg.APIKeys))
 	for _, key := range cfg.APIKeys {
@@ -2148,6 +2215,19 @@ func validSalt(s string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+func validAPIKeyPreview(s string) bool {
+	if len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
 	}
 	return true
 }
@@ -2208,7 +2288,7 @@ func validRequestHost(host string) bool {
 	if name == "" {
 		return false
 	}
-	if maybeIPv4Literal(name) && net.ParseIP(name) != nil {
+	if validIPv4Literal(name) {
 		return true
 	}
 	start := 0
@@ -2239,20 +2319,6 @@ func containsInvalidHostByte(host string) bool {
 		}
 	}
 	return false
-}
-
-func maybeIPv4Literal(host string) bool {
-	if host == "" {
-		return false
-	}
-	for i := 0; i < len(host); i++ {
-		c := host[i]
-		if c >= '0' && c <= '9' || c == '.' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func validIPv4Literal(host string) bool {
@@ -2298,7 +2364,7 @@ func validPort(port string) bool {
 }
 
 func requestScheme(r *http.Request) string {
-	if proto := firstHeaderValue(r.Header, "X-Forwarded-Proto"); proto != "" {
+	if proto := forwardedProto(r); proto != "" {
 		start, end := 0, len(proto)
 		for start < end && isASCIISpace(proto[start]) {
 			start++
@@ -2325,22 +2391,42 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
+func forwardedProto(r *http.Request) string {
+	if !trustForwardedHeaders(r) {
+		return ""
+	}
+	return firstHeaderValue(r.Header, "X-Forwarded-Proto")
+}
+
 func (s *server) statsSnapshot() statsResponse {
-	cfg := s.rt.Config()
+	cfg := s.rt.ConfigView()
 	inFlight := len(s.runSlots)
-	cmdPlan := s.rt.VulkanCommandPlan()
-	cmdPlanErr := backend.ValidateVulkanCommandPlan(cmdPlan)
+	concurrency := s.effectiveConcurrency()
+	vulkanArtifacts := s.rt.VulkanArtifactsView()
+	cmdPlanErr := s.rt.VulkanCommandPlanValidation()
+	queued := s.metrics.queued.Load()
+	started := s.metrics.started.Load()
+	succeeded := s.metrics.succeeded.Load()
+	failed := s.metrics.failed.Load()
+	canceled := s.metrics.canceled.Load()
+	batches := s.metrics.batches.Load()
+	batchItems := s.metrics.batchItems.Load()
+	generatedTokens := s.metrics.generatedTokens.Load()
+	latencyNanos := s.metrics.latencyNanos.Load()
+	queueWaitNanos := s.metrics.queueWaitNanos.Load()
 	return statsResponse{
 		Status:               "ok",
 		UptimeSeconds:        int64(time.Since(s.started).Seconds()),
-		Concurrency:          s.concurrency,
+		Concurrency:          concurrency,
 		InFlight:             inFlight,
-		AvailableSlots:       s.concurrency - inFlight,
+		AvailableSlots:       concurrency - inFlight,
 		RequestLimit:         s.requestLimit,
 		MultipartMemory:      s.multipartMem,
 		MaxNewLimit:          s.maxNewLimit,
 		MaxInputTokens:       s.maxInputLimit,
 		MaxBatchSize:         s.maxBatchSize,
+		AutoBatchSize:        s.autoBatchSize,
+		AutoBatchWaitMS:      s.autoBatchWait.Milliseconds(),
 		TimeoutSeconds:       int64(s.timeout.Seconds()),
 		Quantization:         s.rt.Quantization(),
 		RequestedQuant:       s.rt.RequestedQuantization(),
@@ -2352,26 +2438,26 @@ func (s *server) statsSnapshot() statsResponse {
 		Backend:              s.rt.Backend(),
 		VisionLoaded:         s.rt.VisionLoaded(),
 		Backends:             s.backendSel,
-		VulkanPlans:          s.rt.VulkanPlans(),
-		VulkanPlanSummary:    s.rt.VulkanPlanSummary(),
-		VulkanExecutionGraph: s.rt.VulkanExecutionGraph(),
-		VulkanPipelinePlan:   s.rt.VulkanPipelinePlan(),
-		VulkanCommandPlan:    cmdPlan,
+		VulkanPlans:          vulkanArtifacts.Plans,
+		VulkanPlanSummary:    vulkanArtifacts.Summary,
+		VulkanExecutionGraph: vulkanArtifacts.ExecutionGraph,
+		VulkanPipelinePlan:   vulkanArtifacts.PipelinePlan,
+		VulkanCommandPlan:    vulkanArtifacts.CommandPlan,
 		VulkanCommandPlanOK:  cmdPlanErr == "",
 		VulkanCommandPlanErr: cmdPlanErr,
 		CPU:                  s.cpuInfo,
 		Memory:               backendMemory(),
 		Requests: statsRequests{
-			Queued:          s.metrics.queued.Load(),
-			Started:         s.metrics.started.Load(),
-			Succeeded:       s.metrics.succeeded.Load(),
-			Failed:          s.metrics.failed.Load(),
-			Canceled:        s.metrics.canceled.Load(),
-			Batches:         s.metrics.batches.Load(),
-			BatchItems:      s.metrics.batchItems.Load(),
-			GeneratedTokens: s.metrics.generatedTokens.Load(),
-			AvgLatencyMS:    s.avgLatencyMillis(),
-			AvgQueueWaitMS:  s.avgQueueWaitMillis(),
+			Queued:          queued,
+			Started:         started,
+			Succeeded:       succeeded,
+			Failed:          failed,
+			Canceled:        canceled,
+			Batches:         batches,
+			BatchItems:      batchItems,
+			GeneratedTokens: generatedTokens,
+			AvgLatencyMS:    avgMillis(latencyNanos, succeeded),
+			AvgQueueWaitMS:  avgMillis(queueWaitNanos, started),
 			LastError:       s.lastError(),
 		},
 		Model: statsModel{
@@ -2637,7 +2723,7 @@ async function initAdmin(){try{const j=await api('/admin/api/init',{method:'POST
 async function login(){try{await api('/admin/api/login',{method:'POST',body:JSON.stringify({admin_user:$('loginUser').value,password:$('loginPassword').value})});boot();}catch(e){toast(e.message);}}
 async function logout(){await api('/admin/api/logout',{method:'POST'});showAuth(false);}
 function showTab(tab){for(const id of ['dashboard','settings','keys','audit','api'])$(id).classList.toggle('hide',id!==tab);for(const id of ['Dashboard','Settings','Keys','Audit','Api'])$('nav'+id).classList.remove('active');$('nav'+tab[0].toUpperCase()+tab.slice(1)).classList.add('active');$('pageTitle').textContent=tab==='dashboard'?'服务总览':tab==='settings'?'系统设置':tab==='keys'?'能力凭证':tab==='audit'?'调用审计':'API 文档';$('pageSub').textContent=tab==='dashboard'?'模型、API 与运行状态':tab==='settings'?'管理员与模型路径':tab==='keys'?'签发、额度、启停与删除':tab==='audit'?'最近请求、来源、状态与耗时':'服务端点与调用示例';if(tab==='audit')loadAudit();}
-async function loadOverview(){overview=await api('/admin/api/overview');const st=overview.stats,ad=overview.admin;$('sideHost').textContent=overview.current_host;$('readyText').textContent=overview.ready.status;$('readyDot').classList.toggle('bad',overview.ready.status!=='ready');$('mOk').textContent=st.requests.succeeded;$('mFail').textContent=st.requests.failed;$('mLatency').textContent=st.requests.avg_latency_ms;$('mSlots').textContent=st.available_slots+'/'+st.concurrency;$('modelRows').innerHTML=rows([['本机模型路径',overview.model_dir],['当前权重',st.weight_path],['权重来源',st.weight_source],['SHA256',st.weight_sha256],['量化',st.quantization],['后端',st.backend]]);$('runtimeRows').innerHTML=rows([['API Base URL',overview.api_base_url],['API 文档',overview.api_base_url+'/doc'],['OpenAPI JSON',overview.api_base_url+'/doc/openapi.json'],['AI 接入说明',overview.api_base_url+'/doc/llms.txt'],['Max New Tokens',st.max_new_limit],['Batch 上限',st.max_batch_size||'不限'],['内存',formatBytes(st.memory.heap_alloc)],['运行时间',st.uptime_seconds+' 秒'],['最后错误',st.requests.last_error||'无']]);$('cfgUser').value=ad.admin_user;$('cfgModelDir').value=ad.model_dir;$('cfgPostDir').value=ad.post_process_dir;$('restartNotice').classList.toggle('hide',!ad.restart_required);$('apiRows').innerHTML=rows([['完整文档',overview.api_base_url+'/doc'],['OpenAPI JSON',overview.api_base_url+'/doc/openapi.json'],['AI 接入说明',overview.api_base_url+'/doc/llms.txt'],['Health',overview.api_base_url+'/health'],['Ready',overview.api_base_url+'/ready'],['Stats',overview.api_base_url+'/stats'],['OCR',overview.api_base_url+'/v1/ocr'],['Generate',overview.api_base_url+'/v1/generate'],['Batch',overview.api_base_url+'/v1/batch']]);await loadKeys();await loadAudit();}
+async function loadOverview(){overview=await api('/admin/api/overview');const st=overview.stats,ad=overview.admin;$('sideHost').textContent=overview.current_host;$('readyText').textContent=overview.ready.status;$('readyDot').classList.toggle('bad',overview.ready.status!=='ready');$('mOk').textContent=st.requests.succeeded;$('mFail').textContent=st.requests.failed;$('mLatency').textContent=st.requests.avg_latency_ms;$('mSlots').textContent=st.available_slots+'/'+st.concurrency;$('modelRows').innerHTML=rows([['本机模型路径',overview.model_dir],['当前权重',st.weight_path],['权重来源',st.weight_source],['SHA256',st.weight_sha256],['量化',st.quantization],['后端',st.backend]]);$('runtimeRows').innerHTML=rows([['API Base URL',overview.api_base_url],['API 文档',overview.api_base_url+'/doc'],['OpenAPI JSON',overview.api_base_url+'/doc/openapi.json'],['AI 接入说明',overview.api_base_url+'/doc/llms.txt'],['Max New Tokens',st.max_new_limit],['Batch 上限',st.max_batch_size||'不限'],['自动合批',st.auto_batch_size>1?st.auto_batch_size+' / '+st.auto_batch_wait_ms+' ms':'关闭'],['内存',formatBytes(st.memory.heap_alloc)],['运行时间',st.uptime_seconds+' 秒'],['最后错误',st.requests.last_error||'无']]);$('cfgUser').value=ad.admin_user;$('cfgModelDir').value=ad.model_dir;$('cfgPostDir').value=ad.post_process_dir;$('restartNotice').classList.toggle('hide',!ad.restart_required);$('apiRows').innerHTML=rows([['完整文档',overview.api_base_url+'/doc'],['OpenAPI JSON',overview.api_base_url+'/doc/openapi.json'],['AI 接入说明',overview.api_base_url+'/doc/llms.txt'],['Health',overview.api_base_url+'/health'],['Ready',overview.api_base_url+'/ready'],['Stats',overview.api_base_url+'/stats'],['OCR',overview.api_base_url+'/v1/ocr'],['Generate',overview.api_base_url+'/v1/generate'],['Batch',overview.api_base_url+'/v1/batch']]);await loadKeys();await loadAudit();}
 function rows(items){return items.map(([k,v])=>'<div class="row"><div class="key">'+esc(k)+'</div><div class="val">'+esc(String(v??''))+'</div></div>').join('');}
 function esc(s){return s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function formatBytes(n){if(!n)return '0 B';const u=['B','KB','MB','GB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++;}return n.toFixed(i?1:0)+' '+u[i];}

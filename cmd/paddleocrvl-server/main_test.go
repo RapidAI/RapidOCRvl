@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"paddleocrvl-go/internal/model"
 )
 
 func TestImageBytesBase64(t *testing.T) {
@@ -29,6 +32,28 @@ func TestImageBytesBase64(t *testing.T) {
 	}
 	if string(got) != string(raw) {
 		t.Fatalf("imageBytes=%v want %v", got, raw)
+	}
+}
+
+func TestBase64DecodedLenAccountsForPadding(t *testing.T) {
+	for _, raw := range [][]byte{
+		{},
+		{1},
+		{1, 2},
+		{1, 2, 3},
+		{1, 2, 3, 4},
+	} {
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		if got := base64DecodedLen(encoded); got != len(raw) {
+			t.Fatalf("base64DecodedLen(%q)=%d want %d", encoded, got, len(raw))
+		}
+		wrapped := encoded
+		if len(wrapped) > 2 {
+			wrapped = wrapped[:2] + "\r\n" + wrapped[2:]
+		}
+		if got := base64DecodedLenIgnoringCRLF(wrapped); got != len(raw) {
+			t.Fatalf("base64DecodedLenIgnoringCRLF(%q)=%d want %d", wrapped, got, len(raw))
+		}
 	}
 }
 
@@ -76,6 +101,19 @@ func TestImageBytesRejectsPathAndBase64(t *testing.T) {
 	_, err := imageBytes(&req)
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestReadAllLimitedRejectsOversize(t *testing.T) {
+	got, err := readAllLimited(strings.NewReader("abcd"), 4, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abcd" {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := readAllLimited(strings.NewReader("abcde"), 4, "test"); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -196,6 +234,14 @@ func TestMetricsHelpers(t *testing.T) {
 	}
 }
 
+func BenchmarkAvgMillis(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if got := avgMillis(int64(300*time.Millisecond), 2); got != 150 {
+			b.Fatalf("got %d", got)
+		}
+	}
+}
+
 func TestBatchJSONRejectsEmptyRequests(t *testing.T) {
 	s := &server{requestLimit: 1 << 20}
 	req := httptest.NewRequest(http.MethodPost, "/v1/batch", strings.NewReader(`{"requests":[]}`))
@@ -270,6 +316,413 @@ func TestBatchJSONQueuesAllItemsWithMultipleSlots(t *testing.T) {
 	}
 	if got := s.metrics.failed.Load(); got == 0 {
 		t.Fatalf("failed=%d want >0", got)
+	}
+}
+
+func TestBatchJSONRunsItemsConcurrentlyWhenSlotsAvailable(t *testing.T) {
+	entered := make(chan int, 2)
+	release := make(chan struct{})
+	s := &server{
+		requestLimit: 1 << 20,
+		runSlots:     make(chan struct{}, 2),
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			entered <- ids[0]
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return model.GenerateResult{}, ctx.Err()
+			}
+			return model.GenerateResult{Tokens: []int{ids[0], ids[0] + 10}, PromptTokens: len(ids)}, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/batch", strings.NewReader(`{"requests":[{"tokens":[1],"max_new_tokens":1},{"tokens":[2],"max_new_tokens":1}]}`))
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		s.batchJSON(rec, req)
+		close(done)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			<-done
+			t.Fatal("batch items did not enter inference concurrently")
+		}
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("batch request did not complete")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	var body batchResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Items != 2 || body.GeneratedTokens != 2 {
+		t.Fatalf("body=%+v", body)
+	}
+}
+
+func TestGenerateAutoBatcherCoalescesConcurrentRequests(t *testing.T) {
+	entered := make(chan int, 2)
+	release := make(chan struct{})
+	s := &server{
+		runSlots: make(chan struct{}, 2),
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			entered <- ids[0]
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return model.GenerateResult{}, ctx.Err()
+			}
+			return model.GenerateResult{Tokens: []int{ids[0], ids[0] + 10}, PromptTokens: len(ids)}, nil
+		},
+	}
+	s.batcher = newRequestBatcher(s, 2, time.Second)
+	defer s.batcher.close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resCh := make(chan batchItemResult, 2)
+	for _, id := range []int{1, 2} {
+		id := id
+		go func() {
+			res, err := s.runGenerate(ctx, generateRequest{Tokens: []int{id}, MaxNewTokens: 1})
+			resCh <- batchItemResult{res: res, err: err}
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("auto-batched requests did not enter inference together")
+		}
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-resCh:
+			if got.err != nil {
+				t.Fatalf("runGenerate err=%v", got.err)
+			}
+			if got.res.GeneratedTokens != 1 {
+				t.Fatalf("response=%+v", got.res)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for auto-batched response")
+		}
+	}
+	if got := s.metrics.batches.Load(); got != 1 {
+		t.Fatalf("batches=%d want 1", got)
+	}
+	if got := s.metrics.batchItems.Load(); got != 2 {
+		t.Fatalf("batchItems=%d want 2", got)
+	}
+}
+
+func TestGenerateAutoBatcherProcessesMultipleBatchesConcurrently(t *testing.T) {
+	entered := make(chan int, 4)
+	release := make(chan struct{})
+	s := &server{
+		runSlots:    make(chan struct{}, 4),
+		concurrency: 4,
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			entered <- ids[0]
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return model.GenerateResult{}, ctx.Err()
+			}
+			return model.GenerateResult{Tokens: []int{ids[0], ids[0] + 10}, PromptTokens: len(ids)}, nil
+		},
+	}
+	s.batcher = newRequestBatcher(s, 2, time.Millisecond)
+	defer s.batcher.close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resCh := make(chan error, 4)
+	for id := 1; id <= 4; id++ {
+		id := id
+		go func() {
+			_, err := s.runGenerate(ctx, generateRequest{Tokens: []int{id}, MaxNewTokens: 1})
+			resCh <- err
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("auto-batched requests did not use available concurrency")
+		}
+	}
+	close(release)
+	for i := 0; i < 4; i++ {
+		select {
+		case err := <-resCh:
+			if err != nil {
+				t.Fatalf("runGenerate err=%v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for auto-batched response")
+		}
+	}
+	if got := s.metrics.batchItems.Load(); got != 4 {
+		t.Fatalf("batchItems=%d want 4", got)
+	}
+}
+
+func TestRequestBatcherCloseIsIdempotent(t *testing.T) {
+	s := &server{runSlots: make(chan struct{}, 1)}
+	b := newRequestBatcher(s, 2, time.Millisecond)
+	b.close()
+	b.close()
+}
+
+func TestRequestBatcherSubmitAfterCloseReturnsCanceled(t *testing.T) {
+	s := &server{runSlots: make(chan struct{}, 1)}
+	b := newRequestBatcher(s, 2, time.Millisecond)
+	b.close()
+	_, err := b.submit(context.Background(), generateRequest{Tokens: []int{1}, MaxNewTokens: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v want canceled", err)
+	}
+}
+
+func TestRequestBatcherZeroWaitCollectsOnlyAvailableItems(t *testing.T) {
+	b := newStoppedRequestBatcherForTest(nil, 3, 0)
+	b.ch <- batchItem{ctx: context.Background(), done: make(chan batchItemResult, 1)}
+	started := time.Now()
+	batch := b.collect(batchItem{ctx: context.Background(), done: make(chan batchItemResult, 1)})
+	if len(batch) != 2 {
+		t.Fatalf("batch len=%d want 2", len(batch))
+	}
+	if elapsed := time.Since(started); elapsed > 50*time.Millisecond {
+		t.Fatalf("zero-wait collect blocked for %s", elapsed)
+	}
+}
+
+func TestRequestBatcherCloseCancelsPendingBatch(t *testing.T) {
+	inferCalled := make(chan struct{}, 1)
+	s := &server{
+		runSlots: make(chan struct{}, 1),
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			inferCalled <- struct{}{}
+			return model.GenerateResult{}, nil
+		},
+	}
+	b := newRequestBatcher(s, 2, time.Hour)
+	s.batcher = b
+	resCh := make(chan error, 1)
+	go func() {
+		_, err := s.runGenerate(context.Background(), generateRequest{Tokens: []int{1}, MaxNewTokens: 1})
+		resCh <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	b.close()
+	select {
+	case err := <-resCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v want canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending auto-batched request did not return after close")
+	}
+	select {
+	case <-inferCalled:
+		t.Fatal("pending request should not run inference after close")
+	default:
+	}
+}
+
+func TestRequestBatcherCloseWaitsForInFlightProcess(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s := &server{
+		runSlots: make(chan struct{}, 1),
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			entered <- struct{}{}
+			<-release
+			return model.GenerateResult{Tokens: []int{ids[0]}, PromptTokens: len(ids)}, nil
+		},
+	}
+	b := newRequestBatcher(s, 1, 0)
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.submit(context.Background(), generateRequest{Tokens: []int{1}})
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("inference did not start")
+	}
+	closed := make(chan struct{})
+	go func() {
+		b.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("close returned before in-flight process finished")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("submit err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("submit did not finish")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("close did not finish")
+	}
+}
+
+func TestRequestBatcherCloseCancelsBatchWaitingForProcessSlot(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	s := &server{
+		runSlots:    make(chan struct{}, 1),
+		concurrency: 1,
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			entered <- struct{}{}
+			<-release
+			return model.GenerateResult{Tokens: []int{ids[0]}, PromptTokens: len(ids)}, nil
+		},
+	}
+	b := newRequestBatcher(s, 1, 0)
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() {
+		_, err := b.submit(context.Background(), generateRequest{Tokens: []int{1}})
+		first <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first inference did not start")
+	}
+	go func() {
+		_, err := b.submit(context.Background(), generateRequest{Tokens: []int{2}})
+		second <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	closed := make(chan struct{})
+	go func() {
+		b.close()
+		close(closed)
+	}()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("second err=%v want canceled", err)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("second submit was not canceled")
+	}
+	close(release)
+	select {
+	case <-first:
+	case <-time.After(time.Second):
+		t.Fatal("first submit did not finish")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("close did not finish")
+	}
+}
+
+func TestRequestBatcherSubmitReturnsOnContextCancelAfterEnqueue(t *testing.T) {
+	inferCalled := make(chan struct{}, 1)
+	s := &server{
+		runSlots: make(chan struct{}, 1),
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			inferCalled <- struct{}{}
+			return model.GenerateResult{}, nil
+		},
+	}
+	b := newRequestBatcher(s, 2, time.Hour)
+	defer b.close()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := b.submit(ctx, generateRequest{Tokens: []int{1}, MaxNewTokens: 1})
+		errCh <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v want canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("submit did not return after context cancellation")
+	}
+	select {
+	case <-inferCalled:
+		t.Fatal("canceled item should not run inference")
+	default:
+	}
+}
+
+func TestRequestBatcherSkipsCanceledItemBeforeInference(t *testing.T) {
+	inferCalled := make(chan struct{}, 1)
+	s := &server{
+		runSlots: make(chan struct{}, 1),
+		infer: func(ctx context.Context, req generateRequest, ids []int, imageData []byte, opts model.GenerateOptions) (model.GenerateResult, error) {
+			inferCalled <- struct{}{}
+			return model.GenerateResult{}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	b := newStoppedRequestBatcherForTest(s, 1, time.Millisecond)
+	done := make(chan batchItemResult, 1)
+	b.process([]batchItem{{ctx: ctx, req: generateRequest{Tokens: []int{1}, MaxNewTokens: 1}, done: done}})
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("err=%v want canceled", got.err)
+	}
+	if got := s.metrics.batches.Load(); got != 0 {
+		t.Fatalf("batches=%d want 0", got)
+	}
+	if got := s.metrics.batchItems.Load(); got != 0 {
+		t.Fatalf("batchItems=%d want 0", got)
+	}
+	select {
+	case <-inferCalled:
+		t.Fatal("canceled item should not run inference")
+	default:
+	}
+}
+
+func newStoppedRequestBatcherForTest(s *server, maxSize int, wait time.Duration) *requestBatcher {
+	done := make(chan struct{})
+	close(done)
+	return &requestBatcher{
+		s:       s,
+		maxSize: maxSize,
+		wait:    wait,
+		ch:      make(chan batchItem, maxSize*4),
+		stop:    make(chan struct{}),
+		done:    done,
+		procSem: make(chan struct{}, 1),
 	}
 }
 
@@ -366,6 +819,17 @@ func TestRunRejectsMaxInputLimit(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNegativeInputToken(t *testing.T) {
+	s := &server{runSlots: make(chan struct{}, 1)}
+	_, err := s.run(context.Background(), generateRequest{Tokens: []int{1, -2}, MaxNewTokens: 1})
+	if err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("err=%v want negative token error", err)
+	}
+	if got := s.metrics.failed.Load(); got != 1 {
+		t.Fatalf("failed=%d want 1", got)
+	}
+}
+
 func TestRunRejectsBadSamplingOptions(t *testing.T) {
 	s := &server{runSlots: make(chan struct{}, 1)}
 	_, err := s.run(context.Background(), generateRequest{Tokens: []int{1}, MaxNewTokens: 1, Temperature: -1})
@@ -395,26 +859,38 @@ func TestDecodeTokenRangeClampsPromptTokens(t *testing.T) {
 }
 
 func TestValidateServerLimits(t *testing.T) {
-	if err := validateServerLimits(1, 0, 0, 1, 0); err != nil {
+	if err := validateServerLimits(1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0); err != nil {
 		t.Fatalf("valid limits err=%v", err)
 	}
 	cases := []struct {
 		name          string
 		concurrency   int
 		maxBatchSize  int
+		autoBatchSize int
 		maxInputLimit int
 		requestLimit  int64
 		multipartMem  int64
+		timeout       time.Duration
+		readTimeout   time.Duration
+		idleTimeout   time.Duration
+		shutdown      time.Duration
+		autoBatchWait time.Duration
 		want          string
 	}{
-		{"concurrency", 0, 0, 0, 1, 0, "-concurrency"},
-		{"batch", 1, -1, 0, 1, 0, "-max-batch-size"},
-		{"input", 1, 0, -1, 1, 0, "-max-input-tokens"},
-		{"request", 1, 0, 0, 0, 0, "-request-limit"},
-		{"multipart", 1, 0, 0, 1, -1, "-multipart-memory"},
+		{"concurrency", 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, "-concurrency"},
+		{"batch", 1, -1, 0, 0, 1, 0, 0, 0, 0, 0, 0, "-max-batch-size"},
+		{"auto-batch", 1, 0, -1, 0, 1, 0, 0, 0, 0, 0, 0, "-auto-batch-size"},
+		{"input", 1, 0, 0, -1, 1, 0, 0, 0, 0, 0, 0, "-max-input-tokens"},
+		{"request", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "-request-limit"},
+		{"multipart", 1, 0, 0, 0, 1, -1, 0, 0, 0, 0, 0, "-multipart-memory"},
+		{"timeout", 1, 0, 0, 0, 1, 0, -time.Second, 0, 0, 0, 0, "-timeout"},
+		{"read-timeout", 1, 0, 0, 0, 1, 0, 0, -time.Second, 0, 0, 0, "-read-timeout"},
+		{"idle-timeout", 1, 0, 0, 0, 1, 0, 0, 0, -time.Second, 0, 0, "-idle-timeout"},
+		{"shutdown-timeout", 1, 0, 0, 0, 1, 0, 0, 0, 0, -time.Second, 0, "-shutdown-timeout"},
+		{"auto-batch-wait", 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, -time.Second, "-auto-batch-wait"},
 	}
 	for _, tc := range cases {
-		err := validateServerLimits(tc.concurrency, tc.maxBatchSize, tc.maxInputLimit, tc.requestLimit, tc.multipartMem)
+		err := validateServerLimits(tc.concurrency, tc.maxBatchSize, tc.autoBatchSize, tc.maxInputLimit, tc.requestLimit, tc.multipartMem, tc.timeout, tc.readTimeout, tc.idleTimeout, tc.shutdown, tc.autoBatchWait)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Fatalf("%s err=%v want %s", tc.name, err, tc.want)
 		}
@@ -433,6 +909,30 @@ func TestNeedsSamplingSeed(t *testing.T) {
 	}
 	if !needsSamplingSeed(1, 1, 0) {
 		t.Fatal("sampling should need seed")
+	}
+}
+
+func TestAutoBatchSizeForConcurrency(t *testing.T) {
+	if got := autoBatchSizeForConcurrency(2, 1); got != 0 {
+		t.Fatalf("auto batch with single concurrency=%d want 0", got)
+	}
+	if got := autoBatchSizeForConcurrency(1, 4); got != 0 {
+		t.Fatalf("disabled auto batch=%d want 0", got)
+	}
+	if got := autoBatchSizeForConcurrency(4, 2); got != 4 {
+		t.Fatalf("auto batch=%d want 4", got)
+	}
+}
+
+func TestBatchProcessLimit(t *testing.T) {
+	if got := batchProcessLimit(&server{runSlots: make(chan struct{}, 4), concurrency: 4}, 2); got != 2 {
+		t.Fatalf("process limit=%d want 2", got)
+	}
+	if got := batchProcessLimit(&server{runSlots: make(chan struct{}, 3), concurrency: 3}, 2); got != 2 {
+		t.Fatalf("ceil process limit=%d want 2", got)
+	}
+	if got := batchProcessLimit(&server{runSlots: make(chan struct{}, 1), concurrency: 1}, 4); got != 1 {
+		t.Fatalf("minimum process limit=%d want 1", got)
 	}
 }
 
@@ -656,6 +1156,48 @@ func TestLegacyAPIKeyMigrationRollsBackWhenSaveFails(t *testing.T) {
 	}
 }
 
+func TestLoadAdminStateReportsBadJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin.json")
+	if err := os.WriteFile(path, []byte("{bad"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := loadAdminState(path)
+	if st.loadErr == nil {
+		t.Fatal("expected loadErr")
+	}
+}
+
+func TestLoadAdminStateRejectsDuplicateJSONKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin.json")
+	raw := []byte(`{"admin_user":"alice","admin_user":"bob"}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := loadAdminState(path)
+	if st.loadErr == nil || !strings.Contains(st.loadErr.Error(), "duplicate JSON key") {
+		t.Fatalf("loadErr=%v want duplicate JSON key", st.loadErr)
+	}
+}
+
+func TestLoadAdminStateRejectsHugeConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "admin.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(adminConfigFileLimit + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st := loadAdminState(path)
+	if st.loadErr == nil || !strings.Contains(st.loadErr.Error(), "file too large") {
+		t.Fatalf("loadErr=%v want file too large", st.loadErr)
+	}
+}
+
 func TestWriteFileAtomicDoesNotRemoveDirectoryTarget(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "admin.json")
 	if err := os.Mkdir(dir, 0700); err != nil {
@@ -740,6 +1282,7 @@ func TestAdminInitSetsSecureCookieBehindHTTPSProxy(t *testing.T) {
 	s := &server{admin: st, modelDir: modelDir}
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/admin/api/init", strings.NewReader(`{"admin_user":"admin","password":"password123"}`))
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()
 	s.adminInit(rec, req)
@@ -761,6 +1304,7 @@ func TestAdminLoginAndLogoutCookieSecureFollowsRequestScheme(t *testing.T) {
 	st.mu.Unlock()
 	s := &server{admin: st}
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/admin/api/login", strings.NewReader(`{"admin_user":"admin","password":"password123"}`))
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()
 	s.adminLogin(rec, req)
@@ -782,6 +1326,7 @@ func TestAdminLoginAndLogoutCookieSecureFollowsRequestScheme(t *testing.T) {
 		t.Fatalf("http login cookie Secure=true")
 	}
 	req = httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/admin/api/logout", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.AddCookie(&http.Cookie{Name: "paddle_admin_session", Value: c.Value})
 	rec = httptest.NewRecorder()
@@ -889,7 +1434,17 @@ func TestAdminTemplateEscapesKeyNameAttribute(t *testing.T) {
 func testModelDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{}`), 0600); err != nil {
+	configJSON := `{
+		"vocab_size": 2,
+		"hidden_size": 4,
+		"intermediate_size": 8,
+		"num_hidden_layers": 0,
+		"num_attention_heads": 2,
+		"num_key_value_heads": 1,
+		"head_dim": 2,
+		"vision_config": {"num_hidden_layers": 0}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(configJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "model.gguf"), []byte("weights"), 0600); err != nil {
@@ -1332,6 +1887,7 @@ func TestRequireAPIKeyRecordsAudit(t *testing.T) {
 		w.WriteHeader(http.StatusCreated)
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/generate", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("X-Real-IP", "198.51.100.9")
 	rec := httptest.NewRecorder()
@@ -1856,6 +2412,89 @@ func TestAdminKeysRejectLongName(t *testing.T) {
 	}
 }
 
+func TestAdminKeysCreateRejectsTooManyKeys(t *testing.T) {
+	st := loadAdminState(filepath.Join(t.TempDir(), "admin.json"))
+	st.mu.Lock()
+	if err := st.setPasswordLocked("admin", "password123"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxAdminAPIKeys; i++ {
+		st.cfg.APIKeys = append(st.cfg.APIKeys, managedAPIKey{ID: fmt.Sprintf("k%d", i), Name: "key", Salt: "salt", Hash: strings.Repeat("a", 64)})
+	}
+	if err := st.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Unlock()
+	token, err := st.createSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{admin: st}
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/keys", strings.NewReader(`{"name":"extra"}`))
+	req.AddCookie(&http.Cookie{Name: "paddle_admin_session", Value: token})
+	rec := httptest.NewRecorder()
+	s.requireAdmin(s.adminKeysCreate)(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if len(st.cfg.APIKeys) != maxAdminAPIKeys {
+		t.Fatalf("keys len=%d", len(st.cfg.APIKeys))
+	}
+}
+
+func TestAdminConfigRestoreRejectsTooManyAPIKeys(t *testing.T) {
+	cfg := adminConfigFile{
+		AdminUser:    "admin",
+		PasswordSalt: "salt",
+		PasswordHash: strings.Repeat("a", 64),
+		APIKeys:      make([]managedAPIKey, maxAdminAPIKeys+1),
+	}
+	for i := range cfg.APIKeys {
+		cfg.APIKeys[i] = managedAPIKey{
+			ID:   fmt.Sprintf("k%d", i),
+			Name: "key",
+			Salt: "salt",
+			Hash: strings.Repeat("b", 64),
+		}
+	}
+	err := validateAdminConfigBackup(cfg)
+	if err == nil || !strings.Contains(err.Error(), "too many API keys") {
+		t.Fatalf("err=%v want too many API keys", err)
+	}
+}
+
+func TestAdminConfigRestoreRejectsInvalidLegacyAPIKeyMetadata(t *testing.T) {
+	base := adminConfigFile{
+		AdminUser:     "admin",
+		PasswordSalt:  "salt",
+		PasswordHash:  strings.Repeat("a", 64),
+		APIKeySalt:    "legacy_salt",
+		APIKeyHash:    strings.Repeat("b", 64),
+		APIKeyPreview: "lega...cret",
+	}
+	cases := []struct {
+		name string
+		mut  func(*adminConfigFile)
+	}{
+		{name: "missing-salt", mut: func(cfg *adminConfigFile) { cfg.APIKeySalt = "" }},
+		{name: "bad-salt", mut: func(cfg *adminConfigFile) { cfg.APIKeySalt = "bad salt" }},
+		{name: "missing-hash", mut: func(cfg *adminConfigFile) { cfg.APIKeyHash = "" }},
+		{name: "bad-hash", mut: func(cfg *adminConfigFile) { cfg.APIKeyHash = "not-a-sha256" }},
+		{name: "preview-control", mut: func(cfg *adminConfigFile) { cfg.APIKeyPreview = "bad\npreview" }},
+		{name: "preview-too-long", mut: func(cfg *adminConfigFile) { cfg.APIKeyPreview = strings.Repeat("x", 129) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.mut(&cfg)
+			err := validateAdminConfigBackup(cfg)
+			if err == nil || !strings.Contains(err.Error(), "legacy API key metadata") {
+				t.Fatalf("err=%v want legacy API key metadata", err)
+			}
+		})
+	}
+}
+
 func TestAdminKeyMutationsRollbackWhenSaveFails(t *testing.T) {
 	st := loadAdminState(filepath.Join(t.TempDir(), "admin.json"))
 	st.mu.Lock()
@@ -1928,7 +2567,7 @@ func TestAdminKeyMutationsRollbackWhenSaveFails(t *testing.T) {
 
 func TestClientIPPrefersForwardedHeaders(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/generate", nil)
-	req.RemoteAddr = "192.0.2.10:1234"
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
 	if got := clientIP(req); got != "203.0.113.5" {
 		t.Fatalf("clientIP=%q", got)
@@ -1939,17 +2578,22 @@ func TestClientIPPrefersForwardedHeaders(t *testing.T) {
 		t.Fatalf("clientIP=%q", got)
 	}
 	req.Header.Del("X-Real-IP")
-	if got := clientIP(req); got != "192.0.2.10" {
+	if got := clientIP(req); got != "127.0.0.1" {
 		t.Fatalf("clientIP=%q", got)
 	}
 	req.Header.Set("X-Forwarded-For", "not an ip")
 	req.Header.Set("X-Real-IP", "also bad")
-	if got := clientIP(req); got != "192.0.2.10" {
+	if got := clientIP(req); got != "127.0.0.1" {
 		t.Fatalf("invalid forwarded clientIP=%q", got)
 	}
 	req.Header = http.Header{"x-forwarded-for": []string{"198.51.100.8"}}
 	if got := clientIP(req); got != "198.51.100.8" {
 		t.Fatalf("lowercase forwarded clientIP=%q", got)
+	}
+	req.RemoteAddr = "192.0.2.10:1234"
+	req.Header = http.Header{"X-Forwarded-For": []string{"198.51.100.9"}}
+	if got := clientIP(req); got != "192.0.2.10" {
+		t.Fatalf("untrusted forwarded clientIP=%q", got)
 	}
 	req.RemoteAddr = "2001:db8::1"
 	req.Header = http.Header{}
@@ -1960,7 +2604,7 @@ func TestClientIPPrefersForwardedHeaders(t *testing.T) {
 
 func BenchmarkClientIPForwarded(b *testing.B) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/generate", nil)
-	req.RemoteAddr = "192.0.2.10:1234"
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -2068,6 +2712,7 @@ func TestOpenAPIJSONNormalizesInvalidHost(t *testing.T) {
 	s := &server{}
 	req := httptest.NewRequest(http.MethodGet, "/doc/openapi.json", nil)
 	req.Host = `host"with\chars`
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()
 	s.openapiJSON(rec, req)
@@ -2087,9 +2732,27 @@ func TestOpenAPIJSONNormalizesInvalidHost(t *testing.T) {
 	}
 }
 
+func TestOpenAPIResponseBufferDropsOversized(t *testing.T) {
+	baseCap := len(openAPIJSONParts[0]) + len(openAPIBasePlaceholder) + len(openAPIJSONParts[1]) + maxOpenAPIResponseBufferExtra
+	buf := make([]byte, 0, baseCap+1)
+	p := &buf
+	putOpenAPIResponseBuffer(p, buf)
+	if cap(*p) != baseCap+1 {
+		t.Fatalf("oversized buffer was retained cap=%d", cap(*p))
+	}
+	buf = make([]byte, 0, baseCap)
+	buf = append(buf, 'x')
+	p = &buf
+	putOpenAPIResponseBuffer(p, buf)
+	if len(*p) != 0 || cap(*p) != baseCap {
+		t.Fatalf("bounded buffer not reset len=%d cap=%d", len(*p), cap(*p))
+	}
+}
+
 func TestAdminBaseURLAllowsValidHostPort(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/doc/openapi.json", nil)
 	req.Host = "[::1]:8080"
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	if got := adminBaseURL(req); got != "https://[::1]:8080" {
 		t.Fatalf("adminBaseURL=%q", got)
@@ -2123,6 +2786,7 @@ func TestRequestSchemeRejectsInvalidForwardedProto(t *testing.T) {
 	}
 	req = httptest.NewRequest(http.MethodGet, "/doc/llms.txt", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", "https, http")
 	rec = httptest.NewRecorder()
 	s.llmsTXT(rec, req)
@@ -2130,9 +2794,15 @@ func TestRequestSchemeRejectsInvalidForwardedProto(t *testing.T) {
 		t.Fatalf("llms.txt=%s", rec.Body.String())
 	}
 	req = httptest.NewRequest(http.MethodGet, "/doc/openapi.json", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header = http.Header{"x-forwarded-proto": []string{"https"}}
 	if got := requestScheme(req); got != "https" {
 		t.Fatalf("lowercase forwarded proto scheme=%q", got)
+	}
+	req.RemoteAddr = "192.0.2.10:1234"
+	req.Header = http.Header{"X-Forwarded-Proto": []string{"https"}}
+	if got := requestScheme(req); got != "http" {
+		t.Fatalf("untrusted forwarded proto scheme=%q", got)
 	}
 }
 
@@ -2149,6 +2819,7 @@ func BenchmarkAdminBaseURLHost(b *testing.B) {
 
 func BenchmarkRequestSchemeForwarded(b *testing.B) {
 	req := httptest.NewRequest(http.MethodGet, "/doc/openapi.json", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("X-Forwarded-Proto", " HTTPS , http")
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -2162,6 +2833,15 @@ func BenchmarkValidRequestHostName(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		if !validRequestHost("paddleocrvl.local:8080") {
+			b.Fatal("invalid")
+		}
+	}
+}
+
+func BenchmarkValidRequestHostIPv4(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if !validRequestHost("127.0.0.1:8080") {
 			b.Fatal("invalid")
 		}
 	}
@@ -2202,6 +2882,23 @@ func TestLLMSTXTIncludesAgentIntegrationSummary(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("llms.txt missing %q in:\n%s", want, body)
 		}
+	}
+}
+
+func TestLLMSTXTBufferDropsOversized(t *testing.T) {
+	baseCap := llmsTXTBaseCap() + maxLLMSTXTBufferExtra
+	buf := make([]byte, 0, baseCap+1)
+	p := &buf
+	putLLMSTXTBuffer(p, buf)
+	if cap(*p) != baseCap+1 {
+		t.Fatalf("oversized buffer was retained cap=%d", cap(*p))
+	}
+	buf = make([]byte, 0, baseCap)
+	buf = append(buf, 'x')
+	p = &buf
+	putLLMSTXTBuffer(p, buf)
+	if len(*p) != 0 || cap(*p) != baseCap {
+		t.Fatalf("bounded buffer not reset len=%d cap=%d", len(*p), cap(*p))
 	}
 }
 
