@@ -218,33 +218,77 @@ func MatRowsBiasAddRows(out [][]float32, xs [][]float32, w, bias []float32, add 
 		MatRowsBias(out, xs, w, bias, rows, cols)
 		return
 	}
-	if len(add) != len(xs) {
+	if cols != 16 && cols != 588 {
 		MatRowsBias(out, xs, w, bias, rows, cols)
-		for i := range xs {
-			AddInPlace(out[i], add[i%len(add)])
+		if len(add) == len(xs) {
+			for i := range xs {
+				AddInPlace(out[i], add[i])
+			}
+			return
 		}
-		return
-	}
-	if cols != 588 {
-		MatRowsBias(out, xs, w, bias, rows, cols)
+		addIdx := 0
 		for i := range xs {
-			AddInPlace(out[i], add[i])
+			AddInPlace(out[i], add[addIdx])
+			addIdx++
+			if addIdx == len(add) {
+				addIdx = 0
+			}
 		}
 		return
 	}
 	work := len(xs) * rows * cols
 	if !shouldParallel(work, len(xs)) || len(xs) == 1 {
-		for i := range xs {
+		if cols == 16 {
+			matRowsBiasAddRowsSerial16(out, xs, w, bias, add, rows, 0, len(xs))
+			return
+		}
+		matRowsBiasAddRowsSerial588(out, xs, w, bias, add, rows, 0, len(xs))
+		return
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if cols == 16 {
+		parallelForMax(len(xs), min(workers, 8), func(start, end int) {
+			matRowsBiasAddRowsSerial16(out, xs, w, bias, add, rows, start, end)
+		})
+		return
+	}
+	parallelForMax(len(xs), workers, func(start, end int) {
+		matRowsBiasAddRowsSerial588(out, xs, w, bias, add, rows, start, end)
+	})
+}
+
+func matRowsBiasAddRowsSerial16(out [][]float32, xs [][]float32, w, bias []float32, add [][]float32, rows, start, end int) {
+	if len(add) == len(xs) {
+		for i := start; i < end; i++ {
+			matVecBiasAddSerial16(out[i], xs[i], w, bias, add[i], rows)
+		}
+		return
+	}
+	addIdx := start % len(add)
+	for i := start; i < end; i++ {
+		matVecBiasAddSerial16(out[i], xs[i], w, bias, add[addIdx], rows)
+		addIdx++
+		if addIdx == len(add) {
+			addIdx = 0
+		}
+	}
+}
+
+func matRowsBiasAddRowsSerial588(out [][]float32, xs [][]float32, w, bias []float32, add [][]float32, rows, start, end int) {
+	if len(add) == len(xs) {
+		for i := start; i < end; i++ {
 			matVecBiasAddSerial588(out[i], xs[i], w, bias, add[i], rows)
 		}
 		return
 	}
-	workers := runtime.GOMAXPROCS(0)
-	parallelForMax(len(xs), workers, func(start, end int) {
-		for i := start; i < end; i++ {
-			matVecBiasAddSerial588(out[i], xs[i], w, bias, add[i], rows)
+	addIdx := start % len(add)
+	for i := start; i < end; i++ {
+		matVecBiasAddSerial588(out[i], xs[i], w, bias, add[addIdx], rows)
+		addIdx++
+		if addIdx == len(add) {
+			addIdx = 0
 		}
-	})
+	}
 }
 
 func MatRowsBias3(outA, outB, outC, xs [][]float32, wa, ba, wb, bb, wc, bc []float32, rowsA, rowsB, rowsC, cols int) {
@@ -384,6 +428,13 @@ func matVecBiasSerial16(out, x, w, bias []float32, rows int) {
 	for r := 0; r < rows; r++ {
 		base := r * 16
 		out[r] = dotF32_16(w[base:base+16], x) + bias[r]
+	}
+}
+
+func matVecBiasAddSerial16(out, x, w, bias, add []float32, rows int) {
+	for r := 0; r < rows; r++ {
+		base := r * 16
+		out[r] = dotF32_16(w[base:base+16], x) + bias[r] + add[r]
 	}
 }
 

@@ -146,8 +146,124 @@ func BenchmarkMatRowsBiasAddRowsPatch14Fused(b *testing.B) {
 	}
 }
 
+func BenchmarkMatRowsBiasAddRowsCols16Separate(b *testing.B) {
+	batch, rows, cols := 196, 1024, 16
+	xs := makeRowsBench(batch, cols)
+	out := makeRowsBench(batch, rows)
+	add := makeRowsBench(batch, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillBench(w)
+	fillBench(bias)
+	for i := range xs {
+		fillBench(xs[i])
+		fillBench(add[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+		for j := range out {
+			AddInPlace(out[j], add[j])
+		}
+	}
+}
+
+func BenchmarkMatRowsBiasAddRowsCols16Fused(b *testing.B) {
+	batch, rows, cols := 196, 1024, 16
+	xs := makeRowsBench(batch, cols)
+	out := makeRowsBench(batch, rows)
+	add := makeRowsBench(batch, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillBench(w)
+	fillBench(bias)
+	for i := range xs {
+		fillBench(xs[i])
+		fillBench(add[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	}
+}
+
+func BenchmarkMatRowsBiasAddRowsCols16RepeatedSeparate(b *testing.B) {
+	batch, rows, cols := 392, 1024, 16
+	xs := makeRowsBench(batch, cols)
+	out := makeRowsBench(batch, rows)
+	add := makeRowsBench(196, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillBench(w)
+	fillBench(bias)
+	for i := range xs {
+		fillBench(xs[i])
+	}
+	for i := range add {
+		fillBench(add[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+		for j := range out {
+			AddInPlace(out[j], add[j%len(add)])
+		}
+	}
+}
+
+func BenchmarkMatRowsBiasAddRowsCols16RepeatedFused(b *testing.B) {
+	batch, rows, cols := 392, 1024, 16
+	xs := makeRowsBench(batch, cols)
+	out := makeRowsBench(batch, rows)
+	add := makeRowsBench(196, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillBench(w)
+	fillBench(bias)
+	for i := range xs {
+		fillBench(xs[i])
+	}
+	for i := range add {
+		fillBench(add[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	}
+}
+
 func BenchmarkMatVecBiasMedium(b *testing.B) {
 	rows, cols := 512, 256
+	w := make([]float32, rows*cols)
+	x := make([]float32, cols)
+	bias := make([]float32, rows)
+	out := make([]float32, rows)
+	fillBench(w)
+	fillBench(x)
+	fillBench(bias)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVecBias(out, x, w, bias, rows, cols)
+	}
+}
+
+func BenchmarkMatVecBiasVisionMLPUp(b *testing.B) {
+	rows, cols := 4096, 1024
+	w := make([]float32, rows*cols)
+	x := make([]float32, cols)
+	bias := make([]float32, rows)
+	out := make([]float32, rows)
+	fillBench(w)
+	fillBench(x)
+	fillBench(bias)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVecBias(out, x, w, bias, rows, cols)
+	}
+}
+
+func BenchmarkMatVecBiasVisionMLPDown(b *testing.B) {
+	rows, cols := 1024, 4096
 	w := make([]float32, rows*cols)
 	x := make([]float32, cols)
 	bias := make([]float32, rows)
@@ -200,6 +316,40 @@ func BenchmarkMatRowsBiasSingleBatchMedium(b *testing.B) {
 	fillBench(w)
 	fillBench(bias)
 	fillBench(xs[0])
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+	}
+}
+
+func BenchmarkMatRowsBiasVisionMLPUp196x1024(b *testing.B) {
+	batch, rows, cols := 196, 4096, 1024
+	xs := makeRowsBench(batch, cols)
+	out := makeRowsBench(batch, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillBench(w)
+	fillBench(bias)
+	for i := range xs {
+		fillBench(xs[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatRowsBias(out, xs, w, bias, rows, cols)
+	}
+}
+
+func BenchmarkMatRowsBiasVisionMLPDown196x4096(b *testing.B) {
+	batch, rows, cols := 196, 1024, 4096
+	xs := makeRowsBench(batch, cols)
+	out := makeRowsBench(batch, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillBench(w)
+	fillBench(bias)
+	for i := range xs {
+		fillBench(xs[i])
+	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		MatRowsBias(out, xs, w, bias, rows, cols)

@@ -3,5 +3,5 @@
 package backend
 
 func cpuFeatures() []string {
-	return []string{"scalar-go"}
+	return []string{"scalar-go", "unrolled"}
 }

@@ -50,18 +50,33 @@ func benchmarkProjectImageShape(b *testing.B, vd, td int, grid vision.Grid) {
 }
 
 func BenchmarkVisionEmbeddings(b *testing.B) {
-	vd, patch := 1024, 16
-	grid := vision.Grid{T: 1, H: 14, W: 14}
-	rt := &Runtime{cfg: &config.Config{VisionConfig: config.Vision{HiddenSize: vd}}}
-	rt.vision.patchW = make([]float32, vd*patch)
-	rt.vision.patchB = make([]float32, vd)
-	rt.vision.pos = make([]float32, 27*27*vd)
-	fillBenchFloat32(rt.vision.patchW)
-	fillBenchFloat32(rt.vision.pos)
-	pp := &vision.Preprocessed{Grid: grid, Patches: makeRows(grid.T*grid.H*grid.W, patch)}
-	for i := range pp.Patches {
-		fillBenchFloat32(pp.Patches[i])
+	rt, pp := newVisionEmbeddingsBenchCase(1024, 16, vision.Grid{T: 1, H: 14, W: 14})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rt.visionEmbeddings(pp)
 	}
+}
+
+func BenchmarkVisionEmbeddingsInto(b *testing.B) {
+	rt, pp := newVisionEmbeddingsBenchCase(1024, 16, vision.Grid{T: 1, H: 14, W: 14})
+	out := makeRows(len(pp.Patches), rt.cfg.VisionConfig.HiddenSize)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rt.visionEmbeddingsInto(out, pp)
+	}
+}
+
+func BenchmarkVisionEmbeddingsIntoRepeatedPos(b *testing.B) {
+	rt, pp := newVisionEmbeddingsBenchCase(1024, 16, vision.Grid{T: 2, H: 14, W: 14})
+	out := makeRows(len(pp.Patches), rt.cfg.VisionConfig.HiddenSize)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rt.visionEmbeddingsInto(out, pp)
+	}
+}
+
+func BenchmarkVisionEmbeddingsRepeatedPos(b *testing.B) {
+	rt, pp := newVisionEmbeddingsBenchCase(1024, 16, vision.Grid{T: 2, H: 14, W: 14})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = rt.visionEmbeddings(pp)
@@ -69,8 +84,23 @@ func BenchmarkVisionEmbeddings(b *testing.B) {
 }
 
 func BenchmarkVisionEmbeddingsPatch14(b *testing.B) {
-	vd, patch := 1024, 14*14*3
-	grid := vision.Grid{T: 1, H: 14, W: 14}
+	rt, pp := newVisionEmbeddingsBenchCase(1024, 14*14*3, vision.Grid{T: 1, H: 14, W: 14})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rt.visionEmbeddings(pp)
+	}
+}
+
+func BenchmarkVisionEmbeddingsIntoPatch14(b *testing.B) {
+	rt, pp := newVisionEmbeddingsBenchCase(1024, 14*14*3, vision.Grid{T: 1, H: 14, W: 14})
+	out := makeRows(len(pp.Patches), rt.cfg.VisionConfig.HiddenSize)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rt.visionEmbeddingsInto(out, pp)
+	}
+}
+
+func newVisionEmbeddingsBenchCase(vd, patch int, grid vision.Grid) (*Runtime, *vision.Preprocessed) {
 	rt := &Runtime{cfg: &config.Config{VisionConfig: config.Vision{HiddenSize: vd}}}
 	rt.vision.patchW = make([]float32, vd*patch)
 	rt.vision.patchB = make([]float32, vd)
@@ -81,10 +111,7 @@ func BenchmarkVisionEmbeddingsPatch14(b *testing.B) {
 	for i := range pp.Patches {
 		fillBenchFloat32(pp.Patches[i])
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = rt.visionEmbeddings(pp)
-	}
+	return rt, pp
 }
 
 func BenchmarkEncodePreprocessedImageNoLayers(b *testing.B) {

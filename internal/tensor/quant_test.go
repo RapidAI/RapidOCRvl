@@ -1123,6 +1123,32 @@ func TestMatRowsBiasAddRowsEmptyAddMatchesMatRowsBias(t *testing.T) {
 	}
 }
 
+func TestMatRowsBiasAddRowsRepeatsAddRows(t *testing.T) {
+	rows, cols, batch := 5, 7, 6
+	xs := makeRowsForTest(batch, cols)
+	out := makeRowsForTest(batch, rows)
+	want := makeRowsForTest(batch, rows)
+	add := makeRowsForTest(2, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillTestValues(w)
+	fillTestValues(bias)
+	for i := range xs {
+		fillTestValues(xs[i])
+	}
+	for i := range add {
+		fillTestValues(add[i])
+	}
+	MatRowsBias(want, xs, w, bias, rows, cols)
+	for i := range want {
+		AddInPlace(want[i], add[i%len(add)])
+	}
+	MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	for i := range out {
+		assertCloseVec(t, "row", out[i], want[i], 1e-6)
+	}
+}
+
 func TestMatRowsBiasAddRowsCols588MatchesSeparate(t *testing.T) {
 	rows, cols, batch := 3, 588, 2
 	xs := makeRowsForTest(batch, cols)
@@ -1184,6 +1210,58 @@ func TestMatRowsBiasAddRowsCols16MatchesSeparate(t *testing.T) {
 	MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
 	for i := range out {
 		assertCloseVec(t, "row", out[i], want[i], 1e-5)
+	}
+}
+
+func TestMatRowsBiasAddRowsCols16RepeatsAddRows(t *testing.T) {
+	rows, cols, batch := 5, 16, 6
+	xs := makeRowsForTest(batch, cols)
+	out := makeRowsForTest(batch, rows)
+	want := makeRowsForTest(batch, rows)
+	add := makeRowsForTest(2, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillTestValues(w)
+	fillTestValues(bias)
+	for i := range xs {
+		fillTestValues(xs[i])
+	}
+	for i := range add {
+		fillTestValues(add[i])
+	}
+	MatRowsBias(want, xs, w, bias, rows, cols)
+	for i := range want {
+		AddInPlace(want[i], add[i%len(add)])
+	}
+	MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	for i := range out {
+		assertCloseVec(t, "row", out[i], want[i], 1e-5)
+	}
+}
+
+func TestMatRowsBiasAddRowsCols588RepeatsAddRows(t *testing.T) {
+	rows, cols, batch := 5, 588, 6
+	xs := makeRowsForTest(batch, cols)
+	out := makeRowsForTest(batch, rows)
+	want := makeRowsForTest(batch, rows)
+	add := makeRowsForTest(2, rows)
+	w := make([]float32, rows*cols)
+	bias := make([]float32, rows)
+	fillTestValues(w)
+	fillTestValues(bias)
+	for i := range xs {
+		fillTestValues(xs[i])
+	}
+	for i := range add {
+		fillTestValues(add[i])
+	}
+	MatRowsBias(want, xs, w, bias, rows, cols)
+	for i := range want {
+		AddInPlace(want[i], add[i%len(add)])
+	}
+	MatRowsBiasAddRows(out, xs, w, bias, add, rows, cols)
+	for i := range out {
+		assertCloseVec(t, "row", out[i], want[i], 1e-4)
 	}
 }
 

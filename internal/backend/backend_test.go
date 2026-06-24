@@ -39,6 +39,18 @@ func TestCPUInfoIncludesSchedulerShape(t *testing.T) {
 	if len(cpu.Features) == 0 {
 		t.Fatalf("cpu=%+v", cpu)
 	}
+	if !hasCPUFeature(cpu.Features, "scalar-go") || !hasCPUFeature(cpu.Features, "unrolled") {
+		t.Fatalf("cpu features missing tensor implementation tags: %+v", cpu.Features)
+	}
+}
+
+func hasCPUFeature(features []string, want string) bool {
+	for _, f := range features {
+		if f == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMemoryInfo(t *testing.T) {

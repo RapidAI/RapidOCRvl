@@ -1181,9 +1181,7 @@ func (rt *Runtime) putProjectScratch(buf []float32, p *[]float32) {
 }
 
 func (rt *Runtime) layerNormRows(x [][]float32, w, b []float32, eps float32) {
-	for i := range x {
-		tensor.LayerNorm(x[i], x[i], w, b, eps)
-	}
+	tensor.LayerNormRows(x, x, w, b, eps)
 }
 
 func makeRows(rows, cols int) [][]float32 {

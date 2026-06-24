@@ -900,6 +900,48 @@ func BenchmarkWeightedValueSumDim64(b *testing.B) {
 	}
 }
 
+func BenchmarkWeightedValueSumLen196(b *testing.B) {
+	rows, heads, dim := 196, 8, 128
+	width := heads * dim
+	xs := make([][]float32, rows)
+	for r := range xs {
+		xs[r] = make([]float32, width)
+		for i := range xs[r] {
+			xs[r][i] = float32((r+i)%17-8) / 17
+		}
+	}
+	weights := make([]float32, rows)
+	for i := range weights {
+		weights[i] = float32((i%13)+1) / 91
+	}
+	dst := make([]float32, dim)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		weightedValueSum(dst, xs, 3*dim, dim, weights)
+	}
+}
+
+func BenchmarkWeightedValueSumDim64Len196(b *testing.B) {
+	rows, heads, dim := 196, 8, 64
+	width := heads * dim
+	xs := make([][]float32, rows)
+	for r := range xs {
+		xs[r] = make([]float32, width)
+		for i := range xs[r] {
+			xs[r][i] = float32((r+i)%17-8) / 17
+		}
+	}
+	weights := make([]float32, rows)
+	for i := range weights {
+		weights[i] = float32((i%13)+1) / 91
+	}
+	dst := make([]float32, dim)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		weightedValueSum(dst, xs, 3*dim, dim, weights)
+	}
+}
+
 func BenchmarkWeightedValueSumDim64Len2(b *testing.B) {
 	rows, heads, dim := 2, 8, 64
 	width := heads * dim
