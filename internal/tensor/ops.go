@@ -835,19 +835,27 @@ func AddRMSNorm(out, dst, add, weight []float32, eps float32) {
 func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 	n := len(dst)
 	var sum float32
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 8 {
+		sum = addInPlaceSumFMA(dst, add)
+	} else if useDotF32AVX && n >= 8 {
 		sum = addInPlaceSumAVX(dst, add)
 	} else {
 		sum = addInPlaceSumScalar(dst, add)
 	}
 	mean := sum / float32(n)
 	var variance float32
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 8 {
+		variance = sumSquaresCenteredFMA(dst, mean)
+	} else if useDotF32AVX && n >= 8 {
 		variance = sumSquaresCenteredAVX(dst, mean)
 	} else {
 		variance = sumSquaresCenteredScalar(dst, mean)
 	}
 	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
+	if useDotFMA && n >= 8 {
+		affineNormFMA(out, dst, weight, bias, mean, scale)
+		return
+	}
 	if useDotF32AVX && n >= 8 {
 		affineNormAVX(out, dst, weight, bias, mean, scale)
 		return
@@ -946,19 +954,27 @@ func sumSquaresScalar(x []float32) float32 {
 func LayerNorm(out, x, weight, bias []float32, eps float32) {
 	n := len(x)
 	var sum float32
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 8 {
+		sum = sumF32FMA(x)
+	} else if useDotF32AVX && n >= 8 {
 		sum = sumF32AVX(x)
 	} else {
 		sum = sumF32Scalar(x)
 	}
 	mean := sum / float32(n)
 	var variance float32
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 8 {
+		variance = sumSquaresCenteredFMA(x, mean)
+	} else if useDotF32AVX && n >= 8 {
 		variance = sumSquaresCenteredAVX(x, mean)
 	} else {
 		variance = sumSquaresCenteredScalar(x, mean)
 	}
 	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
+	if useDotFMA && n >= 8 {
+		affineNormFMA(out, x, weight, bias, mean, scale)
+		return
+	}
 	if useDotF32AVX && n >= 8 {
 		affineNormAVX(out, x, weight, bias, mean, scale)
 		return
@@ -1424,3 +1440,4 @@ func addInPlaceSumScalar(dst, add []float32) float32 {
 	}
 	return sum
 }
+
