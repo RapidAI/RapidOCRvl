@@ -5770,3 +5770,60 @@ maxAbsV2Done:
 	VZEROUPPER
 	MOVSS X0, ret+24(FP)
 	RET
+// sumSquaresF32FMA: FMA version of sumSquaresF32AVX.
+// Y1 loaded from memory (no dep on accumulator), so FMA is safe.
+TEXT ·sumSquaresF32FMA(SB), NOSPLIT, $32-32
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	VXORPS Y0, Y0, Y0
+	VXORPS Y2, Y2, Y2
+	VXORPS Y4, Y4, Y4
+	VXORPS Y6, Y6, Y6
+	CMPQ CX, $8
+	JB sumSqFmaTail
+sumSqFmaLoop32:
+	CMPQ CX, $32
+	JB sumSqFmaLoop
+	VMOVUPS (SI), Y1
+	VFMADD231PS Y1, Y1, Y0
+	VMOVUPS 32(SI), Y3
+	VFMADD231PS Y3, Y3, Y2
+	VMOVUPS 64(SI), Y1
+	VFMADD231PS Y1, Y1, Y4
+	VMOVUPS 96(SI), Y3
+	VFMADD231PS Y3, Y3, Y6
+	ADDQ $128, SI
+	SUBQ $32, CX
+	JMP sumSqFmaLoop32
+sumSqFmaLoop:
+	CMPQ CX, $8
+	JB sumSqFmaReduce
+	VMOVUPS (SI), Y1
+	VFMADD231PS Y1, Y1, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP sumSqFmaLoop
+sumSqFmaReduce:
+	VADDPS Y2, Y0, Y0
+	VADDPS Y4, Y0, Y0
+	VADDPS Y6, Y0, Y0
+	VEXTRACTF128 $1, Y0, X2
+	VADDPS X2, X0, X0
+	VHADDPS X0, X0, X0
+	VHADDPS X0, X0, X0
+	VZEROUPPER
+	JMP sumSqFmaTailScalar
+sumSqFmaTail:
+	VXORPS X0, X0, X0
+sumSqFmaTailScalar:
+	CMPQ CX, $0
+	JE sumSqFmaDone
+	MOVSS (SI), X1
+	MULSS X1, X1
+	ADDSS X1, X0
+	ADDQ $4, SI
+	DECQ CX
+	JMP sumSqFmaTailScalar
+sumSqFmaDone:
+	MOVSS X0, ret+24(FP)
+	RET
