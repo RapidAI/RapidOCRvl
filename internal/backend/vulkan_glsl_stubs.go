@@ -12,7 +12,7 @@ var (
 	vulkanFusedQKVMRoPEF32GLSL              = vulkanFusedQKVMRoPEF32GLSLImpl
 	vulkanFusedQKVMRoPEQ4GLSL               = ""
 	vulkanFusedQKVMRoPEQ6GLSL               = ""
-	vulkanFusedQKVMRoPEQ8GLSL               = ""
+	vulkanFusedQKVMRoPEQ8GLSL               = vulkanFusedQKVMRoPEQ8GLSLImpl
 	vulkanMRoPEF32GLSL                      = ""
 	vulkanMRoPEPairF32GLSL                  = ""
 	vulkanTextAttentionOutAddRMSNormF32GLSL = ""
@@ -70,6 +70,93 @@ float dotRowC(uint row) {
   scratch[lid] = s; barrier();
   for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
   return scratch[0];
+}
+void main() {
+  uint g = gl_WorkGroupID.x;
+  uint lid = gl_LocalInvocationID.x;
+  uint hd = pc.packed & 0xFFFFu;
+  uint hdimHalf = hd / 2u;
+  uint qGroups = pc.rowsA / 2u;
+  uint kGroups = pc.rowsB / 2u;
+  if (g < qGroups) {
+    uint h = g / hdimHalf;
+    uint d = g - h * hdimHalf;
+    uint r1 = h * hd + d;
+    uint r2 = r1 + hdimHalf;
+    float v1 = dotRowA(r1);
+    float v2 = dotRowA(r2);
+    float c = cosT[d];
+    float s = sinT[d];
+    if (lid == 0) { outA[r1] = v1 * c - v2 * s; outA[r2] = v1 * s + v2 * c; }
+  } else if (g < qGroups + kGroups) {
+    uint g2 = g - qGroups;
+    uint h = g2 / hdimHalf;
+    uint d = g2 - h * hdimHalf;
+    uint r1 = h * hd + d;
+    uint r2 = r1 + hdimHalf;
+    float v1 = dotRowB(r1);
+    float v2 = dotRowB(r2);
+    float c = cosT[d];
+    float s = sinT[d];
+    if (lid == 0) { outB[r1] = v1 * c - v2 * s; outB[r2] = v1 * s + v2 * c; }
+  } else {
+    uint r = g - qGroups - kGroups;
+    float v = dotRowC(r);
+    if (lid == 0) outC[r] = v;
+  }
+}`
+
+const vulkanFusedQKVMRoPEQ8GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rowsA; uint rowsB; uint rowsC; uint cols; uint packed; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DA { uint da[]; };
+layout(set=0,binding=2) readonly buffer DB { uint db[]; };
+layout(set=0,binding=3) readonly buffer DC { uint dc[]; };
+layout(set=0,binding=4) readonly buffer SA { float sa[]; };
+layout(set=0,binding=5) readonly buffer SB { float sb[]; };
+layout(set=0,binding=6) readonly buffer SC { float sc[]; };
+layout(set=0,binding=7) readonly buffer Cos { float cosT[]; };
+layout(set=0,binding=8) readonly buffer Sin { float sinT[]; };
+layout(set=0,binding=9) buffer OA { float outA[]; };
+layout(set=0,binding=10) buffer OB { float outB[]; };
+layout(set=0,binding=11) buffer OC { float outC[]; };
+shared float scratch[256];
+float dotRowA(uint row) {
+  uint lid = gl_LocalInvocationID.x; float s = 0.0;
+  uint base = row * pc.cols;
+  for (uint c = lid; c < pc.cols; c += 256) {
+    uint w = da[(base + c) >> 2];
+    int v = int(bitfieldExtract(w, int(((base + c) & 3u) * 8u), 8));
+    s += float(v) * x[c];
+  }
+  scratch[lid] = s; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
+  return scratch[0] * sa[row];
+}
+float dotRowB(uint row) {
+  uint lid = gl_LocalInvocationID.x; float s = 0.0;
+  uint base = row * pc.cols;
+  for (uint c = lid; c < pc.cols; c += 256) {
+    uint w = db[(base + c) >> 2];
+    int v = int(bitfieldExtract(w, int(((base + c) & 3u) * 8u), 8));
+    s += float(v) * x[c];
+  }
+  scratch[lid] = s; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
+  return scratch[0] * sb[row];
+}
+float dotRowC(uint row) {
+  uint lid = gl_LocalInvocationID.x; float s = 0.0;
+  uint base = row * pc.cols;
+  for (uint c = lid; c < pc.cols; c += 256) {
+    uint w = dc[(base + c) >> 2];
+    int v = int(bitfieldExtract(w, int(((base + c) & 3u) * 8u), 8));
+    s += float(v) * x[c];
+  }
+  scratch[lid] = s; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
+  return scratch[0] * sc[row];
 }
 void main() {
   uint g = gl_WorkGroupID.x;
