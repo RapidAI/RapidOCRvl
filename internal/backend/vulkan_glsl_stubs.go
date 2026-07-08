@@ -4,7 +4,7 @@ package backend
 // dispatch is enabled; empty strings cause compileVulkanGLSL to fail
 // gracefully at runtime rather than blocking compilation.
 var (
-	vulkanArgmaxF32GLSL                     = ""
+	vulkanArgmaxF32GLSL                     = vulkanArgmaxF32GLSLImpl
 	vulkanArgmaxQuantizedF32GLSL            = ""
 	vulkanBlockTopKF32GLSL                  = ""
 	vulkanBlockTopKQuantizedF32GLSL         = ""
@@ -467,5 +467,37 @@ void main() {
       k[i1] = a * c - b * sn;
       k[i2] = b * c + a * sn;
     }
+  }
+}`
+const vulkanArgmaxF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=2) readonly buffer O { float outv[]; };
+layout(set=0,binding=3) buffer R { float result[]; };
+shared float sval[256];
+shared uint sidx[256];
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint rows = pc.rows;
+  float bestVal = -1.0/0.0;
+  uint bestIdx = 0u;
+  for (uint i = lid; i < rows; i += 256) {
+    float v = outv[i];
+    if (v > bestVal) { bestVal = v; bestIdx = i; }
+  }
+  sval[lid] = bestVal;
+  sidx[lid] = bestIdx;
+  barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) {
+    if (lid < stride) {
+      float v0 = sval[lid];
+      float v1 = sval[lid + stride];
+      if (v1 > v0) { sval[lid] = v1; sidx[lid] = sidx[lid + stride]; }
+    }
+    barrier();
+  }
+  if (lid == 0) {
+    result[0] = sval[0];
+    result[1] = float(sidx[0]);
   }
 }`
