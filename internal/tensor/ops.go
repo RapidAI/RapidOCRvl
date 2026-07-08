@@ -551,6 +551,9 @@ func dotF32Scalar(a, b []float32) float32 {
 }
 
 func dotF32_16(a, b []float32) float32 {
+	if useDotFMA {
+		return dotF32FMA(a, b)
+	}
 	if useDotF32AVX {
 		return dotF32AVX(a, b)
 	}
@@ -566,6 +569,9 @@ func dotF32_16(a, b []float32) float32 {
 }
 
 func dotF32_256(a, b []float32) float32 {
+	if useDotFMA {
+		return dotF32FMA(a, b)
+	}
 	if useDotF32AVX {
 		return dotF32AVX(a, b)
 	}
@@ -584,6 +590,9 @@ func dotF32_256(a, b []float32) float32 {
 }
 
 func dotF32_588(a, b []float32) float32 {
+	if useDotFMA {
+		return dotF32FMA(a, b)
+	}
 	if useDotF32AVX {
 		return dotF32AVX(a, b)
 	}
