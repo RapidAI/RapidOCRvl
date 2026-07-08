@@ -359,3 +359,12 @@ func maxF32AVX2(x []float32) float32 { return maxF32AVX(x) }
 func sumSquaresF32FMA(x []float32) float32 { return sumSquaresF32AVX(x) }
 
 func maxAbsFloat32AVX2(x []float32) float32 { return maxAbsFloat32AVX(x) }
+
+
+func mulScaleFMA(out, x, weight []float32, scale float32) { mulScaleAVX(out, x, weight, scale) }
+func affineNormFMA(out, x, weight, bias []float32, mean, scale float32) {
+	affineNormAVX(out, x, weight, bias, mean, scale)
+}
+func sumSquaresCenteredFMA(x []float32, mean float32) float32 { return sumSquaresCenteredAVX(x, mean) }
+func addInPlaceSumFMA(dst, x []float32) float32 { return addInPlaceSumAVX(dst, x) }
+func sumF32FMA(x []float32) float32 { return sumF32AVX(x) }

@@ -81,4 +81,10 @@ func maxF32AVX2(x []float32) float32
 
 func sumSquaresF32FMA(x []float32) float32
 
+func mulScaleFMA(out, x, weight []float32, scale float32)
+func affineNormFMA(out, x, weight, bias []float32, mean, scale float32)
+func sumSquaresCenteredFMA(x []float32, mean float32) float32
+func addInPlaceSumFMA(dst, x []float32) float32
+func sumF32FMA(x []float32) float32
+
 func maxAbsFloat32AVX2(x []float32) float32

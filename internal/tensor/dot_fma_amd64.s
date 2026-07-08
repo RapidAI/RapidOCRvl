@@ -1308,3 +1308,370 @@ f32qfmaDone:
 	MOVSS X4, ret2+128(FP)
 	MOVSS X6, ret3+132(FP)
 	RET
+
+// mulScaleFMA: out[i] = x[i] * scale * weight[i] using FMA.
+// VFMADD231PS fuses the second multiply with the add from the first.
+TEXT ·mulScaleFMA(SB), NOSPLIT, $0-76
+	MOVQ out_base+0(FP), SI
+	MOVQ out_len+8(FP), CX
+	MOVQ x_base+24(FP), DI
+	MOVQ weight_base+48(FP), R8
+	VBROADCASTSS scale+72(FP), Y2
+	CMPQ CX, $8
+	JB mulScaleFmaTail
+
+mulScaleFmaLoop32:
+	CMPQ CX, $32
+	JB mulScaleFmaLoop
+	VMOVUPS (DI), Y0
+	VFMADD231PS (R8), Y0, Y0
+	VFMADD231PS Y2, Y0, Y0
+	VMOVUPS Y0, (SI)
+	VMOVUPS 32(DI), Y3
+	VFMADD231PS 32(R8), Y3, Y3
+	VFMADD231PS Y2, Y3, Y3
+	VMOVUPS Y3, 32(SI)
+	VMOVUPS 64(DI), Y0
+	VFMADD231PS 64(R8), Y0, Y0
+	VFMADD231PS Y2, Y0, Y0
+	VMOVUPS Y0, 64(SI)
+	VMOVUPS 96(DI), Y3
+	VFMADD231PS 96(R8), Y3, Y3
+	VFMADD231PS Y2, Y3, Y3
+	VMOVUPS Y3, 96(SI)
+	ADDQ $128, SI
+	ADDQ $128, DI
+	ADDQ $128, R8
+	SUBQ $32, CX
+	JMP mulScaleFmaLoop32
+
+mulScaleFmaLoop:
+	CMPQ CX, $8
+	JB mulScaleFmaDone
+	VMOVUPS (DI), Y0
+	VFMADD231PS (R8), Y0, Y0
+	VFMADD231PS Y2, Y0, Y0
+	VMOVUPS Y0, (SI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, R8
+	SUBQ $8, CX
+	JMP mulScaleFmaLoop
+
+mulScaleFmaDone:
+	VZEROUPPER
+
+mulScaleFmaTail:
+	CMPQ CX, $0
+	JE mulScaleFmaRet
+	MOVSS (DI), X0
+	MULSS (R8), X0
+	MULSS scale+72(FP), X0
+	MOVSS X0, (SI)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, R8
+	DECQ CX
+	JMP mulScaleFmaTail
+
+mulScaleFmaRet:
+	RET
+
+// affineNormFMA: out[i] = (x[i]-mean)*scale*weight[i] + bias[i] using FMA.
+TEXT ·affineNormFMA(SB), NOSPLIT, $0-104
+	MOVQ out_base+0(FP), SI
+	MOVQ out_len+8(FP), CX
+	MOVQ x_base+24(FP), DI
+	MOVQ weight_base+48(FP), R8
+	MOVQ bias_base+72(FP), R9
+	VBROADCASTSS mean+96(FP), Y2
+	VBROADCASTSS scale+100(FP), Y3
+	CMPQ CX, $8
+	JB affineNormFmaTail
+
+affineNormFmaLoop32:
+	CMPQ CX, $32
+	JB affineNormFmaLoop
+	VMOVUPS (DI), Y0
+	VSUBPS Y2, Y0, Y0
+	VFMADD231PS (R8), Y0, Y0
+	VFNMADD231PS Y3, Y0, Y0
+	VADDPS (R9), Y0, Y0
+	VMOVUPS Y0, (SI)
+	VMOVUPS 32(DI), Y4
+	VSUBPS Y2, Y4, Y4
+	VFMADD231PS 32(R8), Y4, Y4
+	VFNMADD231PS Y3, Y4, Y4
+	VADDPS 32(R9), Y4, Y4
+	VMOVUPS Y4, 32(SI)
+	VMOVUPS 64(DI), Y0
+	VSUBPS Y2, Y0, Y0
+	VFMADD231PS 64(R8), Y0, Y0
+	VFNMADD231PS Y3, Y0, Y0
+	VADDPS 64(R9), Y0, Y0
+	VMOVUPS Y0, 64(SI)
+	VMOVUPS 96(DI), Y4
+	VSUBPS Y2, Y4, Y4
+	VFMADD231PS 96(R8), Y4, Y4
+	VFNMADD231PS Y3, Y4, Y4
+	VADDPS 96(R9), Y4, Y4
+	VMOVUPS Y4, 96(SI)
+	ADDQ $128, SI
+	ADDQ $128, DI
+	ADDQ $128, R8
+	ADDQ $128, R9
+	SUBQ $32, CX
+	JMP affineNormFmaLoop32
+
+affineNormFmaLoop:
+	CMPQ CX, $8
+	JB affineNormFmaDone
+	VMOVUPS (DI), Y0
+	VSUBPS Y2, Y0, Y0
+	VFMADD231PS (R8), Y0, Y0
+	VFNMADD231PS Y3, Y0, Y0
+	VADDPS (R9), Y0, Y0
+	VMOVUPS Y0, (SI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, R8
+	ADDQ $32, R9
+	SUBQ $8, CX
+	JMP affineNormFmaLoop
+
+affineNormFmaDone:
+	VZEROUPPER
+
+affineNormFmaTail:
+	CMPQ CX, $0
+	JE affineNormFmaRet
+	MOVSS (DI), X0
+	SUBSS mean+96(FP), X0
+	MULSS scale+100(FP), X0
+	MULSS (R8), X0
+	ADDSS (R9), X0
+	MOVSS X0, (SI)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, R8
+	ADDQ $4, R9
+	DECQ CX
+	JMP affineNormFmaTail
+
+affineNormFmaRet:
+	RET
+
+// sumSquaresCenteredFMA: sum((x[i]-mean)^2) using FMA.
+TEXT ·sumSquaresCenteredFMA(SB), NOSPLIT, $32-36
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	VBROADCASTSS mean+24(FP), Y2
+	VXORPS Y0, Y0, Y0
+	VXORPS Y4, Y4, Y4
+	VXORPS Y6, Y6, Y6
+	VXORPS Y8, Y8, Y8
+	CMPQ CX, $8
+	JB ssCenteredFmaTail
+
+ssCenteredFmaLoop32:
+	CMPQ CX, $32
+	JB ssCenteredFmaLoop
+	VMOVUPS (SI), Y1
+	VSUBPS Y2, Y1, Y1
+	VFMADD231PS Y1, Y1, Y0
+	VMOVUPS 32(SI), Y3
+	VSUBPS Y2, Y3, Y3
+	VFMADD231PS Y3, Y3, Y4
+	VMOVUPS 64(SI), Y1
+	VSUBPS Y2, Y1, Y1
+	VFMADD231PS Y1, Y1, Y6
+	VMOVUPS 96(SI), Y3
+	VSUBPS Y2, Y3, Y3
+	VFMADD231PS Y3, Y3, Y8
+	ADDQ $128, SI
+	SUBQ $32, CX
+	JMP ssCenteredFmaLoop32
+
+ssCenteredFmaLoop:
+	CMPQ CX, $8
+	JB ssCenteredFmaReduce
+	VMOVUPS (SI), Y1
+	VSUBPS Y2, Y1, Y1
+	VFMADD231PS Y1, Y1, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP ssCenteredFmaLoop
+
+ssCenteredFmaReduce:
+	VADDPS Y4, Y0, Y0
+	VADDPS Y6, Y0, Y0
+	VADDPS Y8, Y0, Y0
+	VEXTRACTF128 $1, Y0, X2
+	VADDPS X2, X0, X0
+	VHADDPS X0, X0, X0
+	VHADDPS X0, X0, X0
+	VZEROUPPER
+	JMP ssCenteredFmaTailScalar
+
+ssCenteredFmaTail:
+	VZEROUPPER
+	XORPS X0, X0
+
+ssCenteredFmaTailScalar:
+	CMPQ CX, $0
+	JE ssCenteredFmaDone
+	MOVSS (SI), X1
+	SUBSS mean+24(FP), X1
+	MULSS X1, X1
+	ADDSS X1, X0
+	ADDQ $4, SI
+	DECQ CX
+	JMP ssCenteredFmaTailScalar
+
+ssCenteredFmaDone:
+	MOVSS X0, ret+32(FP)
+	RET
+
+// addInPlaceSumFMA: dst[i] += x[i]; return sum(dst) using FMA.
+TEXT ·addInPlaceSumFMA(SB), NOSPLIT, $32-52
+	MOVQ dst_base+0(FP), SI
+	MOVQ dst_len+8(FP), CX
+	MOVQ x_base+24(FP), DI
+	VXORPS Y0, Y0, Y0
+	VXORPS Y2, Y2, Y2
+	VXORPS Y4, Y4, Y4
+	VXORPS Y6, Y6, Y6
+	CMPQ CX, $8
+	JB addSumFmaTail
+
+addSumFmaLoop32:
+	CMPQ CX, $32
+	JB addSumFmaLoop
+	VMOVUPS (SI), Y1
+	VADDPS (DI), Y1, Y1
+	VMOVUPS Y1, (SI)
+	VFMADD231PS Y1, Y1, Y0
+	VMOVUPS 32(SI), Y3
+	VADDPS 32(DI), Y3, Y3
+	VMOVUPS Y3, 32(SI)
+	VFMADD231PS Y3, Y3, Y2
+	VMOVUPS 64(SI), Y1
+	VADDPS 64(DI), Y1, Y1
+	VMOVUPS Y1, 64(SI)
+	VFMADD231PS Y1, Y1, Y4
+	VMOVUPS 96(SI), Y3
+	VADDPS 96(DI), Y3, Y3
+	VMOVUPS Y3, 96(SI)
+	VFMADD231PS Y3, Y3, Y6
+	ADDQ $128, SI
+	ADDQ $128, DI
+	SUBQ $32, CX
+	JMP addSumFmaLoop32
+
+addSumFmaLoop:
+	CMPQ CX, $8
+	JB addSumFmaReduce
+	VMOVUPS (SI), Y1
+	VADDPS (DI), Y1, Y1
+	VMOVUPS Y1, (SI)
+	VFMADD231PS Y1, Y1, Y0
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP addSumFmaLoop
+
+addSumFmaReduce:
+	VADDPS Y2, Y0, Y0
+	VADDPS Y4, Y0, Y0
+	VADDPS Y6, Y0, Y0
+	VEXTRACTF128 $1, Y0, X2
+	VADDPS X2, X0, X0
+	VHADDPS X0, X0, X0
+	VHADDPS X0, X0, X0
+	VZEROUPPER
+	JMP addSumFmaTailScalar
+
+addSumFmaTail:
+	VZEROUPPER
+	XORPS X0, X0
+
+addSumFmaTailScalar:
+	CMPQ CX, $0
+	JE addSumFmaDone
+	MOVSS (SI), X1
+	ADDSS (DI), X1
+	MOVSS X1, (SI)
+	ADDSS X1, X0
+	ADDQ $4, SI
+	ADDQ $4, DI
+	DECQ CX
+	JMP addSumFmaTailScalar
+
+addSumFmaDone:
+	MOVSS X0, ret+48(FP)
+	RET
+
+// sumF32FMA: sum(x[i]) using FMA. Accumulates into Y0 via VFMADD231PS
+// with a broadcast 1.0 vector, which is faster than separate VMULPS+VADDPS
+// when no multiply is needed (FMA port throughput > add port).
+TEXT ·sumF32FMA(SB), NOSPLIT, $32-28
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	VXORPS Y0, Y0, Y0
+	VXORPS Y2, Y2, Y2
+	VXORPS Y4, Y4, Y4
+	VXORPS Y6, Y6, Y6
+	CMPQ CX, $8
+	JB sumF32FmaTail
+
+sumF32FmaLoop32:
+	CMPQ CX, $32
+	JB sumF32FmaLoop
+	VMOVUPS (SI), Y1
+	VADDPS Y1, Y0, Y0
+	VMOVUPS 32(SI), Y3
+	VADDPS Y3, Y2, Y2
+	VMOVUPS 64(SI), Y1
+	VADDPS Y1, Y4, Y4
+	VMOVUPS 96(SI), Y3
+	VADDPS Y3, Y6, Y6
+	ADDQ $128, SI
+	SUBQ $32, CX
+	JMP sumF32FmaLoop32
+
+sumF32FmaLoop:
+	CMPQ CX, $8
+	JB sumF32FmaReduce
+	VMOVUPS (SI), Y1
+	VADDPS Y1, Y0, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP sumF32FmaLoop
+
+sumF32FmaReduce:
+	VADDPS Y2, Y0, Y0
+	VADDPS Y4, Y0, Y0
+	VADDPS Y6, Y0, Y0
+	VEXTRACTF128 $1, Y0, X2
+	VADDPS X2, X0, X0
+	VHADDPS X0, X0, X0
+	VHADDPS X0, X0, X0
+	VZEROUPPER
+	JMP sumF32FmaTailScalar
+
+sumF32FmaTail:
+	VZEROUPPER
+	XORPS X0, X0
+
+sumF32FmaTailScalar:
+	CMPQ CX, $0
+	JE sumF32FmaDone
+	MOVSS (SI), X1
+	ADDSS X1, X0
+	ADDQ $4, SI
+	DECQ CX
+	JMP sumF32FmaTailScalar
+
+sumF32FmaDone:
+	MOVSS X0, ret+24(FP)
+	RET
