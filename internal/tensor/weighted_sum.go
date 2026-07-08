@@ -4,6 +4,10 @@ import "math"
 
 // WeightedSum2 computes dst[i] = a0*x0[i] + a1*x1[i].
 func WeightedSum2(dst, x0, x1 []float32, a0, a1 float32) {
+	if useDotFMA && len(dst) >= 8 {
+		weightedSum2FMA(dst, x0, x1, a0, a1)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		weightedSum2AVX(dst, x0, x1, a0, a1)
 		return
@@ -27,6 +31,10 @@ func WeightedSum2(dst, x0, x1 []float32, a0, a1 float32) {
 
 // WeightedSum3 computes dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i].
 func WeightedSum3(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
+	if useDotFMA && len(dst) >= 8 {
+		weightedSum3FMA(dst, x0, x1, x2, a0, a1, a2)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		weightedSum3AVX(dst, x0, x1, x2, a0, a1, a2)
 		return
@@ -50,6 +58,10 @@ func WeightedSum3(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
 
 // WeightedSum4 computes dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i].
 func WeightedSum4(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
+	if useDotFMA && len(dst) >= 8 {
+		weightedSum4FMA(dst, x0, x1, x2, x3, a0, a1, a2, a3)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		weightedSum4AVX(dst, x0, x1, x2, x3, a0, a1, a2, a3)
 		return
@@ -96,6 +108,10 @@ func WeightedSumAdd2(dst, x0, x1 []float32, a0, a1 float32) {
 
 // WeightedSumAdd4 computes dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i].
 func WeightedSumAdd4(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
+	if useDotFMA && len(dst) >= 8 {
+		weightedSumAdd4FMA(dst, x0, x1, x2, x3, a0, a1, a2, a3)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		weightedSumAdd4AVX(dst, x0, x1, x2, x3, a0, a1, a2, a3)
 		return

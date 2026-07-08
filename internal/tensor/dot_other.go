@@ -336,3 +336,9 @@ func expF32VecFMA(x []float32, m float32) float32 { return expF32VecAVX(x, m) }
 
 
 func addInPlaceSumSquaresFMA(dst, x []float32) float32 { return addInPlaceSumSquaresAVX(dst, x) }
+
+
+func weightedSum2FMA(dst, x0, x1 []float32, a0, a1 float32) { weightedSum2AVX(dst, x0, x1, a0, a1) }
+func weightedSum3FMA(dst, x0, x1, x2 []float32, a0, a1, a2 float32) { weightedSum3AVX(dst, x0, x1, x2, a0, a1, a2) }
+func weightedSum4FMA(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) { weightedSum4AVX(dst, x0, x1, x2, x3, a0, a1, a2, a3) }
+func weightedSumAdd4FMA(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) { weightedSumAdd4AVX(dst, x0, x1, x2, x3, a0, a1, a2, a3) }
