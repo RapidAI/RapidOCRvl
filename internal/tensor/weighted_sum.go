@@ -85,6 +85,10 @@ func WeightedSum4(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
 
 // WeightedSumAdd2 computes dst[i] += a0*x0[i] + a1*x1[i].
 func WeightedSumAdd2(dst, x0, x1 []float32, a0, a1 float32) {
+	if useDotFMA && len(dst) >= 8 {
+		weightedSumAdd2FMA(dst, x0, x1, a0, a1)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		weightedSumAdd2AVX(dst, x0, x1, a0, a1)
 		return

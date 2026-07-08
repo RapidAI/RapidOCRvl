@@ -71,3 +71,6 @@ func weightedSum2FMA(dst, x0, x1 []float32, a0, a1 float32)
 func weightedSum3FMA(dst, x0, x1, x2 []float32, a0, a1, a2 float32)
 func weightedSum4FMA(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32)
 func weightedSumAdd4FMA(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32)
+
+func scaleAddFMA(dst, x []float32, a float32)
+func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32)
