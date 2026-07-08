@@ -8,7 +8,7 @@ var (
 	vulkanArgmaxQuantizedF32GLSL            = ""
 	vulkanBlockTopKF32GLSL                  = ""
 	vulkanBlockTopKQuantizedF32GLSL         = ""
-	vulkanAddRMSNormF32GLSL                 = ""
+	vulkanAddRMSNormF32GLSL                 = vulkanAddRMSNormF32GLSLImpl
 	vulkanFusedQKVMRoPEF32GLSL              = vulkanFusedQKVMRoPEF32GLSLImpl
 	vulkanFusedQKVMRoPEQ4GLSL               = vulkanFusedQKVMRoPEQ4GLSLImpl
 	vulkanFusedQKVMRoPEQ6GLSL               = vulkanFusedQKVMRoPEQ6GLSLImpl
@@ -383,4 +383,22 @@ void main() {
     float v = dotRowC(r);
     if (lid == 0) outC[r] = v;
   }
+}`
+const vulkanAddRMSNormF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) buffer Dst { float dstv[]; };
+layout(set=0,binding=1) readonly buffer Add { float addv[]; };
+layout(set=0,binding=2) readonly buffer W { float w[]; };
+layout(set=0,binding=3) buffer O { float outv[]; };
+shared float scratch[256];
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint n = pc.rows;
+  float v = (lid < n) ? (dstv[lid] + addv[lid]) : 0.0;
+  scratch[lid] = v * v;
+  barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
+  float scale = inversesqrt(scratch[0] / float(n) + 1e-6);
+  if (lid < n) { dstv[lid] = v; outv[lid] = v * scale * w[lid]; }
 }`
