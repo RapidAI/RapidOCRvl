@@ -8,17 +8,19 @@ type Q8Matrix struct {
 }
 
 type Q4Matrix struct {
-	Rows  int
-	Cols  int
-	Data  []byte
-	Scale []float32
+	Rows     int
+	Cols     int
+	Data     []byte
+	Unpacked []int8
+	Scale    []float32
 }
 
 type Q6Matrix struct {
-	Rows  int
-	Cols  int
-	Data  []byte
-	Scale []float32
+	Rows     int
+	Cols     int
+	Data     []byte
+	Unpacked []int8
+	Scale    []float32
 }
 
 func QuantizeQ8Row(w []float32, rows, cols int) *Q8Matrix {
@@ -143,35 +145,41 @@ func quantizeQ8Rows(w []float32, q *Q8Matrix, start, end int) {
 
 func QuantizeQ4Row(w []float32, rows, cols int) *Q4Matrix {
 	q := &Q4Matrix{
-		Rows:  rows,
-		Cols:  cols,
-		Data:  make([]byte, rows*((cols+1)/2)),
-		Scale: make([]float32, rows),
+		Rows:     rows,
+		Cols:     cols,
+		Data:     make([]byte, rows*((cols+1)/2)),
+		Unpacked: make([]int8, rows*cols),
+		Scale:    make([]float32, rows),
 	}
 	if shouldParallelQuantizeRows(rows*cols, rows) {
 		parallelForQuantizeRows(rows, func(start, end int) {
 			quantizeQ4Rows(w, q, start, end)
 		})
+		UnpackQ4Matrix(q)
 		return q
 	}
 	quantizeQ4Rows(w, q, 0, rows)
+	UnpackQ4Matrix(q)
 	return q
 }
 
 func QuantizeQ6Row(w []float32, rows, cols int) *Q6Matrix {
 	q := &Q6Matrix{
-		Rows:  rows,
-		Cols:  cols,
-		Data:  make([]byte, rows*PackedQ6Cols(cols)),
-		Scale: make([]float32, rows),
+		Rows:     rows,
+		Cols:     cols,
+		Data:     make([]byte, rows*PackedQ6Cols(cols)),
+		Unpacked: make([]int8, rows*cols),
+		Scale:    make([]float32, rows),
 	}
 	if shouldParallelQuantizeRows(rows*cols, rows) {
 		parallelForQuantizeRows(rows, func(start, end int) {
 			quantizeQ6Rows(w, q, start, end)
 		})
+		UnpackQ6Matrix(q)
 		return q
 	}
 	quantizeQ6Rows(w, q, 0, rows)
+	UnpackQ6Matrix(q)
 	return q
 }
 
@@ -306,6 +314,13 @@ func abs32(v float32) float32 {
 }
 
 func maxAbsFloat32(x []float32) float32 {
+	if useDotQ8AVX2 && len(x) >= 8 {
+		return maxAbsFloat32AVX(x)
+	}
+	return maxAbsFloat32Scalar(x)
+}
+
+func maxAbsFloat32Scalar(x []float32) float32 {
 	var m0, m1, m2, m3, m4, m5, m6, m7 float32
 	i := 0
 	n := len(x)
@@ -585,14 +600,25 @@ func matVecQ8SwiGLUScratch(out, x []float32, gate, up *Q8Matrix, tmpU []float32)
 	}
 	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
 		parallelForQuantPair(gate.Rows, func(start, end int) {
-			matVecQ8SwiGLUSerial(out, x, gate, up, start, end)
+			matVecQ8SwiGLUSerialBatched(out, tmpU, x, gate, up, start, end)
 		})
 		return
 	}
-	matVecQ8SwiGLUSerial(out, x, gate, up, 0, gate.Rows)
+	matVecQ8SwiGLUSerialBatched(out, tmpU, x, gate, up, 0, gate.Rows)
 }
 
-func matVecQ8SwiGLUSerial(out, x []float32, gate, up *Q8Matrix, start, end int) {
+func matVecQ8SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q8Matrix, start, end int) {
+	batchSize := end - start
+	if useDotQ8AVX2 && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+		for r := start; r < end; r++ {
+			base := r * gate.Cols
+			g, u := dotQ8Pair(gate.Data[base:base+gate.Cols], up.Data[base:base+up.Cols], x)
+			out[r] = g * gate.Scale[r]
+			tmpU[r] = u * up.Scale[r]
+		}
+		SiLUMulInPlace(out[start:end], tmpU[start:end])
+		return
+	}
 	for r := start; r < end; r++ {
 		base := r * gate.Cols
 		g, u := dotQ8Pair(gate.Data[base:base+gate.Cols], up.Data[base:base+up.Cols], x)
@@ -614,20 +640,53 @@ func matVecQ4SwiGLUScratch(out, x []float32, gate, up *Q4Matrix, tmpU []float32)
 	}
 	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
 		parallelForQuantPair(gate.Rows, func(start, end int) {
-			matVecQ4SwiGLUSerial(out, x, gate, up, start, end)
+			matVecQ4SwiGLUSerialBatched(out, tmpU, x, gate, up, start, end)
 		})
 		return
 	}
-	matVecQ4SwiGLUSerial(out, x, gate, up, 0, gate.Rows)
+	matVecQ4SwiGLUSerialBatched(out, tmpU, x, gate, up, 0, gate.Rows)
 }
 
 func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) {
+	if gate.Unpacked != nil && up.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * gate.Cols
+			g, u := dotQ4UnpackedPair(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], x)
+			out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
+		}
+		return
+	}
 	packedCols := (gate.Cols + 1) / 2
 	for r := start; r < end; r++ {
 		base := r * packedCols
 		g, u := dotQ4Pair(gate.Data[base:base+packedCols], up.Data[base:base+packedCols], x, gate.Cols)
 		out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
 	}
+}
+
+func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4Matrix, start, end int) {
+	batchSize := end - start
+	if useDotQ4AVX2 && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+		if gate.Unpacked != nil && up.Unpacked != nil {
+			for r := start; r < end; r++ {
+				base := r * gate.Cols
+				g, u := dotQ4UnpackedPair(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], x)
+				out[r] = g * gate.Scale[r]
+				tmpU[r] = u * up.Scale[r]
+			}
+		} else {
+			packedCols := (gate.Cols + 1) / 2
+			for r := start; r < end; r++ {
+				base := r * packedCols
+				g, u := dotQ4Pair(gate.Data[base:base+packedCols], up.Data[base:base+packedCols], x, gate.Cols)
+				out[r] = g * gate.Scale[r]
+				tmpU[r] = u * up.Scale[r]
+			}
+		}
+		SiLUMulInPlace(out[start:end], tmpU[start:end])
+		return
+	}
+	matVecQ4SwiGLUSerial(out, x, gate, up, start, end)
 }
 
 func matVecQ6SwiGLU(out, x []float32, gate, up *Q6Matrix) {
@@ -644,20 +703,53 @@ func matVecQ6SwiGLUScratch(out, x []float32, gate, up *Q6Matrix, tmpU []float32)
 	}
 	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
 		parallelForQuantPair(gate.Rows, func(start, end int) {
-			matVecQ6SwiGLUSerial(out, x, gate, up, start, end)
+			matVecQ6SwiGLUSerialBatched(out, tmpU, x, gate, up, start, end)
 		})
 		return
 	}
-	matVecQ6SwiGLUSerial(out, x, gate, up, 0, gate.Rows)
+	matVecQ6SwiGLUSerialBatched(out, tmpU, x, gate, up, 0, gate.Rows)
 }
 
 func matVecQ6SwiGLUSerial(out, x []float32, gate, up *Q6Matrix, start, end int) {
+	if gate.Unpacked != nil && up.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * gate.Cols
+			g, u := dotQ6UnpackedPair(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], x)
+			out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
+		}
+		return
+	}
 	packedCols := PackedQ6Cols(gate.Cols)
 	for r := start; r < end; r++ {
 		base := r * packedCols
 		g, u := dotQ6Pair(gate.Data[base:base+packedCols], up.Data[base:base+packedCols], x, gate.Cols)
 		out[r] = SiLU(g*gate.Scale[r]) * (u * up.Scale[r])
 	}
+}
+
+func matVecQ6SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q6Matrix, start, end int) {
+	batchSize := end - start
+	if useDotQ8AVX2 && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+		if gate.Unpacked != nil && up.Unpacked != nil {
+			for r := start; r < end; r++ {
+				base := r * gate.Cols
+				g, u := dotQ6UnpackedPair(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], x)
+				out[r] = g * gate.Scale[r]
+				tmpU[r] = u * up.Scale[r]
+			}
+		} else {
+			packedCols := PackedQ6Cols(gate.Cols)
+			for r := start; r < end; r++ {
+				base := r * packedCols
+				g, u := dotQ6Pair(gate.Data[base:base+packedCols], up.Data[base:base+packedCols], x, gate.Cols)
+				out[r] = g * gate.Scale[r]
+				tmpU[r] = u * up.Scale[r]
+			}
+		}
+		SiLUMulInPlace(out[start:end], tmpU[start:end])
+		return
+	}
+	matVecQ6SwiGLUSerial(out, x, gate, up, start, end)
 }
 
 func swiGLUFallbackInPlace(gate, up []float32) {
@@ -776,6 +868,15 @@ func matVecQ4Pair(outA, outB, x []float32, a, b *Q4Matrix) {
 }
 
 func matVecQ4PairSerial(outA, outB, x []float32, a, b *Q4Matrix, start, end int) {
+	if a.Unpacked != nil && b.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv := dotQ4UnpackedPair(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], x)
+			outA[r] = av * a.Scale[r]
+			outB[r] = bv * b.Scale[r]
+		}
+		return
+	}
 	packedCols := (a.Cols + 1) / 2
 	for r := start; r < end; r++ {
 		base := r * packedCols
@@ -809,6 +910,15 @@ func parallelForQuantPair(rows int, fn func(start, end int)) {
 }
 
 func matVecQ6PairSerial(outA, outB, x []float32, a, b *Q6Matrix, start, end int) {
+	if a.Unpacked != nil && b.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv := dotQ6UnpackedPair(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], x)
+			outA[r] = av * a.Scale[r]
+			outB[r] = bv * b.Scale[r]
+		}
+		return
+	}
 	packedCols := PackedQ6Cols(a.Cols)
 	for r := start; r < end; r++ {
 		base := r * packedCols
@@ -837,6 +947,16 @@ func fusedMatVec3Q6Parallel(outA, outB, outC, x []float32, a, b, c *Q6Matrix, to
 }
 
 func fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q6Matrix, start, end int) {
+	if a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv, cv := dotQ6UnpackedTriplet(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], c.Unpacked[base:base+c.Cols], x)
+			outA[r] = av * a.Scale[r]
+			outB[r] = bv * b.Scale[r]
+			outC[r] = cv * c.Scale[r]
+		}
+		return
+	}
 	packedCols := PackedQ6Cols(a.Cols)
 	for r := start; r < end; r++ {
 		base := r * packedCols
@@ -848,31 +968,62 @@ func fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q6Mat
 }
 
 func fusedMatVec3Q6Serial(outA, outB, outC, x []float32, a, b, c *Q6Matrix, start, end int) {
-	aPacked := PackedQ6Cols(a.Cols)
-	bPacked := PackedQ6Cols(b.Cols)
-	cPacked := PackedQ6Cols(c.Cols)
+	allUnpacked := a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil
 	splitB := a.Rows + b.Rows
 	aEnd := min(end, a.Rows)
-	for r := start; r < aEnd; r++ {
-		base := r * aPacked
-		outA[r] = dotQ6(a.Data[base:base+aPacked], x, a.Cols) * a.Scale[r]
+	if allUnpacked {
+		for r := start; r < aEnd; r++ {
+			base := r * a.Cols
+			outA[r] = dotQ6Unpacked(a.Unpacked[base:base+a.Cols], x) * a.Scale[r]
+		}
+	} else {
+		aPacked := PackedQ6Cols(a.Cols)
+		for r := start; r < aEnd; r++ {
+			base := r * aPacked
+			outA[r] = dotQ6(a.Data[base:base+aPacked], x, a.Cols) * a.Scale[r]
+		}
 	}
 	bStart := max(start, a.Rows)
 	bEnd := min(end, splitB)
-	for r := bStart; r < bEnd; r++ {
-		br := r - a.Rows
-		base := br * bPacked
-		outB[br] = dotQ6(b.Data[base:base+bPacked], x, b.Cols) * b.Scale[br]
+	if allUnpacked {
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * b.Cols
+			outB[br] = dotQ6Unpacked(b.Unpacked[base:base+b.Cols], x) * b.Scale[br]
+		}
+	} else {
+		bPacked := PackedQ6Cols(b.Cols)
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * bPacked
+			outB[br] = dotQ6(b.Data[base:base+bPacked], x, b.Cols) * b.Scale[br]
+		}
 	}
 	cStart := max(start, splitB)
-	for r := cStart; r < end; r++ {
-		cr := r - splitB
-		base := cr * cPacked
-		outC[cr] = dotQ6(c.Data[base:base+cPacked], x, c.Cols) * c.Scale[cr]
+	if allUnpacked {
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * c.Cols
+			outC[cr] = dotQ6Unpacked(c.Unpacked[base:base+c.Cols], x) * c.Scale[cr]
+		}
+	} else {
+		cPacked := PackedQ6Cols(c.Cols)
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * cPacked
+			outC[cr] = dotQ6(c.Data[base:base+cPacked], x, c.Cols) * c.Scale[cr]
+		}
 	}
 }
 
 func matVecQ6Serial(out, x []float32, q *Q6Matrix, start, end int) {
+	if q.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * q.Cols
+			out[r] = dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x) * q.Scale[r]
+		}
+		return
+	}
 	packedCols := PackedQ6Cols(q.Cols)
 	for r := start; r < end; r++ {
 		base := r * packedCols
@@ -881,6 +1032,13 @@ func matVecQ6Serial(out, x []float32, q *Q6Matrix, start, end int) {
 }
 
 func matVecQ4Serial(out, x []float32, q *Q4Matrix, start, end int) {
+	if q.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * q.Cols
+			out[r] = dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x) * q.Scale[r]
+		}
+		return
+	}
 	packedCols := (q.Cols + 1) / 2
 	for r := start; r < end; r++ {
 		base := r * packedCols
@@ -895,6 +1053,16 @@ func fusedMatVec3Q4Parallel(outA, outB, outC, x []float32, a, b, c *Q4Matrix, to
 }
 
 func fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q4Matrix, start, end int) {
+	if a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil {
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv, cv := dotQ4UnpackedTriplet(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], c.Unpacked[base:base+c.Cols], x)
+			outA[r] = av * a.Scale[r]
+			outB[r] = bv * b.Scale[r]
+			outC[r] = cv * c.Scale[r]
+		}
+		return
+	}
 	packedCols := (a.Cols + 1) / 2
 	for r := start; r < end; r++ {
 		base := r * packedCols
@@ -906,31 +1074,65 @@ func fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q4Mat
 }
 
 func fusedMatVec3Q4Serial(outA, outB, outC, x []float32, a, b, c *Q4Matrix, start, end int) {
-	aPacked := (a.Cols + 1) / 2
-	bPacked := (b.Cols + 1) / 2
-	cPacked := (c.Cols + 1) / 2
+	allUnpacked := a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil
 	splitB := a.Rows + b.Rows
 	aEnd := min(end, a.Rows)
-	for r := start; r < aEnd; r++ {
-		base := r * aPacked
-		outA[r] = dotQ4(a.Data[base:base+aPacked], x, a.Cols) * a.Scale[r]
+	if allUnpacked {
+		for r := start; r < aEnd; r++ {
+			base := r * a.Cols
+			outA[r] = dotQ4Unpacked(a.Unpacked[base:base+a.Cols], x) * a.Scale[r]
+		}
+	} else {
+		aPacked := (a.Cols + 1) / 2
+		for r := start; r < aEnd; r++ {
+			base := r * aPacked
+			outA[r] = dotQ4(a.Data[base:base+aPacked], x, a.Cols) * a.Scale[r]
+		}
 	}
 	bStart := max(start, a.Rows)
 	bEnd := min(end, splitB)
-	for r := bStart; r < bEnd; r++ {
-		br := r - a.Rows
-		base := br * bPacked
-		outB[br] = dotQ4(b.Data[base:base+bPacked], x, b.Cols) * b.Scale[br]
+	if allUnpacked {
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * b.Cols
+			outB[br] = dotQ4Unpacked(b.Unpacked[base:base+b.Cols], x) * b.Scale[br]
+		}
+	} else {
+		bPacked := (b.Cols + 1) / 2
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * bPacked
+			outB[br] = dotQ4(b.Data[base:base+bPacked], x, b.Cols) * b.Scale[br]
+		}
 	}
 	cStart := max(start, splitB)
-	for r := cStart; r < end; r++ {
-		cr := r - splitB
-		base := cr * cPacked
-		outC[cr] = dotQ4(c.Data[base:base+cPacked], x, c.Cols) * c.Scale[cr]
+	if allUnpacked {
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * c.Cols
+			outC[cr] = dotQ4Unpacked(c.Unpacked[base:base+c.Cols], x) * c.Scale[cr]
+		}
+	} else {
+		cPacked := (c.Cols + 1) / 2
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * cPacked
+			outC[cr] = dotQ4(c.Data[base:base+cPacked], x, c.Cols) * c.Scale[cr]
+		}
 	}
 }
 
 func dotQ8(a []int8, b []float32) float32 {
+	if useDotFMA && useDotQ8AVX2 && len(a) >= 8 {
+		return dotQ8FMA(a, b)
+	}
+	if useDotQ8AVX2 && len(a) >= 8 {
+		return dotQ8AVX2(a, b)
+	}
+	return dotQ8Scalar(a, b)
+}
+
+func dotQ8Scalar(a []int8, b []float32) float32 {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
 	n := len(a)
@@ -952,6 +1154,16 @@ func dotQ8(a []int8, b []float32) float32 {
 }
 
 func dotQ8Pair(a, b []int8, x []float32) (float32, float32) {
+	if useDotFMA && useDotQ8AVX2 && len(x) >= 8 {
+		return dotQ8PairFMA(a, b, x)
+	}
+	if useDotQ8AVX2 && len(x) >= 8 {
+		return dotQ8PairAVX2(a, b, x)
+	}
+	return dotQ8PairScalar(a, b, x)
+}
+
+func dotQ8PairScalar(a, b []int8, x []float32) (float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3 float32
 	i := 0
 	n := len(x)
@@ -992,6 +1204,16 @@ func dotQ8Pair(a, b []int8, x []float32) (float32, float32) {
 }
 
 func dotQ8Triplet(a, b, c []int8, x []float32) (float32, float32, float32) {
+	if useDotFMA && useDotQ8AVX2 && len(x) >= 8 {
+		return dotQ8TripletFMA(a, b, c, x)
+	}
+	if useDotQ8AVX2 && len(x) >= 8 {
+		return dotQ8TripletAVX2(a, b, c, x)
+	}
+	return dotQ8TripletScalar(a, b, c, x)
+}
+
+func dotQ8TripletScalar(a, b, c []int8, x []float32) (float32, float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3 float32
 	i := 0
 	n := len(x)
@@ -1053,7 +1275,57 @@ var q8ValueTable = func() [256]float32 {
 	return t
 }()
 
+// UnpackQ4Matrix populates the Unpacked field by extracting 4-bit nibble values
+// from the packed Data into a contiguous int8 array, enabling reuse of the
+// fast Q8 AVX2 dot product kernels.
+func UnpackQ4Matrix(q *Q4Matrix) {
+	if q.Unpacked == nil {
+		q.Unpacked = make([]int8, q.Rows*q.Cols)
+	}
+	packedCols := (q.Cols + 1) / 2
+	for r := 0; r < q.Rows; r++ {
+		row := q.Data[r*packedCols : (r+1)*packedCols]
+		out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
+		unpackQ4RowFast(row, out, q.Cols)
+	}
+}
+
+var q4Int8Table = [16]int8{-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7}
+
+func unpackQ4RowFast(row []byte, out []int8, cols int) {
+	c := 0
+	for ; c+2 <= cols; c += 2 {
+		b := row[c/2]
+		out[c] = q4Int8Table[b&0x0F]
+		out[c+1] = q4Int8Table[b>>4]
+	}
+	if c < cols {
+		out[c] = q4Int8Table[row[c/2]&0x0F]
+	}
+}
+
+// dotQ4Unpacked computes the dot product using the pre-unpacked int8 data,
+// reusing the same AVX2 kernel as Q8. No new assembly needed.
+func dotQ4Unpacked(a []int8, b []float32) float32 {
+	return dotQ8(a, b)
+}
+
+func dotQ4UnpackedPair(a, b []int8, x []float32) (float32, float32) {
+	return dotQ8Pair(a, b, x)
+}
+
+func dotQ4UnpackedTriplet(a, b, c []int8, x []float32) (float32, float32, float32) {
+	return dotQ8Triplet(a, b, c, x)
+}
+
 func dotQ4(a []byte, b []float32, cols int) float32 {
+	if useDotQ4AVX2 && cols >= 8 {
+		return dotQ4AVX2(a, b, cols)
+	}
+	return dotQ4Scalar(a, b, cols)
+}
+
+func dotQ4Scalar(a []byte, b []float32, cols int) float32 {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
 	for ; i+15 < cols; i += 16 {
@@ -1082,6 +1354,13 @@ func dotQ4(a []byte, b []float32, cols int) float32 {
 }
 
 func dotQ4Pair(a, b []byte, x []float32, cols int) (float32, float32) {
+	if useDotQ4AVX2 && cols >= 8 {
+		return dotQ4PairAVX2(a, b, x, cols)
+	}
+	return dotQ4PairScalar(a, b, x, cols)
+}
+
+func dotQ4PairScalar(a, b []byte, x []float32, cols int) (float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3 float32
 	i := 0
 	fullBytes := cols / 2
@@ -1136,6 +1415,13 @@ func dotQ4Pair(a, b []byte, x []float32, cols int) (float32, float32) {
 }
 
 func dotQ4Triplet(a, b, c []byte, x []float32, cols int) (float32, float32, float32) {
+	if useDotQ4AVX2 && cols >= 8 {
+		return dotQ4TripletAVX2(a, b, c, x, cols)
+	}
+	return dotQ4TripletScalar(a, b, c, x, cols)
+}
+
+func dotQ4TripletScalar(a, b, c []byte, x []float32, cols int) (float32, float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3 float32
 	i := 0
 	fullBytes := cols / 2
@@ -1230,6 +1516,68 @@ var q6PairLo, q6PairHi = func() ([4096]float32, [4096]float32) {
 	return lo, hi
 }()
 
+
+var q6Int8Table = [64]int8{
+	-32, -31, -30, -29, -28, -27, -26, -25,
+	-24, -23, -22, -21, -20, -19, -18, -17,
+	-16, -15, -14, -13, -12, -11, -10, -9,
+	-8, -7, -6, -5, -4, -3, -2, -1,
+	0, 1, 2, 3, 4, 5, 6, 7,
+	8, 9, 10, 11, 12, 13, 14, 15,
+	16, 17, 18, 19, 20, 21, 22, 23,
+	24, 25, 26, 27, 28, 29, 30, 31,
+}
+// UnpackQ6Matrix populates the Unpacked field by extracting 6-bit values
+// from the packed Data into a contiguous int8 array, enabling reuse of the
+// fast Q8 AVX2 dot product kernels.
+func UnpackQ6Matrix(q *Q6Matrix) {
+	if q.Unpacked == nil {
+		q.Unpacked = make([]int8, q.Rows*q.Cols)
+	}
+	packedCols := PackedQ6Cols(q.Cols)
+	for r := 0; r < q.Rows; r++ {
+		row := q.Data[r*packedCols : (r+1)*packedCols]
+		out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
+		unpackQ6RowFast(row, out, q.Cols)
+	}
+}
+
+// unpackQ6RowFast extracts 6-bit values from packed bytes into int8.
+// Processes 4 values (24 bits = 3 bytes) per iteration using the int8 LUT,
+// avoiding the per-element getQ6 bit-shift overhead.
+func unpackQ6RowFast(row []byte, out []int8, cols int) {
+	c := 0
+	j := 0
+	for ; c+4 <= cols; c += 4 {
+		b0 := uint32(row[j])
+		b1 := uint32(row[j+1])
+		b2 := uint32(row[j+2])
+		v := b0 | (b1 << 8) | (b2 << 16)
+		out[c] = q6Int8Table[v&0x3F]
+		out[c+1] = q6Int8Table[(v>>6)&0x3F]
+		out[c+2] = q6Int8Table[(v>>12)&0x3F]
+		out[c+3] = q6Int8Table[(v>>18)&0x3F]
+		j += 3
+	}
+	for ; c < cols; c++ {
+		out[c] = q6Int8Table[getQ6(row, c)]
+	}
+}
+
+// dotQ6Unpacked computes the dot product using the pre-unpacked int8 data,
+// reusing the same AVX2 kernel as Q8. No new assembly needed.
+func dotQ6Unpacked(a []int8, b []float32) float32 {
+	return dotQ8(a, b)
+}
+
+func dotQ6UnpackedPair(a, b []int8, x []float32) (float32, float32) {
+	return dotQ8Pair(a, b, x)
+}
+
+func dotQ6UnpackedTriplet(a, b, c []int8, x []float32) (float32, float32, float32) {
+	return dotQ8Triplet(a, b, c, x)
+}
+
 func dotQ6(a []byte, b []float32, cols int) float32 {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
@@ -1273,7 +1621,6 @@ func dotQ6(a []byte, b []float32, cols int) float32 {
 	}
 	return sum
 }
-
 func dotQ6Pair(a, b []byte, x []float32, cols int) (float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3 float32
 	i := 0

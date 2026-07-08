@@ -4,6 +4,7 @@ import (
 	"math"
 	"runtime"
 	"sync"
+	"unsafe"
 )
 
 const parallelWork = 1 << 18
@@ -350,23 +351,36 @@ func matVecBias3Serial(outA, outB, outC, x, wa, ba, wb, bb, wc, bc []float32, ro
 }
 
 func FusedSwiGLUF32Scratch(out, x, gate, up, down []float32, rows, cols, outRows int, tmpG []float32) {
+	FusedSwiGLUF32ScratchWithU(out, x, gate, up, down, rows, cols, outRows, tmpG, nil)
+}
+
+// FusedSwiGLUF32ScratchWithU computes SiLU(gate*x)*up*x then down*x.
+// If tmpU is non-nil and large enough, it batches SiLU via the AVX2 kernel.
+func FusedSwiGLUF32ScratchWithU(out, x, gate, up, down []float32, rows, cols, outRows int, tmpG, tmpU []float32) {
 	tmpG = tmpG[:rows]
 	work := rows * cols * 2
 	if shouldParallel(work, rows) {
-		fusedSwiGLUGateUpParallel(tmpG, x, gate, up, rows, cols)
+		parallelForGateUp(rows, func(start, end int) {
+			fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up, start, end, cols)
+		})
 	} else {
-		fusedSwiGLUGateUpSerial(tmpG, x, gate, up, 0, rows, cols)
+		fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up, 0, rows, cols)
 	}
 	MatVec(out, tmpG, down, outRows, rows)
 }
 
-func fusedSwiGLUGateUpParallel(tmpG, x, gate, up []float32, rows, cols int) {
-	parallelForGateUp(rows, func(start, end int) {
-		fusedSwiGLUGateUpSerial(tmpG, x, gate, up, start, end, cols)
-	})
-}
-
-func fusedSwiGLUGateUpSerial(tmpG, x, gate, up []float32, start, end, cols int) {
+func fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up []float32, start, end, cols int) {
+	batchSize := end - start
+	if useDotF32AVX && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+		for r := start; r < end; r++ {
+			base := r * cols
+			g, u := dotF32Pair(gate[base:base+cols], up[base:base+cols], x)
+			tmpG[r] = g
+			tmpU[r] = u
+		}
+		SiLUMulInPlace(tmpG[start:end], tmpU[start:end])
+		return
+	}
 	for r := start; r < end; r++ {
 		base := r * cols
 		g, u := dotF32Pair(gate[base:base+cols], up[base:base+cols], x)
@@ -506,6 +520,16 @@ func parallelForMax(n, maxWorkers int, fn func(start, end int)) {
 }
 
 func dotF32(a, b []float32) float32 {
+	if useDotFMA && len(a) >= 8 {
+		return dotF32FMA(a, b)
+	}
+	if useDotF32AVX && len(a) >= 8 {
+		return dotF32AVX(a, b)
+	}
+	return dotF32Scalar(a, b)
+}
+
+func dotF32Scalar(a, b []float32) float32 {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
 	n := len(a)
@@ -527,6 +551,9 @@ func dotF32(a, b []float32) float32 {
 }
 
 func dotF32_16(a, b []float32) float32 {
+	if useDotF32AVX {
+		return dotF32AVX(a, b)
+	}
 	s0 := a[0]*b[0] + a[8]*b[8]
 	s1 := a[1]*b[1] + a[9]*b[9]
 	s2 := a[2]*b[2] + a[10]*b[10]
@@ -539,6 +566,9 @@ func dotF32_16(a, b []float32) float32 {
 }
 
 func dotF32_256(a, b []float32) float32 {
+	if useDotF32AVX {
+		return dotF32AVX(a, b)
+	}
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	for i := 0; i < 256; i += 16 {
 		s0 += a[i]*b[i] + a[i+8]*b[i+8]
@@ -554,6 +584,9 @@ func dotF32_256(a, b []float32) float32 {
 }
 
 func dotF32_588(a, b []float32) float32 {
+	if useDotF32AVX {
+		return dotF32AVX(a, b)
+	}
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	for i := 0; i < 576; i += 16 {
 		s0 += a[i]*b[i] + a[i+8]*b[i+8]
@@ -577,6 +610,16 @@ func Dot(a, b []float32) float32 {
 }
 
 func dotF32Pair(a, b, x []float32) (float32, float32) {
+	if useDotFMA && len(x) >= 8 {
+		return dotF32PairFMA(a, b, x)
+	}
+	if useDotF32AVX && len(x) >= 8 {
+		return dotF32PairAVX(a, b, x)
+	}
+	return dotF32PairScalar(a, b, x)
+}
+
+func dotF32PairScalar(a, b, x []float32) (float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3 float32
 	i := 0
 	n := len(x)
@@ -603,6 +646,16 @@ func dotF32Pair(a, b, x []float32) (float32, float32) {
 }
 
 func dotF32Triplet(a, b, c, x []float32) (float32, float32, float32) {
+	if useDotFMA && len(x) >= 8 {
+		return dotF32TripletFMA(a, b, c, x)
+	}
+	if useDotF32AVX && len(x) >= 8 {
+		return dotF32TripletAVX(a, b, c, x)
+	}
+	return dotF32TripletScalar(a, b, c, x)
+}
+
+func dotF32TripletScalar(a, b, c, x []float32) (float32, float32, float32) {
 	var a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3 float32
 	i := 0
 	n := len(x)
@@ -635,6 +688,10 @@ func dotF32Triplet(a, b, c, x []float32) (float32, float32, float32) {
 }
 
 func AddScaled(dst, x []float32, scale float32) {
+	if useDotF32AVX && len(dst) >= 8 {
+		addScaledAVX(dst, x, scale)
+		return
+	}
 	var i int
 	n := len(dst)
 	for ; i+7 < n; i += 8 {
@@ -653,6 +710,10 @@ func AddScaled(dst, x []float32, scale float32) {
 }
 
 func Add(out, a, b []float32) {
+	if useDotF32AVX && len(out) >= 8 {
+		addAVX(out, a, b)
+		return
+	}
 	var i int
 	n := len(out)
 	for ; i+7 < n; i += 8 {
@@ -671,6 +732,10 @@ func Add(out, a, b []float32) {
 }
 
 func AddInPlace(dst, x []float32) {
+	if useDotF32AVX && len(dst) >= 8 {
+		addInPlaceAVX(dst, x)
+		return
+	}
 	var i int
 	n := len(dst)
 	for ; i+7 < n; i += 8 {
@@ -689,137 +754,47 @@ func AddInPlace(dst, x []float32) {
 }
 
 func AddRMSNorm(out, dst, add, weight []float32, eps float32) {
-	var s0, s1, s2, s3, s4, s5, s6, s7 float32
-	i := 0
 	n := len(dst)
-	for ; i+7 < n; i += 8 {
-		v0 := dst[i] + add[i]
-		v1 := dst[i+1] + add[i+1]
-		v2 := dst[i+2] + add[i+2]
-		v3 := dst[i+3] + add[i+3]
-		v4 := dst[i+4] + add[i+4]
-		v5 := dst[i+5] + add[i+5]
-		v6 := dst[i+6] + add[i+6]
-		v7 := dst[i+7] + add[i+7]
-		dst[i] = v0
-		dst[i+1] = v1
-		dst[i+2] = v2
-		dst[i+3] = v3
-		dst[i+4] = v4
-		dst[i+5] = v5
-		dst[i+6] = v6
-		dst[i+7] = v7
-		s0 += v0 * v0
-		s1 += v1 * v1
-		s2 += v2 * v2
-		s3 += v3 * v3
-		s4 += v4 * v4
-		s5 += v5 * v5
-		s6 += v6 * v6
-		s7 += v7 * v7
-	}
-	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
-	for ; i < n; i++ {
-		v := dst[i] + add[i]
-		dst[i] = v
-		ss += v * v
+	var ss float32
+	if useDotF32AVX && n >= 8 {
+		ss = addInPlaceSumSquaresAVX(dst, add)
+	} else {
+		ss = addInPlaceSumSquaresScalar(dst, add)
 	}
 	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
-	i = 0
-	for ; i+7 < n; i += 8 {
-		out[i] = dst[i] * scale * weight[i]
-		out[i+1] = dst[i+1] * scale * weight[i+1]
-		out[i+2] = dst[i+2] * scale * weight[i+2]
-		out[i+3] = dst[i+3] * scale * weight[i+3]
-		out[i+4] = dst[i+4] * scale * weight[i+4]
-		out[i+5] = dst[i+5] * scale * weight[i+5]
-		out[i+6] = dst[i+6] * scale * weight[i+6]
-		out[i+7] = dst[i+7] * scale * weight[i+7]
+	if useDotF32AVX && n >= 8 {
+		mulScaleAVX(out, dst, weight, scale)
+		return
 	}
-	for ; i < n; i++ {
+	for i := 0; i < n; i++ {
 		out[i] = dst[i] * scale * weight[i]
 	}
 }
 
 func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
-	var s0, s1, s2, s3, s4, s5, s6, s7 float32
-	i := 0
 	n := len(dst)
-	for ; i+7 < n; i += 8 {
-		v0 := dst[i] + add[i]
-		v1 := dst[i+1] + add[i+1]
-		v2 := dst[i+2] + add[i+2]
-		v3 := dst[i+3] + add[i+3]
-		v4 := dst[i+4] + add[i+4]
-		v5 := dst[i+5] + add[i+5]
-		v6 := dst[i+6] + add[i+6]
-		v7 := dst[i+7] + add[i+7]
-		dst[i] = v0
-		dst[i+1] = v1
-		dst[i+2] = v2
-		dst[i+3] = v3
-		dst[i+4] = v4
-		dst[i+5] = v5
-		dst[i+6] = v6
-		dst[i+7] = v7
-		s0 += v0
-		s1 += v1
-		s2 += v2
-		s3 += v3
-		s4 += v4
-		s5 += v5
-		s6 += v6
-		s7 += v7
-	}
-	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
-	for ; i < n; i++ {
-		v := dst[i] + add[i]
-		dst[i] = v
-		sum += v
+	var sum float32
+	if useDotF32AVX && n >= 8 {
+		sum = addInPlaceSumAVX(dst, add)
+	} else {
+		sum = addInPlaceSumScalar(dst, add)
 	}
 	mean := sum / float32(n)
-	s0, s1, s2, s3, s4, s5, s6, s7 = 0, 0, 0, 0, 0, 0, 0, 0
-	i = 0
-	for ; i+7 < n; i += 8 {
-		d0 := dst[i] - mean
-		d1 := dst[i+1] - mean
-		d2 := dst[i+2] - mean
-		d3 := dst[i+3] - mean
-		d4 := dst[i+4] - mean
-		d5 := dst[i+5] - mean
-		d6 := dst[i+6] - mean
-		d7 := dst[i+7] - mean
-		s0 += d0 * d0
-		s1 += d1 * d1
-		s2 += d2 * d2
-		s3 += d3 * d3
-		s4 += d4 * d4
-		s5 += d5 * d5
-		s6 += d6 * d6
-		s7 += d7 * d7
-	}
-	variance := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
-	for ; i < n; i++ {
-		d := dst[i] - mean
-		variance += d * d
+	var variance float32
+	if useDotF32AVX && n >= 8 {
+		variance = sumSquaresCenteredAVX(dst, mean)
+	} else {
+		variance = sumSquaresCenteredScalar(dst, mean)
 	}
 	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
-	i = 0
-	for ; i+7 < n; i += 8 {
-		out[i] = (dst[i]-mean)*scale*weight[i] + bias[i]
-		out[i+1] = (dst[i+1]-mean)*scale*weight[i+1] + bias[i+1]
-		out[i+2] = (dst[i+2]-mean)*scale*weight[i+2] + bias[i+2]
-		out[i+3] = (dst[i+3]-mean)*scale*weight[i+3] + bias[i+3]
-		out[i+4] = (dst[i+4]-mean)*scale*weight[i+4] + bias[i+4]
-		out[i+5] = (dst[i+5]-mean)*scale*weight[i+5] + bias[i+5]
-		out[i+6] = (dst[i+6]-mean)*scale*weight[i+6] + bias[i+6]
-		out[i+7] = (dst[i+7]-mean)*scale*weight[i+7] + bias[i+7]
+	if useDotF32AVX && n >= 8 {
+		affineNormAVX(out, dst, weight, bias, mean, scale)
+		return
 	}
-	for ; i < n; i++ {
+	for i := 0; i < n; i++ {
 		out[i] = (dst[i]-mean)*scale*weight[i] + bias[i]
 	}
 }
-
 func AddThenLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 	AddLayerNorm(out, dst, add, weight, bias, eps)
 }
@@ -867,145 +842,172 @@ func parallelForNormRows(rows int, fn func(start, end int)) {
 }
 
 func RMSNorm(out, x, weight []float32, eps float32) {
+	n := len(x)
+	var ss float32
+	if useDotF32AVX && n >= 8 {
+		ss = sumSquaresF32AVX(x)
+	} else {
+		ss = sumSquaresScalar(x)
+	}
+	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
+	if useDotF32AVX && n >= 8 {
+		mulScaleAVX(out, x, weight, scale)
+		return
+	}
+	for i := 0; i < n; i++ {
+		out[i] = x[i] * scale * weight[i]
+	}
+}
+
+func sumSquaresScalar(x []float32) float32 {
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
 	n := len(x)
 	for ; i+7 < n; i += 8 {
-		x0, x1, x2, x3 := x[i], x[i+1], x[i+2], x[i+3]
-		x4, x5, x6, x7 := x[i+4], x[i+5], x[i+6], x[i+7]
-		s0 += x0 * x0
-		s1 += x1 * x1
-		s2 += x2 * x2
-		s3 += x3 * x3
-		s4 += x4 * x4
-		s5 += x5 * x5
-		s6 += x6 * x6
-		s7 += x7 * x7
+		s0 += x[i] * x[i]
+		s1 += x[i+1] * x[i+1]
+		s2 += x[i+2] * x[i+2]
+		s3 += x[i+3] * x[i+3]
+		s4 += x[i+4] * x[i+4]
+		s5 += x[i+5] * x[i+5]
+		s6 += x[i+6] * x[i+6]
+		s7 += x[i+7] * x[i+7]
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < n; i++ {
-		v := x[i]
-		ss += v * v
+		ss += x[i] * x[i]
 	}
-	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
-	i = 0
-	for ; i+7 < n; i += 8 {
-		out[i] = x[i] * scale * weight[i]
-		out[i+1] = x[i+1] * scale * weight[i+1]
-		out[i+2] = x[i+2] * scale * weight[i+2]
-		out[i+3] = x[i+3] * scale * weight[i+3]
-		out[i+4] = x[i+4] * scale * weight[i+4]
-		out[i+5] = x[i+5] * scale * weight[i+5]
-		out[i+6] = x[i+6] * scale * weight[i+6]
-		out[i+7] = x[i+7] * scale * weight[i+7]
-	}
-	for ; i < n; i++ {
-		out[i] = x[i] * scale * weight[i]
-	}
+	return ss
 }
 
 func LayerNorm(out, x, weight, bias []float32, eps float32) {
-	var s0, s1, s2, s3, s4, s5, s6, s7 float32
-	i := 0
 	n := len(x)
-	for ; i+7 < n; i += 8 {
-		s0 += x[i]
-		s1 += x[i+1]
-		s2 += x[i+2]
-		s3 += x[i+3]
-		s4 += x[i+4]
-		s5 += x[i+5]
-		s6 += x[i+6]
-		s7 += x[i+7]
-	}
-	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
-	for ; i < n; i++ {
-		sum += x[i]
+	var sum float32
+	if useDotF32AVX && n >= 8 {
+		sum = sumF32AVX(x)
+	} else {
+		sum = sumF32Scalar(x)
 	}
 	mean := sum / float32(n)
-	s0, s1, s2, s3, s4, s5, s6, s7 = 0, 0, 0, 0, 0, 0, 0, 0
-	i = 0
-	for ; i+7 < n; i += 8 {
-		d0 := x[i] - mean
-		d1 := x[i+1] - mean
-		d2 := x[i+2] - mean
-		d3 := x[i+3] - mean
-		d4 := x[i+4] - mean
-		d5 := x[i+5] - mean
-		d6 := x[i+6] - mean
-		d7 := x[i+7] - mean
-		s0 += d0 * d0
-		s1 += d1 * d1
-		s2 += d2 * d2
-		s3 += d3 * d3
-		s4 += d4 * d4
-		s5 += d5 * d5
-		s6 += d6 * d6
-		s7 += d7 * d7
-	}
-	variance := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
-	for ; i < n; i++ {
-		d := x[i] - mean
-		variance += d * d
+	var variance float32
+	if useDotF32AVX && n >= 8 {
+		variance = sumSquaresCenteredAVX(x, mean)
+	} else {
+		variance = sumSquaresCenteredScalar(x, mean)
 	}
 	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
-	i = 0
-	for ; i+7 < n; i += 8 {
-		out[i] = (x[i]-mean)*scale*weight[i] + bias[i]
-		out[i+1] = (x[i+1]-mean)*scale*weight[i+1] + bias[i+1]
-		out[i+2] = (x[i+2]-mean)*scale*weight[i+2] + bias[i+2]
-		out[i+3] = (x[i+3]-mean)*scale*weight[i+3] + bias[i+3]
-		out[i+4] = (x[i+4]-mean)*scale*weight[i+4] + bias[i+4]
-		out[i+5] = (x[i+5]-mean)*scale*weight[i+5] + bias[i+5]
-		out[i+6] = (x[i+6]-mean)*scale*weight[i+6] + bias[i+6]
-		out[i+7] = (x[i+7]-mean)*scale*weight[i+7] + bias[i+7]
+	if useDotF32AVX && n >= 8 {
+		affineNormAVX(out, x, weight, bias, mean, scale)
+		return
 	}
-	for ; i < n; i++ {
+	for i := 0; i < n; i++ {
 		out[i] = (x[i]-mean)*scale*weight[i] + bias[i]
 	}
 }
-
 func SiLU(x float32) float32 {
-	return x / (1 + float32(math.Exp(float64(-x))))
+	return x / (1 + fastExpF32(-x))
+}
+
+// fastExpF32 computes exp(x) using range reduction to 2^f polynomial.
+// Uses the same 5th-degree polynomial as the AVX2 expF32VecAVX kernel,
+// ensuring bit-exact consistency between scalar and vectorized paths.
+func fastExpF32(x float32) float32 {
+	if x > 88.0 {
+		return float32(math.MaxFloat32)
+	}
+	if x < -88.0 {
+		return 0
+	}
+	// exp(x) = 2^(x * log2(e))
+	const log2e = float32(1.4426950408889634)
+	t := x * log2e
+	n := int32(math.RoundToEven(float64(t)))
+	f := t - float32(n)
+	// 2^f polynomial (Estrin scheme, degree 5)
+	// poly = c1 + c2*f + c3*f^2 + c4*f^3 + c5*f^4
+	//      = A + f^2 * (B + f^2 * c5)
+	// where A = c1 + c2*f, B = c3 + c4*f
+	const c1 = float32(0.6931471824645996)
+	const c2 = float32(0.24022650718688965)
+	const c3 = float32(0.05550410971045494)
+	const c4 = float32(0.009618128649890423)
+	const c5 = float32(0.0013352063251659274)
+	f2 := f * f
+	a := float32(1.0) + c1*f
+	b := c2 + c3*f
+	c := c4 + c5*f
+	poly := a + f2*(b+c*f2)
+	// Scale by 2^n
+	bits := math.Float32bits(poly) + uint32(n)<<23
+	return *(*float32)(unsafe.Pointer(&bits))
+}
+
+// fastSiLU approximates x*sigmoid(x) using fastExpF32.
+// For x >= 0: silu = x / (1 + exp(-x))
+// For x < 0: silu = x * exp(x) / (1 + exp(x))
+func fastSiLU(x float32) float32 {
+	if x >= 0 {
+		return x / (1 + fastExpF32(-x))
+	}
+	ex := fastExpF32(x)
+	return x * ex / (1 + ex)
 }
 
 func SiLUMulInPlace(gate, up []float32) {
-	i := 0
-	n := len(gate)
-	for ; i+7 < n; i += 8 {
-		gate[i] = SiLU(gate[i]) * up[i]
-		gate[i+1] = SiLU(gate[i+1]) * up[i+1]
-		gate[i+2] = SiLU(gate[i+2]) * up[i+2]
-		gate[i+3] = SiLU(gate[i+3]) * up[i+3]
-		gate[i+4] = SiLU(gate[i+4]) * up[i+4]
-		gate[i+5] = SiLU(gate[i+5]) * up[i+5]
-		gate[i+6] = SiLU(gate[i+6]) * up[i+6]
-		gate[i+7] = SiLU(gate[i+7]) * up[i+7]
+	if useDotF32AVX && len(gate) >= 8 {
+		siluMulInPlaceAVX(gate, up)
+		return
 	}
-	for ; i < n; i++ {
+	n := min(len(gate), len(up))
+	for i := 0; i < n; i++ {
 		gate[i] = SiLU(gate[i]) * up[i]
 	}
 }
 
 func GELUTanh(x float32) float32 {
-	const c = 0.7978845608028654
-	return 0.5 * x * (1 + float32(math.Tanh(c*float64(x)*(1+0.044715*float64(x*x)))))
+	// Fused exp_input: t = 2*c*log2e * x + 2*c*k*log2e * x^3
+	// = gelu2cLog2e * x + gelu2ckLog2e * x^3
+	const gelu2cLog2e = float32(2.0 * 0.7978845608028654 * 1.4426950408889634)
+	const gelu2ckLog2e = float32(2.0 * 0.7978845608028654 * 0.044715 * 1.4426950408889634)
+	x3 := x * (x * x)
+	t := gelu2cLog2e*x + gelu2ckLog2e*x3
+	e2x := fastExpF32T(t)
+	tanh := (e2x - 1) / (e2x + 1)
+	return 0.5 * x * (1 + tanh)
+}
+
+// fastExpF32T computes exp(x) where x is already scaled by log2(e).
+// i.e., x = original_input * log2e. This skips the log2e multiply.
+func fastExpF32T(x float32) float32 {
+	if x > 88.0*1.4426950 {
+		return float32(math.MaxFloat32)
+	}
+	if x < -88.0*1.4426950 {
+		return 0
+	}
+	n := int32(math.RoundToEven(float64(x)))
+	f := x - float32(n)
+	const c1 = float32(0.6931471824645996)
+	const c2 = float32(0.24022650718688965)
+	const c3 = float32(0.05550410971045494)
+	const c4 = float32(0.009618128649890423)
+	const c5 = float32(0.0013352063251659274)
+	f2 := f * f
+	a := float32(1.0) + c1*f
+	b := c2 + c3*f
+	c := c4 + c5*f
+	poly := a + f2*(b+c*f2)
+	bits := math.Float32bits(poly) + uint32(n)<<23
+	return *(*float32)(unsafe.Pointer(&bits))
 }
 
 func GELUTanhInPlace(x []float32) {
-	i := 0
-	n := len(x)
-	for ; i+7 < n; i += 8 {
-		x[i] = GELUTanh(x[i])
-		x[i+1] = GELUTanh(x[i+1])
-		x[i+2] = GELUTanh(x[i+2])
-		x[i+3] = GELUTanh(x[i+3])
-		x[i+4] = GELUTanh(x[i+4])
-		x[i+5] = GELUTanh(x[i+5])
-		x[i+6] = GELUTanh(x[i+6])
-		x[i+7] = GELUTanh(x[i+7])
+	if useDotF32AVX && len(x) >= 8 {
+		geluTanhAVX(x)
+		return
 	}
-	for ; i < n; i++ {
+	n := len(x)
+	for i := 0; i < n; i++ {
 		x[i] = GELUTanh(x[i])
 	}
 }
@@ -1147,138 +1149,49 @@ func SoftmaxInPlace(x []float32) {
 		x[7] = e7 * inv
 		return
 	}
-	m := float32(math.Inf(-1))
-	i := 0
 	n := len(x)
-	var m0, m1, m2, m3, m4, m5, m6, m7 = m, m, m, m, m, m, m, m
-	for ; i+15 < n; i += 16 {
-		m0 = max32(m0, x[i])
-		m1 = max32(m1, x[i+1])
-		m2 = max32(m2, x[i+2])
-		m3 = max32(m3, x[i+3])
-		m4 = max32(m4, x[i+4])
-		m5 = max32(m5, x[i+5])
-		m6 = max32(m6, x[i+6])
-		m7 = max32(m7, x[i+7])
-		m0 = max32(m0, x[i+8])
-		m1 = max32(m1, x[i+9])
-		m2 = max32(m2, x[i+10])
-		m3 = max32(m3, x[i+11])
-		m4 = max32(m4, x[i+12])
-		m5 = max32(m5, x[i+13])
-		m6 = max32(m6, x[i+14])
-		m7 = max32(m7, x[i+15])
+	m := float32(math.Inf(-1))
+	if useDotF32AVX && n >= 8 {
+		m = maxF32AVX(x)
+	} else {
+		var m0, m1, m2, m3, m4, m5, m6, m7 = m, m, m, m, m, m, m, m
+		i := 0
+		for ; i+15 < n; i += 16 {
+			m0 = max32(m0, x[i])
+			m1 = max32(m1, x[i+1])
+			m2 = max32(m2, x[i+2])
+			m3 = max32(m3, x[i+3])
+			m4 = max32(m4, x[i+4])
+			m5 = max32(m5, x[i+5])
+			m6 = max32(m6, x[i+6])
+			m7 = max32(m7, x[i+7])
+			m0 = max32(m0, x[i+8])
+			m1 = max32(m1, x[i+9])
+			m2 = max32(m2, x[i+10])
+			m3 = max32(m3, x[i+11])
+			m4 = max32(m4, x[i+12])
+			m5 = max32(m5, x[i+13])
+			m6 = max32(m6, x[i+14])
+			m7 = max32(m7, x[i+15])
+		}
+		for ; i+7 < n; i += 8 {
+			m0 = max32(m0, x[i])
+			m1 = max32(m1, x[i+1])
+			m2 = max32(m2, x[i+2])
+			m3 = max32(m3, x[i+3])
+			m4 = max32(m4, x[i+4])
+			m5 = max32(m5, x[i+5])
+			m6 = max32(m6, x[i+6])
+			m7 = max32(m7, x[i+7])
+		}
+		m = max32(max32(max32(m0, m1), max32(m2, m3)), max32(max32(m4, m5), max32(m6, m7)))
+		for ; i < n; i++ {
+			m = max32(m, x[i])
+		}
 	}
-	for ; i+7 < n; i += 8 {
-		m0 = max32(m0, x[i])
-		m1 = max32(m1, x[i+1])
-		m2 = max32(m2, x[i+2])
-		m3 = max32(m3, x[i+3])
-		m4 = max32(m4, x[i+4])
-		m5 = max32(m5, x[i+5])
-		m6 = max32(m6, x[i+6])
-		m7 = max32(m7, x[i+7])
-	}
-	m = max32(max32(max32(m0, m1), max32(m2, m3)), max32(max32(m4, m5), max32(m6, m7)))
-	for ; i < n; i++ {
-		m = max32(m, x[i])
-	}
-	var sum float32
-	i = 0
-	for ; i+15 < n; i += 16 {
-		e0 := float32(math.Exp(float64(x[i] - m)))
-		e1 := float32(math.Exp(float64(x[i+1] - m)))
-		e2 := float32(math.Exp(float64(x[i+2] - m)))
-		e3 := float32(math.Exp(float64(x[i+3] - m)))
-		e4 := float32(math.Exp(float64(x[i+4] - m)))
-		e5 := float32(math.Exp(float64(x[i+5] - m)))
-		e6 := float32(math.Exp(float64(x[i+6] - m)))
-		e7 := float32(math.Exp(float64(x[i+7] - m)))
-		e8 := float32(math.Exp(float64(x[i+8] - m)))
-		e9 := float32(math.Exp(float64(x[i+9] - m)))
-		e10 := float32(math.Exp(float64(x[i+10] - m)))
-		e11 := float32(math.Exp(float64(x[i+11] - m)))
-		e12 := float32(math.Exp(float64(x[i+12] - m)))
-		e13 := float32(math.Exp(float64(x[i+13] - m)))
-		e14 := float32(math.Exp(float64(x[i+14] - m)))
-		e15 := float32(math.Exp(float64(x[i+15] - m)))
-		x[i] = e0
-		x[i+1] = e1
-		x[i+2] = e2
-		x[i+3] = e3
-		x[i+4] = e4
-		x[i+5] = e5
-		x[i+6] = e6
-		x[i+7] = e7
-		x[i+8] = e8
-		x[i+9] = e9
-		x[i+10] = e10
-		x[i+11] = e11
-		x[i+12] = e12
-		x[i+13] = e13
-		x[i+14] = e14
-		x[i+15] = e15
-		sum += (e0 + e1) + (e2 + e3) + (e4 + e5) + (e6 + e7) +
-			(e8 + e9) + (e10 + e11) + (e12 + e13) + (e14 + e15)
-	}
-	for ; i+7 < n; i += 8 {
-		e0 := float32(math.Exp(float64(x[i] - m)))
-		e1 := float32(math.Exp(float64(x[i+1] - m)))
-		e2 := float32(math.Exp(float64(x[i+2] - m)))
-		e3 := float32(math.Exp(float64(x[i+3] - m)))
-		e4 := float32(math.Exp(float64(x[i+4] - m)))
-		e5 := float32(math.Exp(float64(x[i+5] - m)))
-		e6 := float32(math.Exp(float64(x[i+6] - m)))
-		e7 := float32(math.Exp(float64(x[i+7] - m)))
-		x[i] = e0
-		x[i+1] = e1
-		x[i+2] = e2
-		x[i+3] = e3
-		x[i+4] = e4
-		x[i+5] = e5
-		x[i+6] = e6
-		x[i+7] = e7
-		sum += (e0 + e1) + (e2 + e3) + (e4 + e5) + (e6 + e7)
-	}
-	for ; i < n; i++ {
-		v := x[i]
-		e := float32(math.Exp(float64(v - m)))
-		x[i] = e
-		sum += e
-	}
+	sum := ExpVec(x, m)
 	inv := 1 / sum
-	i = 0
-	for ; i+15 < n; i += 16 {
-		x[i] *= inv
-		x[i+1] *= inv
-		x[i+2] *= inv
-		x[i+3] *= inv
-		x[i+4] *= inv
-		x[i+5] *= inv
-		x[i+6] *= inv
-		x[i+7] *= inv
-		x[i+8] *= inv
-		x[i+9] *= inv
-		x[i+10] *= inv
-		x[i+11] *= inv
-		x[i+12] *= inv
-		x[i+13] *= inv
-		x[i+14] *= inv
-		x[i+15] *= inv
-	}
-	for ; i+7 < n; i += 8 {
-		x[i] *= inv
-		x[i+1] *= inv
-		x[i+2] *= inv
-		x[i+3] *= inv
-		x[i+4] *= inv
-		x[i+5] *= inv
-		x[i+6] *= inv
-		x[i+7] *= inv
-	}
-	for ; i < n; i++ {
-		x[i] *= inv
-	}
+	ScaleInPlace(x, inv)
 }
 
 func max32(a, b float32) float32 {
@@ -1289,13 +1202,158 @@ func max32(a, b float32) float32 {
 }
 
 func Argmax(x []float32) int {
+	n := len(x)
+	if n == 0 {
+		return 0
+	}
+	if useDotF32AVX && n >= 8 {
+		// Use AVX to find the max value, then scalar scan for first index
+		bestVal := maxF32AVX(x)
+		for i := 0; i < n; i++ {
+			if x[i] == bestVal {
+				return i
+			}
+		}
+		return 0
+	}
 	best := 0
 	bestVal := x[0]
-	for i := 1; i < len(x); i++ {
+	for i := 1; i < n; i++ {
 		if x[i] > bestVal {
 			best = i
 			bestVal = x[i]
 		}
 	}
 	return best
+}
+
+
+func addInPlaceSumSquaresScalar(dst, add []float32) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := 0
+	n := len(dst)
+	for ; i+7 < n; i += 8 {
+		v0 := dst[i] + add[i]
+		v1 := dst[i+1] + add[i+1]
+		v2 := dst[i+2] + add[i+2]
+		v3 := dst[i+3] + add[i+3]
+		v4 := dst[i+4] + add[i+4]
+		v5 := dst[i+5] + add[i+5]
+		v6 := dst[i+6] + add[i+6]
+		v7 := dst[i+7] + add[i+7]
+		dst[i] = v0
+		dst[i+1] = v1
+		dst[i+2] = v2
+		dst[i+3] = v3
+		dst[i+4] = v4
+		dst[i+5] = v5
+		dst[i+6] = v6
+		dst[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < n; i++ {
+		v := dst[i] + add[i]
+		dst[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func sumF32Scalar(x []float32) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := 0
+	n := len(x)
+	for ; i+7 < n; i += 8 {
+		s0 += x[i]
+		s1 += x[i+1]
+		s2 += x[i+2]
+		s3 += x[i+3]
+		s4 += x[i+4]
+		s5 += x[i+5]
+		s6 += x[i+6]
+		s7 += x[i+7]
+	}
+	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < n; i++ {
+		sum += x[i]
+	}
+	return sum
+}
+
+func sumSquaresCenteredScalar(x []float32, mean float32) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := 0
+	n := len(x)
+	for ; i+7 < n; i += 8 {
+		d0 := x[i] - mean
+		d1 := x[i+1] - mean
+		d2 := x[i+2] - mean
+		d3 := x[i+3] - mean
+		d4 := x[i+4] - mean
+		d5 := x[i+5] - mean
+		d6 := x[i+6] - mean
+		d7 := x[i+7] - mean
+		s0 += d0 * d0
+		s1 += d1 * d1
+		s2 += d2 * d2
+		s3 += d3 * d3
+		s4 += d4 * d4
+		s5 += d5 * d5
+		s6 += d6 * d6
+		s7 += d7 * d7
+	}
+	v := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < n; i++ {
+		d := x[i] - mean
+		v += d * d
+	}
+	return v
+}
+
+
+func addInPlaceSumScalar(dst, add []float32) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := 0
+	n := len(dst)
+	for ; i+7 < n; i += 8 {
+		v0 := dst[i] + add[i]
+		v1 := dst[i+1] + add[i+1]
+		v2 := dst[i+2] + add[i+2]
+		v3 := dst[i+3] + add[i+3]
+		v4 := dst[i+4] + add[i+4]
+		v5 := dst[i+5] + add[i+5]
+		v6 := dst[i+6] + add[i+6]
+		v7 := dst[i+7] + add[i+7]
+		dst[i] = v0
+		dst[i+1] = v1
+		dst[i+2] = v2
+		dst[i+3] = v3
+		dst[i+4] = v4
+		dst[i+5] = v5
+		dst[i+6] = v6
+		dst[i+7] = v7
+		s0 += v0
+		s1 += v1
+		s2 += v2
+		s3 += v3
+		s4 += v4
+		s5 += v5
+		s6 += v6
+		s7 += v7
+	}
+	sum := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < n; i++ {
+		v := dst[i] + add[i]
+		dst[i] = v
+		sum += v
+	}
+	return sum
 }
