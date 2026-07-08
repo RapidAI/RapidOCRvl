@@ -4854,3 +4854,104 @@ GLOBL q6ClampNeg31<>(SB), RODATA, $4
 
 DATA q6Add32<>+0(SB)/4, $0x00000020
 GLOBL q6Add32<>(SB), RODATA, $4
+// expF32VecFMA: FMA-accelerated exp for softmax. Uses the same polynomial
+// as expF32VecAVX but fuses mul+add pairs via VFMADD231PS. Since constants
+// are pre-loaded to registers, FMA avoids the memory operand penalty.
+TEXT ·expF32VecFMA(SB), NOSPLIT, $0-40
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	VBROADCASTSS m+24(FP), Y15
+	VBROADCASTSS expLog2e<>(SB), Y0
+	VBROADCASTSS expC1<>(SB), Y1
+	VBROADCASTSS expC2<>(SB), Y2
+	VBROADCASTSS expC3<>(SB), Y3
+	VBROADCASTSS expC4<>(SB), Y4
+	VBROADCASTSS expC5<>(SB), Y5
+	VBROADCASTSS expOne<>(SB), Y7
+	VBROADCASTSS expInt127<>(SB), Y6
+	VXORPS Y8, Y8, Y8
+	CMPQ CX, $8
+	JB expFmaTail
+expFmaLoop:
+	CMPQ CX, $8
+	JB expFmaTail
+	VMOVUPS (SI), Y10
+	VSUBPS Y15, Y10, Y10        // x - m
+	VMULPS Y0, Y10, Y11         // (x-m) * log2e
+	VROUNDPS $8, Y11, Y12       // n = round
+	VSUBPS Y12, Y11, Y13        // f = t - n
+	VMULPS Y13, Y13, Y10        // f^2
+	// A = 1 + c1*f  (Y14 = Y7 + Y13 * Y1)
+	VORPS Y7, Y7, Y14
+	VFMADD231PS Y13, Y1, Y14
+	// B = c2 + c3*f (Y11 = Y2 + Y13 * Y3)
+	VORPS Y2, Y2, Y11
+	VFMADD231PS Y13, Y3, Y11
+	// C = c4 + c5*f (Y9 = Y4 + Y13 * Y5)
+	VORPS Y4, Y4, Y9
+	VFMADD231PS Y13, Y5, Y9
+	// B2 = B + C*f^2 (Y11 = Y11 + Y10 * Y9)
+	VFMADD231PS Y10, Y9, Y11
+	// poly = A + f^2*B2 (Y10 = Y14 + Y10 * Y11)
+	VFMADD231PS Y10, Y11, Y14
+	// scale by 2^n
+	VCVTPS2DQ Y12, Y12
+	VPADDD Y6, Y12, Y12
+	VPSLLD $23, Y12, Y12
+	VMULPS Y12, Y14, Y10
+	VMOVUPS Y10, (SI)
+	VADDPS Y10, Y8, Y8
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP expFmaLoop
+expFmaDone:
+	VEXTRACTF128 $1, Y8, X2
+	VADDPS X8, X2, X2
+	VHADDPS X2, X2, X2
+	VHADDPS X2, X2, X2
+	VZEROUPPER
+	MOVSS X2, ret+32(FP)
+	RET
+expFmaTail:
+	VEXTRACTF128 $1, Y8, X2
+	VADDPS X8, X2, X2
+	VHADDPS X2, X2, X2
+	VHADDPS X2, X2, X2
+	MOVSS X2, X8
+	VZEROUPPER
+expFmaTailLoop:
+	CMPQ CX, $0
+	JE expFmaTailDone
+	MOVSS (SI), X0
+	SUBSS X15, X0
+	MULSS expLog2e<>(SB), X0
+	ROUNDSS $8, X0, X1
+	SUBSS X1, X0
+	MOVSS X0, X3
+	MULSS X3, X3
+	MOVSS X3, X5
+	MOVSS X0, X6
+	MULSS expC1<>(SB), X6
+	ADDSS expOne<>(SB), X6
+	MOVSS X0, X7
+	MULSS expC3<>(SB), X7
+	ADDSS expC2<>(SB), X7
+	MULSS expC5<>(SB), X0
+	ADDSS expC4<>(SB), X0
+	MULSS X3, X0
+	ADDSS X7, X0
+	MULSS X3, X0
+	ADDSS X6, X0
+	VCVTPS2DQ X1, X1
+	LEAQ expInt127<>(SB), R8
+	VPADDD (R8), X1, X1
+	VPSLLD $23, X1, X1
+	MULSS X1, X0
+	MOVSS X0, (SI)
+	ADDSS X0, X8
+	ADDQ $4, SI
+	DECQ CX
+	JMP expFmaTailLoop
+expFmaTailDone:
+	MOVSS X8, ret+32(FP)
+	RET

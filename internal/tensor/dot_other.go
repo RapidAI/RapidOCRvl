@@ -330,3 +330,6 @@ func quantizeQ4RowAVX2(w []float32, data []byte, inv float32) {
 
 
 func quantizeQ6RowAVX2(w []float32, data []byte, inv float32) {}
+
+
+func expF32VecFMA(x []float32, m float32) float32 { return expF32VecAVX(x, m) }
