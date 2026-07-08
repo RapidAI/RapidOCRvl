@@ -1501,6 +1501,9 @@ func dotQ4PairScalar(a, b []byte, x []float32, cols int) (float32, float32) {
 }
 
 func dotQ4Triplet(a, b, c []byte, x []float32, cols int) (float32, float32, float32) {
+	if useDotFMA && useDotQ4AVX2 && cols >= 8 {
+		return dotQ4TripletFMA(a, b, c, x, cols)
+	}
 	if useDotQ4AVX2 && cols >= 8 {
 		return dotQ4TripletAVX2(a, b, c, x, cols)
 	}

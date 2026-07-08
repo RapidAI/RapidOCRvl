@@ -314,6 +314,7 @@ func dotQ8TripletFMA(a, b, c []int8, x []float32) (float32, float32, float32) { 
 
 func dotQ4FMA(a []byte, b []float32, cols int) float32 { return dotQ4Scalar(a, b, cols) }
 func dotQ4PairFMA(a, b []byte, x []float32, cols int) (float32, float32) { return dotQ4PairScalar(a, b, x, cols) }
+func dotQ4TripletFMA(a, b, c []byte, x []float32, cols int) (float32, float32, float32) { return dotQ4TripletScalar(a, b, c, x, cols) }
 
 func siluMulInPlaceFMA(gate, up []float32) { siluMulInPlaceAVX(gate, up) }
 func geluTanhFMA(x []float32) { geluTanhAVX(x) }
