@@ -1,5 +1,10 @@
 package tensor
 
+import (
+	"runtime"
+	"sync"
+)
+
 // TopKScore holds a token id and its matvec score, used for top-k sampling.
 type TopKScore struct {
 	ID    int
@@ -12,9 +17,18 @@ func DotPair(b0, b1, a []float32) (float32, float32) {
 	return dotF32Pair(b0, b1, a)
 }
 
+// DotQuad computes four dot products simultaneously: a.x, b.x, c.x, d.x.
+// This shares the x read across all four dot products, reducing memory traffic.
+func DotQuad(b0, b1, b2, b3, a []float32) (float32, float32, float32, float32) {
+	return dotF32Quad(b0, b1, b2, b3, a)
+}
+
 // MatVecArgmax computes the F32 matvec x . w^T and returns the row index
 // with the maximum score along with that score.
 func MatVecArgmax(x, w []float32, rows, cols int) (int, float32) {
+	if shouldParallel(rows*cols, rows) {
+		return matVecArgmaxParallel(x, w, rows, cols)
+	}
 	bestIdx := 0
 	bestVal := float32(0)
 	for r := 0; r < rows; r++ {
@@ -23,6 +37,72 @@ func MatVecArgmax(x, w []float32, rows, cols int) (int, float32) {
 		if r == 0 || v > bestVal {
 			bestVal = v
 			bestIdx = r
+		}
+	}
+	return bestIdx, bestVal
+}
+
+func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
+	type partial struct {
+		idx int
+		val float32
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > rows {
+		workers = rows
+	}
+	if workers <= 1 {
+		bestIdx := 0
+		bestVal := float32(0)
+		for r := 0; r < rows; r++ {
+			base := r * cols
+			v := dotF32(w[base:base+cols], x)
+			if r == 0 || v > bestVal {
+				bestVal = v
+				bestIdx = r
+			}
+		}
+		return bestIdx, bestVal
+	}
+	chunk := (rows + workers - 1) / workers
+	results := make([]partial, workers)
+	var wg sync.WaitGroup
+	for wi := 0; wi < workers; wi++ {
+		start := wi * chunk
+		end := start + chunk
+		if end > rows {
+			end = rows
+		}
+		if start >= end {
+			results[wi] = partial{0, 0}
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			bestIdx := start
+			bestVal := float32(0)
+			for r := start; r < end; r++ {
+				base := r * cols
+				v := dotF32(w[base:base+cols], x)
+				if r == start || v > bestVal {
+					bestVal = v
+					bestIdx = r
+				}
+			}
+			results[slot] = partial{bestIdx, bestVal}
+		}(wi, start, end)
+	}
+	wg.Wait()
+	bestIdx := results[0].idx
+	bestVal := results[0].val
+	for i := 1; i < workers; i++ {
+		if results[i].val > bestVal {
+			bestVal = results[i].val
+			bestIdx = results[i].idx
 		}
 	}
 	return bestIdx, bestVal
@@ -117,9 +197,4 @@ func topKSelectWithWork(scores, work []TopKScore, n, k int) []TopKScore {
 		}
 	}
 	return scores[:k]
-}
-// DotQuad computes four dot products simultaneously: a.x, b.x, c.x, d.x.
-// This shares the x read across all four dot products, reducing memory traffic.
-func DotQuad(b0, b1, b2, b3, a []float32) (float32, float32, float32, float32) {
-	return dotF32Quad(b0, b1, b2, b3, a)
 }
