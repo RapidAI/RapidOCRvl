@@ -8,9 +8,11 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -85,6 +87,7 @@ type Runtime struct {
 	kvPool                sync.Pool
 	visionScratchPool     sync.Pool
 	projectScratchPool    sync.Pool
+	projectRowsPool       sync.Pool
 	visionLoaded          bool
 	visionMu              sync.RWMutex
 	progress              func(done, total int, name string, typ string)
@@ -95,17 +98,207 @@ type Runtime struct {
 	weightStats           WeightStats
 	vulkanPlanMu          sync.RWMutex
 	vulkanPlanCache       vulkanPlanCache
+	vulkanPrewarmRunMu    sync.Mutex
+	vulkanPrewarmMu       sync.RWMutex
+	vulkanPrewarm         VulkanPrewarmStats
+	vulkanDisabledMu      sync.RWMutex
+	vulkanDisabledReasons map[vulkanOp]string
+	zeroBiasMu            sync.Mutex
+	zeroBiasBuf           []float32
+	zeroBiasSmall         [maxZeroBiasSmall]float32
+	vulkanDisabledOps     [2]atomic.Uint64
+	kvCacheEpoch          atomic.Uint64
+}
+
+type vulkanOp uint8
+
+const (
+	vulkanOpMatVecF32 vulkanOp = iota
+	vulkanOpMatVecArgmaxF32
+	vulkanOpMatVecQ8
+	vulkanOpMatVecQ6
+	vulkanOpMatVecQ4
+	vulkanOpFusedQKVF32
+	vulkanOpFusedQKVQ8
+	vulkanOpFusedQKVQ6
+	vulkanOpFusedQKVQ4
+	vulkanOpTextAttentionF32
+	vulkanOpTextAttentionOutF32
+	vulkanOpTextAttentionOutQ8
+	vulkanOpTextAttentionOutQ6
+	vulkanOpTextAttentionOutQ4
+	vulkanOpSwiGLUGateUpF32
+	vulkanOpSwiGLUGateUpQ8
+	vulkanOpSwiGLUGateUpQ6
+	vulkanOpSwiGLUGateUpQ4
+	vulkanOpSwiGLUDownF32
+	vulkanOpSwiGLUDownQ8
+	vulkanOpSwiGLUDownQ6
+	vulkanOpSwiGLUDownQ4
+	vulkanOpVisionMatRowsBiasF32
+	vulkanOpVisionMatRowsBiasAddRowsF32
+	vulkanOpVisionMatRowsBias3F32
+	vulkanOpVisionAttentionF32
+	vulkanOpVisionAttentionOutF32
+	vulkanOpVisionMatRowsGELU2F32
+	vulkanOpVisionProjectImageF32
+	vulkanOpVisionRoPEPairF32
+	vulkanOpVisionRoPEAttentionOutF32
+	vulkanOpVisionQKVRoPEAttentionOutF32
+	vulkanOpRMSNormF32
+	vulkanOpAddRMSNormF32
+	vulkanOpAddRMSNormOutOnlyF32
+	vulkanOpMRoPEF32
+	vulkanOpMRoPEPairF32
+	vulkanOpFusedQKVMRoPEF32
+	vulkanOpFusedQKVMRoPEQ8
+	vulkanOpFusedQKVMRoPEQ6
+	vulkanOpFusedQKVMRoPEQ4
+	vulkanOpTextAttentionOutAddRMSNormF32
+	vulkanOpTextAttentionOutAddRMSNormQ8
+	vulkanOpTextAttentionOutAddRMSNormQ6
+	vulkanOpTextAttentionOutAddRMSNormQ4
+	vulkanOpSwiGLUDownAddRMSNormF32
+	vulkanOpSwiGLUDownAddRMSNormQ8
+	vulkanOpSwiGLUDownAddRMSNormQ6
+	vulkanOpSwiGLUDownAddRMSNormQ4
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyF32
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyQ8
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyQ6
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyQ4
+	vulkanOpMatVecAddRMSNormF32
+	vulkanOpMatVecAddRMSNormQ8
+	vulkanOpMatVecAddRMSNormQ6
+	vulkanOpMatVecAddRMSNormQ4
+	vulkanOpTextFirstTokenValueOutAddRMSNormF32
+	vulkanOpTextFirstTokenValueOutAddRMSNormQ8
+	vulkanOpTextFirstTokenValueOutAddRMSNormQ6
+	vulkanOpTextFirstTokenValueOutAddRMSNormQ4
+	vulkanOpFusedKVF32
+	vulkanOpFusedKVQ8
+	vulkanOpFusedKVQ6
+	vulkanOpFusedKVQ4
+	vulkanOpFusedKVMRoPEF32
+	vulkanOpFusedKVMRoPEQ8
+	vulkanOpFusedKVMRoPEQ6
+	vulkanOpFusedKVMRoPEQ4
+	vulkanOpVisionLayerNormRowsF32
+	vulkanOpVisionAddLayerNormRowsF32
+	vulkanOpVisionProjectImageFusedF32
+	vulkanOpVisionMatRowsGELU2AddLayerNormF32
+	vulkanOpMatVecTopKF32
+	vulkanOpMatVecArgmaxQ8
+	vulkanOpMatVecArgmaxQ6
+	vulkanOpMatVecArgmaxQ4
+	vulkanOpMatVecTopKQ8
+	vulkanOpMatVecTopKQ6
+	vulkanOpMatVecTopKQ4
+	vulkanOpChainedRMSNormMatVecF32
+	vulkanOpChainedMatVecAddRMSNormMatVecF32
+	vulkanOpChainedRMSNormQKVMRoPEF32
+	vulkanOpChainedRMSNormQKVMRoPEQ8
+)
+
+var vulkanOpNames = [...]string{
+	vulkanOpMatVecF32:                           "matvec_f32",
+	vulkanOpMatVecArgmaxF32:                     "matvec_argmax_f32",
+	vulkanOpMatVecQ8:                            "matvec_q8",
+	vulkanOpMatVecQ6:                            "matvec_q6",
+	vulkanOpMatVecQ4:                            "matvec_q4",
+	vulkanOpFusedQKVF32:                         "fused_qkv_f32",
+	vulkanOpFusedQKVQ8:                          "fused_qkv_q8",
+	vulkanOpFusedQKVQ6:                          "fused_qkv_q6",
+	vulkanOpFusedQKVQ4:                          "fused_qkv_q4",
+	vulkanOpTextAttentionF32:                    "text_attention_f32",
+	vulkanOpTextAttentionOutF32:                 "text_attention_out_f32",
+	vulkanOpTextAttentionOutQ8:                  "text_attention_out_q8",
+	vulkanOpTextAttentionOutQ6:                  "text_attention_out_q6",
+	vulkanOpTextAttentionOutQ4:                  "text_attention_out_q4",
+	vulkanOpSwiGLUGateUpF32:                     "swiglu_gate_up_f32",
+	vulkanOpSwiGLUGateUpQ8:                      "swiglu_gate_up_q8",
+	vulkanOpSwiGLUGateUpQ6:                      "swiglu_gate_up_q6",
+	vulkanOpSwiGLUGateUpQ4:                      "swiglu_gate_up_q4",
+	vulkanOpSwiGLUDownF32:                       "swiglu_down_f32",
+	vulkanOpSwiGLUDownQ8:                        "swiglu_down_q8",
+	vulkanOpSwiGLUDownQ6:                        "swiglu_down_q6",
+	vulkanOpSwiGLUDownQ4:                        "swiglu_down_q4",
+	vulkanOpVisionMatRowsBiasF32:                "vision_matrows_bias_f32",
+	vulkanOpVisionMatRowsBiasAddRowsF32:         "vision_matrows_bias_add_rows_f32",
+	vulkanOpVisionMatRowsBias3F32:               "vision_matrows_bias3_f32",
+	vulkanOpVisionAttentionF32:                  "vision_attention_f32",
+	vulkanOpVisionAttentionOutF32:               "vision_attention_out_f32",
+	vulkanOpVisionMatRowsGELU2F32:               "vision_matrows_gelu2_f32",
+	vulkanOpVisionProjectImageF32:               "vision_project_image_f32",
+	vulkanOpVisionRoPEPairF32:                   "vision_rope_pair_f32",
+	vulkanOpVisionRoPEAttentionOutF32:           "vision_rope_attention_out_f32",
+	vulkanOpVisionQKVRoPEAttentionOutF32:        "vision_qkv_rope_attention_out_f32",
+	vulkanOpRMSNormF32:                          "rmsnorm_f32",
+	vulkanOpAddRMSNormF32:                       "add_rmsnorm_f32",
+	vulkanOpAddRMSNormOutOnlyF32:                "add_rmsnorm_out_only_f32",
+	vulkanOpMRoPEF32:                            "mrope_f32",
+	vulkanOpMRoPEPairF32:                        "mrope_pair_f32",
+	vulkanOpFusedQKVMRoPEF32:                    "fused_qkv_mrope_f32",
+	vulkanOpFusedQKVMRoPEQ8:                     "fused_qkv_mrope_q8",
+	vulkanOpFusedQKVMRoPEQ6:                     "fused_qkv_mrope_q6",
+	vulkanOpFusedQKVMRoPEQ4:                     "fused_qkv_mrope_q4",
+	vulkanOpTextAttentionOutAddRMSNormF32:       "text_attention_out_add_rmsnorm_f32",
+	vulkanOpTextAttentionOutAddRMSNormQ8:        "text_attention_out_add_rmsnorm_q8",
+	vulkanOpTextAttentionOutAddRMSNormQ6:        "text_attention_out_add_rmsnorm_q6",
+	vulkanOpTextAttentionOutAddRMSNormQ4:        "text_attention_out_add_rmsnorm_q4",
+	vulkanOpSwiGLUDownAddRMSNormF32:             "swiglu_down_add_rmsnorm_f32",
+	vulkanOpSwiGLUDownAddRMSNormQ8:              "swiglu_down_add_rmsnorm_q8",
+	vulkanOpSwiGLUDownAddRMSNormQ6:              "swiglu_down_add_rmsnorm_q6",
+	vulkanOpSwiGLUDownAddRMSNormQ4:              "swiglu_down_add_rmsnorm_q4",
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyF32:      "swiglu_down_add_rmsnorm_out_only_f32",
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyQ8:       "swiglu_down_add_rmsnorm_out_only_q8",
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyQ6:       "swiglu_down_add_rmsnorm_out_only_q6",
+	vulkanOpSwiGLUDownAddRMSNormOutOnlyQ4:       "swiglu_down_add_rmsnorm_out_only_q4",
+	vulkanOpMatVecAddRMSNormF32:                 "matvec_add_rmsnorm_f32",
+	vulkanOpMatVecAddRMSNormQ8:                  "matvec_add_rmsnorm_q8",
+	vulkanOpMatVecAddRMSNormQ6:                  "matvec_add_rmsnorm_q6",
+	vulkanOpMatVecAddRMSNormQ4:                  "matvec_add_rmsnorm_q4",
+	vulkanOpTextFirstTokenValueOutAddRMSNormF32: "text_first_token_value_out_add_rmsnorm_f32",
+	vulkanOpTextFirstTokenValueOutAddRMSNormQ8:  "text_first_token_value_out_add_rmsnorm_q8",
+	vulkanOpTextFirstTokenValueOutAddRMSNormQ6:  "text_first_token_value_out_add_rmsnorm_q6",
+	vulkanOpTextFirstTokenValueOutAddRMSNormQ4:  "text_first_token_value_out_add_rmsnorm_q4",
+	vulkanOpFusedKVF32:                          "fused_kv_f32",
+	vulkanOpFusedKVQ8:                           "fused_kv_q8",
+	vulkanOpFusedKVQ6:                           "fused_kv_q6",
+	vulkanOpFusedKVQ4:                           "fused_kv_q4",
+	vulkanOpFusedKVMRoPEF32:                     "fused_kv_mrope_f32",
+	vulkanOpFusedKVMRoPEQ8:                      "fused_kv_mrope_q8",
+	vulkanOpFusedKVMRoPEQ6:                      "fused_kv_mrope_q6",
+	vulkanOpFusedKVMRoPEQ4:                      "fused_kv_mrope_q4",
+	vulkanOpVisionLayerNormRowsF32:              "vision_layernorm_rows_f32",
+	vulkanOpVisionAddLayerNormRowsF32:           "vision_add_layernorm_rows_f32",
+	vulkanOpVisionProjectImageFusedF32:          "vision_project_image_fused_f32",
+	vulkanOpVisionMatRowsGELU2AddLayerNormF32:   "vision_matrows_gelu2_add_layernorm_f32",
+	vulkanOpMatVecTopKF32:                       "matvec_topk_f32",
+	vulkanOpMatVecArgmaxQ8:                      "matvec_argmax_q8",
+	vulkanOpMatVecArgmaxQ6:                      "matvec_argmax_q6",
+	vulkanOpMatVecArgmaxQ4:                      "matvec_argmax_q4",
+	vulkanOpMatVecTopKQ8:                        "matvec_topk_q8",
+	vulkanOpMatVecTopKQ6:                        "matvec_topk_q6",
+	vulkanOpMatVecTopKQ4:                        "matvec_topk_q4",
+	vulkanOpChainedRMSNormMatVecF32:             "chained_rmsnorm_matvec_f32",
+	vulkanOpChainedMatVecAddRMSNormMatVecF32:    "chained_matvec_add_rmsnorm_matvec_f32",
+	vulkanOpChainedRMSNormQKVMRoPEF32:           "chained_rmsnorm_qkv_mrope_f32",
+	vulkanOpChainedRMSNormQKVMRoPEQ8:            "chained_rmsnorm_qkv_mrope_q8",
 }
 
 type vulkanPlanCache struct {
-	shape             backend.VulkanModelShape
-	valid             bool
-	plans             []backend.VulkanPlan
-	summary           backend.VulkanPlanSummary
-	graph             backend.VulkanExecutionGraph
-	pipes             []backend.VulkanPipelinePlan
-	command           backend.VulkanCommandPlan
-	commandValidation string
+	shape              backend.VulkanModelShape
+	valid              bool
+	plans              []backend.VulkanPlan
+	optionalPlans      []backend.VulkanPlan
+	summary            backend.VulkanPlanSummary
+	graph              backend.VulkanExecutionGraph
+	pipes              []backend.VulkanPipelinePlan
+	optionalPipes      []backend.VulkanPipelinePlan
+	command            backend.VulkanCommandPlan
+	optionalCommand    backend.VulkanCommandPlan
+	commandValidation  string
+	optionalValidation string
 }
 
 type layerWeights struct {
@@ -142,11 +335,37 @@ type LoadOptions struct {
 	Progress     func(done, total int, name string, typ string)
 }
 
+type VulkanPrewarmStats struct {
+	Backend                  string                              `json:"backend"`
+	DurationMS               int64                               `json:"duration_ms"`
+	Planned                  bool                                `json:"planned"`
+	PlanCount                int                                 `json:"plan_count"`
+	OptionalPlanCount        int                                 `json:"optional_plan_count"`
+	PipelineCount            int                                 `json:"pipeline_count"`
+	OptionalPipelineCount    int                                 `json:"optional_pipeline_count"`
+	CommandCount             int                                 `json:"command_count"`
+	OptionalCommandCount     int                                 `json:"optional_command_count"`
+	CommandPlanValid         bool                                `json:"command_plan_valid"`
+	CommandPlanError         string                              `json:"command_plan_error,omitempty"`
+	OptionalCommandPlanValid bool                                `json:"optional_command_plan_valid"`
+	OptionalCommandPlanError string                              `json:"optional_command_plan_error,omitempty"`
+	DispatchProbe            bool                                `json:"dispatch_probe"`
+	DispatchReady            bool                                `json:"dispatch_ready"`
+	Error                    string                              `json:"error,omitempty"`
+	DispatchProbes           []backend.VulkanDispatchProbeResult `json:"dispatch_probes,omitempty"`
+}
+
+type VulkanDisabledOp struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type kvCache struct {
 	k     []float32
 	v     []float32
 	len   int
 	kvDim int
+	epoch uint64
 }
 
 type layerScratch struct {
@@ -158,6 +377,7 @@ type layerScratch struct {
 	v       []float32
 	headOut []float32
 	gate    []float32
+	up      []float32
 	scores  []float32
 }
 
@@ -170,10 +390,21 @@ type generationScratch struct {
 	ropeSin    []float32
 	scoreBlock []float32
 	candidates []tokenScore
+	topKScores []tensor.TopKScore
+	topKWork   []tensor.TopKScore
 	weights    []float32
 	positions  []ropePos
 	inputIDs   []int
 	rng        fastRNG
+}
+
+type generationForwardResult struct {
+	logits        []float32
+	candidates    []tokenScore
+	candidateTemp float64
+	token         int
+	hasToken      bool
+	hasCandidates bool
 }
 
 type GenerateOptions struct {
@@ -186,7 +417,18 @@ type GenerateOptions struct {
 
 var defaultEOSTokenIDs = []int{2}
 
+var sampleFullLogitsWeightsPool sync.Pool
+
 const maxEOSTokenIDs = 1024
+const sampleFullLogitsAllocWeightsMin = 4
+const sampleFullLogitsPooledWeightsMax = 256 * 1024
+const vulkanMatVecMinWorkEnv = "RAPIDOCRVL_VULKAN_MATVEC_MIN_WORK"
+const vulkanTextAttentionMinWorkEnv = "RAPIDOCRVL_VULKAN_TEXT_ATTENTION_MIN_WORK"
+const vulkanVectorMinWorkEnv = "RAPIDOCRVL_VULKAN_VECTOR_MIN_WORK"
+const vulkanVisionMinWorkEnv = "RAPIDOCRVL_VULKAN_VISION_MIN_WORK"
+const defaultVulkanMatVecMinWork = 65536
+const defaultVulkanVectorMinWork = 1024
+const maxZeroBiasSmall = 8192
 
 type GenerateResult struct {
 	Tokens       []int
@@ -569,7 +811,7 @@ func trimASCIIWhitespace(s string) string {
 }
 
 func isASCIIWhitespace(c byte) bool {
-	return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\v' || c == '\f'
+	return c == ' ' || c == '\n' || c == '\r' || c == '	' || c == '\v' || c == '\f'
 }
 
 func asciiEqualFoldModel(s, lower string) bool {
@@ -861,12 +1103,131 @@ func (rt *Runtime) Backend() string {
 	return rt.backend
 }
 
+func (rt *Runtime) VulkanDisabledOps() []string {
+	var out []string
+	for op, name := range vulkanOpNames {
+		if name == "" {
+			continue
+		}
+		bank, bit := vulkanOpBankBit(vulkanOp(op))
+		if rt.vulkanDisabledOps[bank].Load()&bit != 0 {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func (rt *Runtime) VulkanDisabledOpReasons() []VulkanDisabledOp {
+	rt.vulkanDisabledMu.RLock()
+	defer rt.vulkanDisabledMu.RUnlock()
+	var out []VulkanDisabledOp
+	for op, name := range vulkanOpNames {
+		if name == "" {
+			continue
+		}
+		bank, bit := vulkanOpBankBit(vulkanOp(op))
+		if rt.vulkanDisabledOps[bank].Load()&bit == 0 {
+			continue
+		}
+		out = append(out, VulkanDisabledOp{
+			Name:   name,
+			Reason: rt.vulkanDisabledReasons[vulkanOp(op)],
+		})
+	}
+	return out
+}
+
+func (rt *Runtime) ResetVulkanDisabledOps() {
+	for i := range rt.vulkanDisabledOps {
+		rt.vulkanDisabledOps[i].Store(0)
+	}
+	rt.vulkanDisabledMu.Lock()
+	clear(rt.vulkanDisabledReasons)
+	rt.vulkanDisabledMu.Unlock()
+}
+
+func (rt *Runtime) VulkanPrewarmStats() VulkanPrewarmStats {
+	rt.vulkanPrewarmMu.RLock()
+	defer rt.vulkanPrewarmMu.RUnlock()
+	return rt.vulkanPrewarm
+}
+
+func (rt *Runtime) PrewarmVulkan() (VulkanPrewarmStats, error) {
+	rt.vulkanPrewarmRunMu.Lock()
+	defer rt.vulkanPrewarmRunMu.Unlock()
+
+	start := time.Now()
+	stats := VulkanPrewarmStats{Backend: rt.Backend()}
+	artifacts := rt.VulkanArtifactsView()
+	stats.Planned = len(artifacts.Plans) != 0 || len(artifacts.OptionalPlans) != 0 || artifacts.CommandPlan.CommandCount != 0 || artifacts.OptionalCommand.CommandCount != 0
+	stats.PlanCount = len(artifacts.Plans)
+	stats.OptionalPlanCount = len(artifacts.OptionalPlans)
+	stats.PipelineCount = len(artifacts.PipelinePlan)
+	stats.OptionalPipelineCount = len(artifacts.OptionalPipelinePlan)
+	stats.CommandCount = artifacts.CommandPlan.CommandCount
+	stats.OptionalCommandCount = artifacts.OptionalCommand.CommandCount
+	stats.CommandPlanError = backend.ValidateVulkanCommandPlan(artifacts.CommandPlan)
+	stats.OptionalCommandPlanError = backend.ValidateVulkanCommandPlan(artifacts.OptionalCommand)
+	stats.CommandPlanValid = stats.CommandPlanError == ""
+	stats.OptionalCommandPlanValid = stats.OptionalCommandPlanError == ""
+	var err error
+	if stats.Backend == "vulkan" {
+		stats.DispatchProbe = true
+		stats.DispatchProbes = backend.VulkanDispatchSmokeSuite()
+		err = rt.recordVulkanProbeFailures(stats.DispatchProbes)
+		if err == nil {
+			stats.DispatchReady = true
+		} else {
+			stats.Error = err.Error()
+		}
+	}
+	stats.DurationMS = elapsedMillis(start)
+	rt.vulkanPrewarmMu.Lock()
+	rt.vulkanPrewarm = stats
+	rt.vulkanPrewarmMu.Unlock()
+	return stats, err
+}
+
+func (rt *Runtime) recordVulkanProbeFailures(probes []backend.VulkanDispatchProbeResult) error {
+	var firstErr error
+	for _, probe := range probes {
+		if probe.OK {
+			continue
+		}
+		probeErr := fmt.Errorf("%s: %s", probe.Name, probe.Error)
+		if op, ok := vulkanProbeOp(probe.Name); ok {
+			rt.disableVulkanOp(op, probeErr)
+		}
+		if firstErr == nil {
+			firstErr = probeErr
+		}
+	}
+	return firstErr
+}
+
+func vulkanProbeOp(name string) (vulkanOp, bool) {
+	for op, opName := range vulkanOpNames {
+		if opName == name {
+			return vulkanOp(op), true
+		}
+	}
+	return 0, false
+}
+
 func (rt *Runtime) VulkanPlans() []backend.VulkanPlan {
 	cache, ok := rt.cachedVulkanPlans()
 	if !ok {
 		return nil
 	}
 	return append([]backend.VulkanPlan(nil), cache.plans...)
+}
+
+func (rt *Runtime) VulkanOptionalPlans() []backend.VulkanPlan {
+	cache, ok := rt.cachedVulkanPlans()
+	if !ok {
+		return nil
+	}
+	return append([]backend.VulkanPlan(nil), cache.optionalPlans...)
 }
 
 func (rt *Runtime) VulkanPlanSummary() backend.VulkanPlanSummary {
@@ -897,6 +1258,14 @@ func (rt *Runtime) VulkanPipelinePlan() []backend.VulkanPipelinePlan {
 	return append([]backend.VulkanPipelinePlan(nil), cache.pipes...)
 }
 
+func (rt *Runtime) VulkanOptionalPipelinePlan() []backend.VulkanPipelinePlan {
+	cache, ok := rt.cachedVulkanPlans()
+	if !ok {
+		return nil
+	}
+	return append([]backend.VulkanPipelinePlan(nil), cache.optionalPipes...)
+}
+
 func (rt *Runtime) VulkanCommandPlan() backend.VulkanCommandPlan {
 	cache, ok := rt.cachedVulkanPlans()
 	if !ok {
@@ -905,18 +1274,30 @@ func (rt *Runtime) VulkanCommandPlan() backend.VulkanCommandPlan {
 	return cloneVulkanCommandPlan(cache.command)
 }
 
+func (rt *Runtime) VulkanOptionalCommandPlan() backend.VulkanCommandPlan {
+	cache, ok := rt.cachedVulkanPlans()
+	if !ok {
+		return backend.VulkanCommandPlan{}
+	}
+	return cloneVulkanCommandPlanWithPipelines(cache.optionalCommand, append([]backend.VulkanPipelinePlan(nil), cache.optionalPipes...))
+}
+
 func (rt *Runtime) VulkanArtifacts() backend.VulkanModelArtifacts {
 	cache, ok := rt.cachedVulkanPlans()
 	if !ok {
 		return backend.VulkanModelArtifacts{}
 	}
 	pipes := append([]backend.VulkanPipelinePlan(nil), cache.pipes...)
+	optionalPipes := append([]backend.VulkanPipelinePlan(nil), cache.optionalPipes...)
 	out := backend.VulkanModelArtifacts{
-		Plans:          append([]backend.VulkanPlan(nil), cache.plans...),
-		Summary:        cache.summary,
-		ExecutionGraph: cache.graph,
-		PipelinePlan:   pipes,
-		CommandPlan:    cloneVulkanCommandPlanWithPipelines(cache.command, pipes),
+		Plans:                append([]backend.VulkanPlan(nil), cache.plans...),
+		OptionalPlans:        append([]backend.VulkanPlan(nil), cache.optionalPlans...),
+		Summary:              cache.summary,
+		ExecutionGraph:       cache.graph,
+		PipelinePlan:         pipes,
+		OptionalPipelinePlan: optionalPipes,
+		CommandPlan:          cloneVulkanCommandPlanWithPipelines(cache.command, pipes),
+		OptionalCommand:      cloneVulkanCommandPlanWithPipelines(cache.optionalCommand, optionalPipes),
 	}
 	out.Summary.Plans = out.Plans
 	out.ExecutionGraph.Stages = append([]backend.VulkanStageSummary(nil), cache.graph.Stages...)
@@ -931,11 +1312,14 @@ func (rt *Runtime) VulkanArtifactsView() backend.VulkanModelArtifacts {
 		return backend.VulkanModelArtifacts{}
 	}
 	return backend.VulkanModelArtifacts{
-		Plans:          cache.plans,
-		Summary:        cache.summary,
-		ExecutionGraph: cache.graph,
-		PipelinePlan:   cache.pipes,
-		CommandPlan:    cache.command,
+		Plans:                cache.plans,
+		OptionalPlans:        cache.optionalPlans,
+		Summary:              cache.summary,
+		ExecutionGraph:       cache.graph,
+		PipelinePlan:         cache.pipes,
+		OptionalPipelinePlan: cache.optionalPipes,
+		CommandPlan:          cache.command,
+		OptionalCommand:      cache.optionalCommand,
 	}
 }
 
@@ -945,6 +1329,14 @@ func (rt *Runtime) VulkanCommandPlanValidation() string {
 		return ""
 	}
 	return cache.commandValidation
+}
+
+func (rt *Runtime) VulkanOptionalCommandPlanValidation() string {
+	cache, ok := rt.cachedVulkanPlans()
+	if !ok {
+		return ""
+	}
+	return cache.optionalValidation
 }
 
 func (rt *Runtime) cachedVulkanPlans() (vulkanPlanCache, bool) {
@@ -967,14 +1359,18 @@ func (rt *Runtime) cachedVulkanPlans() (vulkanPlanCache, bool) {
 	}
 	artifacts := backend.VulkanModelArtifactsForShape(shape)
 	rt.vulkanPlanCache = vulkanPlanCache{
-		shape:             shape,
-		valid:             true,
-		plans:             artifacts.Plans,
-		summary:           artifacts.Summary,
-		graph:             artifacts.ExecutionGraph,
-		pipes:             artifacts.PipelinePlan,
-		command:           artifacts.CommandPlan,
-		commandValidation: backend.ValidateVulkanCommandPlan(artifacts.CommandPlan),
+		shape:              shape,
+		valid:              true,
+		plans:              artifacts.Plans,
+		optionalPlans:      artifacts.OptionalPlans,
+		summary:            artifacts.Summary,
+		graph:              artifacts.ExecutionGraph,
+		pipes:              artifacts.PipelinePlan,
+		optionalPipes:      artifacts.OptionalPipelinePlan,
+		command:            artifacts.CommandPlan,
+		optionalCommand:    artifacts.OptionalCommand,
+		commandValidation:  backend.ValidateVulkanCommandPlan(artifacts.CommandPlan),
+		optionalValidation: backend.ValidateVulkanCommandPlan(artifacts.OptionalCommand),
 	}
 	return rt.vulkanPlanCache, true
 }
@@ -1096,10 +1492,15 @@ func (rt *Runtime) GenerateWithOptions(ctx context.Context, input []int, opts Ge
 	}
 	caches, cachePtr := rt.getKVCaches(len(input) + opts.MaxNewTokens)
 	scratch := rt.getGenerationScratch()
-	rt.ensureScoreCapacity(scratch, len(input)+opts.MaxNewTokens)
+	rt.ensureSamplingScratchCapacity(scratch, opts, len(input)+opts.MaxNewTokens)
 	out := make([]int, 0, len(input)+opts.MaxNewTokens)
 	out = append(out, input...)
 	var logits []float32
+	var candidates []tokenScore
+	var candidateTemp float64
+	var nextToken int
+	var hasNextToken bool
+	var hasCandidates bool
 	for pos, id := range input {
 		select {
 		case <-ctx.Done():
@@ -1111,18 +1512,31 @@ func (rt *Runtime) GenerateWithOptions(ctx context.Context, input []int, opts Ge
 			rt.putGenerationResources(scratch, caches, cachePtr)
 			return GenerateResult{}, err
 		}
-		l, err := rt.forwardEmbedding(scratch.hidden, ropePos{pos, pos, pos}, caches, scratch)
+		fr, err := rt.forwardEmbeddingForSampling(scratch.hidden, ropePos{pos, pos, pos}, caches, scratch, pos == len(input)-1, opts)
 		if err != nil {
 			rt.putGenerationResources(scratch, caches, cachePtr)
 			return GenerateResult{}, err
 		}
-		logits = l
+		logits = fr.logits
+		candidates = fr.candidates
+		candidateTemp = fr.candidateTemp
+		nextToken = fr.token
+		hasNextToken = fr.hasToken
+		hasCandidates = fr.hasCandidates
 	}
 	rng := samplingRNGInto(opts, &scratch.rng)
 	for i := 0; i < opts.MaxNewTokens; i++ {
-		next := sampleTokenScratch(logits, opts, rng, scratch)
+		next := nextToken
+		if hasCandidates {
+			next = sampleCandidateScoresScratch(candidates, candidateTemp, rng, scratch)
+		} else if !hasNextToken {
+			next = sampleTokenScratch(logits, opts, rng, scratch)
+		}
 		out = append(out, next)
 		if isEOS(next, opts.EOSTokenIDs) {
+			break
+		}
+		if i+1 >= opts.MaxNewTokens {
 			break
 		}
 		if err := rt.tokenEmbeddingInto(scratch.hidden, next); err != nil {
@@ -1130,12 +1544,17 @@ func (rt *Runtime) GenerateWithOptions(ctx context.Context, input []int, opts Ge
 			return GenerateResult{}, err
 		}
 		pos := len(out) - 1
-		l, err := rt.forwardEmbedding(scratch.hidden, ropePos{pos, pos, pos}, caches, scratch)
+		fr, err := rt.forwardEmbeddingForSampling(scratch.hidden, ropePos{pos, pos, pos}, caches, scratch, true, opts)
 		if err != nil {
 			rt.putGenerationResources(scratch, caches, cachePtr)
 			return GenerateResult{}, err
 		}
-		logits = l
+		logits = fr.logits
+		candidates = fr.candidates
+		candidateTemp = fr.candidateTemp
+		nextToken = fr.token
+		hasNextToken = fr.hasToken
+		hasCandidates = fr.hasCandidates
 	}
 	res := GenerateResult{Tokens: out, PromptTokens: len(input)}
 	rt.putGenerationResources(scratch, caches, cachePtr)
@@ -1194,13 +1613,18 @@ func (rt *Runtime) generateWithImageEmbeds(ctx context.Context, input []int, ima
 		scratch.inputIDs = input
 	}
 	caches, cachePtr := rt.getKVCaches(len(input) + opts.MaxNewTokens)
-	rt.ensureScoreCapacity(scratch, len(input)+opts.MaxNewTokens)
+	rt.ensureSamplingScratchCapacity(scratch, opts, len(input)+opts.MaxNewTokens)
 	positions, ropeDelta := rt.multimodalPositionsInto(input, imageGrid, scratch.positions)
 	scratch.positions = positions
 	imageCursor := 0
 	out := make([]int, 0, len(input)+opts.MaxNewTokens)
 	out = append(out, input...)
 	var logits []float32
+	var candidates []tokenScore
+	var candidateTemp float64
+	var nextToken int
+	var hasNextToken bool
+	var hasCandidates bool
 	for pos, id := range input {
 		select {
 		case <-ctx.Done():
@@ -1223,12 +1647,17 @@ func (rt *Runtime) generateWithImageEmbeds(ctx context.Context, input []int, ima
 			}
 			emb = scratch.hidden
 		}
-		l, err := rt.forwardEmbedding(emb, positions[pos], caches, scratch)
+		fr, err := rt.forwardEmbeddingForSampling(emb, positions[pos], caches, scratch, pos == len(input)-1, opts)
 		if err != nil {
 			rt.putGenerationResources(scratch, caches, cachePtr)
 			return GenerateResult{}, err
 		}
-		logits = l
+		logits = fr.logits
+		candidates = fr.candidates
+		candidateTemp = fr.candidateTemp
+		nextToken = fr.token
+		hasNextToken = fr.hasToken
+		hasCandidates = fr.hasCandidates
 	}
 	if imageCursor != len(imageEmbeds) {
 		rt.putGenerationResources(scratch, caches, cachePtr)
@@ -1236,9 +1665,17 @@ func (rt *Runtime) generateWithImageEmbeds(ctx context.Context, input []int, ima
 	}
 	rng := samplingRNGInto(opts, &scratch.rng)
 	for i := 0; i < opts.MaxNewTokens; i++ {
-		next := sampleTokenScratch(logits, opts, rng, scratch)
+		next := nextToken
+		if hasCandidates {
+			next = sampleCandidateScoresScratch(candidates, candidateTemp, rng, scratch)
+		} else if !hasNextToken {
+			next = sampleTokenScratch(logits, opts, rng, scratch)
+		}
 		out = append(out, next)
 		if isEOS(next, opts.EOSTokenIDs) {
+			break
+		}
+		if i+1 >= opts.MaxNewTokens {
 			break
 		}
 		if err := rt.tokenEmbeddingInto(scratch.hidden, next); err != nil {
@@ -1246,12 +1683,17 @@ func (rt *Runtime) generateWithImageEmbeds(ctx context.Context, input []int, ima
 			return GenerateResult{}, err
 		}
 		pos := len(out) - 1 + ropeDelta
-		l, err := rt.forwardEmbedding(scratch.hidden, ropePos{pos, pos, pos}, caches, scratch)
+		fr, err := rt.forwardEmbeddingForSampling(scratch.hidden, ropePos{pos, pos, pos}, caches, scratch, true, opts)
 		if err != nil {
 			rt.putGenerationResources(scratch, caches, cachePtr)
 			return GenerateResult{}, err
 		}
-		logits = l
+		logits = fr.logits
+		candidates = fr.candidates
+		candidateTemp = fr.candidateTemp
+		nextToken = fr.token
+		hasNextToken = fr.hasToken
+		hasCandidates = fr.hasCandidates
 	}
 	res := GenerateResult{Tokens: out, PromptTokens: len(input)}
 	rt.putGenerationResources(scratch, caches, cachePtr)
@@ -1263,10 +1705,13 @@ func (rt *Runtime) multimodalPositions(input []int, imageGrid [3]int) ([]ropePos
 }
 
 func (rt *Runtime) multimodalPositionsInto(input []int, imageGrid [3]int, buf []ropePos) ([]ropePos, int) {
-	positions := buf[:0]
-	if cap(positions) < len(input) {
-		positions = make([]ropePos, 0, len(input))
+	var positions []ropePos
+	if cap(buf) < len(input) {
+		positions = make([]ropePos, len(input))
+	} else {
+		positions = buf[:len(input)]
 	}
+	posIdx := 0
 	st := 0
 	nextPos := 0
 	for {
@@ -1283,7 +1728,8 @@ func (rt *Runtime) multimodalPositionsInto(input []int, imageGrid [3]int, buf []
 		stIdx := nextPos
 		for i := 0; i < ed-st; i++ {
 			p := stIdx + i
-			positions = append(positions, ropePos{p, p, p})
+			positions[posIdx] = ropePos{p, p, p}
+			posIdx++
 		}
 		textLen := ed - st
 		textEnd := stIdx + textLen - 1
@@ -1297,11 +1743,12 @@ func (rt *Runtime) multimodalPositionsInto(input []int, imageGrid [3]int, buf []
 					pt := textLen + stIdx + t
 					ph := textLen + stIdx + h
 					pw := textLen + stIdx + w
-					positions = append(positions, ropePos{
+					positions[posIdx] = ropePos{
 						T: pt,
 						H: ph,
 						W: pw,
-					})
+					}
+					posIdx++
 					maxPos = max(maxPos, pt, ph, pw)
 				}
 			}
@@ -1313,11 +1760,13 @@ func (rt *Runtime) multimodalPositionsInto(input []int, imageGrid [3]int, buf []
 		stIdx := nextPos
 		for i := 0; i < len(input)-st; i++ {
 			p := stIdx + i
-			positions = append(positions, ropePos{p, p, p})
+			positions[posIdx] = ropePos{p, p, p}
+			posIdx++
 		}
 		nextPos = stIdx + len(input) - st
 	}
-	if len(positions) == 0 {
+	positions = positions[:posIdx]
+	if posIdx == 0 {
 		return positions, 0
 	}
 	return positions, nextPos - len(input)
@@ -1385,11 +1834,27 @@ func samplingRNG(opts GenerateOptions) *fastRNG {
 }
 
 func samplingRNGInto(opts GenerateOptions, rng *fastRNG) *fastRNG {
-	if opts.MaxNewTokens <= 0 || opts.Temperature <= 0 || opts.TopK == 1 {
+	if !generationNeedsSamplingScratch(opts) {
 		return nil
 	}
 	rng.state = uint64(opts.Seed)
 	return rng
+}
+
+func generationNeedsSamplingScratch(opts GenerateOptions) bool {
+	return opts.MaxNewTokens > 0 && opts.Temperature > 0 && opts.TopK != 1
+}
+
+func generationUsesArgmaxSampling(opts GenerateOptions) bool {
+	return opts.Temperature <= 0 || opts.TopK == 1
+}
+
+func generationCanReturnArgmaxOnly(opts GenerateOptions) bool {
+	return opts.MaxNewTokens > 0 && generationUsesArgmaxSampling(opts)
+}
+
+func generationCanReturnCandidatesOnly(opts GenerateOptions) bool {
+	return opts.MaxNewTokens > 0 && opts.Temperature > 0 && opts.TopK > 1
 }
 
 func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, scratch *generationScratch) int {
@@ -1405,6 +1870,9 @@ func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, 
 	candidates, maxScoreRaw := topKCandidatesUnsortedWithMax(logits, opts.TopK, scratch)
 	invTemp := float32(1 / opts.Temperature)
 	maxScore := maxScoreRaw * invTemp
+	if len(candidates) <= 4 {
+		return sampleCandidateScoresSmall(candidates, invTemp, maxScore, rng)
+	}
 	weights := makeSampleWeights(len(candidates), scratch)
 	var sum float64
 	for i, c := range candidates {
@@ -1433,6 +1901,120 @@ func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, 
 
 func sampleTopKTemp1Scratch(logits []float32, topK int, rng float64RNG, scratch *generationScratch) int {
 	candidates, maxScore := topKCandidatesUnsortedWithMax(logits, topK, scratch)
+	if len(candidates) <= 8 {
+		return sampleCandidateScoresTemp1SmallScratch(candidates, maxScore, rng, scratch)
+	}
+	return sampleCandidateScoresTemp1Scratch(candidates, maxScore, rng, scratch)
+}
+
+func sampleCandidateScoresScratch(candidates []tokenScore, temp float64, rng float64RNG, scratch *generationScratch) int {
+	if len(candidates) == 0 {
+		return 0
+	}
+	if temp == 1 {
+		maxScore := candidates[0].score
+		for _, c := range candidates[1:] {
+			maxScore = max32Local(maxScore, c.score)
+		}
+		if len(candidates) <= 4 {
+			return sampleCandidateScoresTemp1SmallScratch(candidates, maxScore, rng, scratch)
+		}
+		return sampleCandidateScoresTemp1Scratch(candidates, maxScore, rng, scratch)
+	}
+	invTemp := float32(1 / temp)
+	maxScoreRaw := candidates[0].score
+	for _, c := range candidates[1:] {
+		maxScoreRaw = max32Local(maxScoreRaw, c.score)
+	}
+	maxScore := maxScoreRaw * invTemp
+	if len(candidates) <= 4 {
+		return sampleCandidateScoresSmall(candidates, invTemp, maxScore, rng)
+	}
+	weights := makeSampleWeights(len(candidates), scratch)
+	var sum float64
+	for i, c := range candidates {
+		w := math.Exp(float64(c.score*invTemp - maxScore))
+		if weights != nil {
+			weights[i] = float32(w)
+		}
+		sum += w
+	}
+	pick := rng.Float64() * sum
+	if weights != nil {
+		if idx := pickWeightedFloat32(weights, pick); idx >= 0 {
+			return candidates[idx].id
+		}
+	} else {
+		var acc float64
+		for _, c := range candidates {
+			acc += math.Exp(float64(c.score*invTemp - maxScore))
+			if pick <= acc {
+				return c.id
+			}
+		}
+	}
+	return candidates[len(candidates)-1].id
+}
+
+func sampleCandidateScoresSmall(candidates []tokenScore, invTemp, maxScore float32, rng float64RNG) int {
+	switch len(candidates) {
+	case 0:
+		return 0
+	case 1:
+		return candidates[0].id
+	case 2:
+		s0 := candidates[0].score * invTemp
+		s1 := candidates[1].score * invTemp
+		if s0 >= s1 {
+			w1 := math.Exp(float64(s1 - s0))
+			if rng.Float64()*(1+w1) <= 1 {
+				return candidates[0].id
+			}
+			return candidates[1].id
+		}
+		w0 := math.Exp(float64(s0 - s1))
+		if rng.Float64()*(w0+1) <= w0 {
+			return candidates[0].id
+		}
+		return candidates[1].id
+	case 3:
+		w0 := math.Exp(float64(candidates[0].score*invTemp - maxScore))
+		w1 := math.Exp(float64(candidates[1].score*invTemp - maxScore))
+		w2 := math.Exp(float64(candidates[2].score*invTemp - maxScore))
+		pick := rng.Float64() * ((w0 + w1) + w2)
+		acc := w0
+		if pick <= acc {
+			return candidates[0].id
+		}
+		acc += w1
+		if pick <= acc {
+			return candidates[1].id
+		}
+		return candidates[2].id
+	case 4:
+		w0 := math.Exp(float64(candidates[0].score*invTemp - maxScore))
+		w1 := math.Exp(float64(candidates[1].score*invTemp - maxScore))
+		w2 := math.Exp(float64(candidates[2].score*invTemp - maxScore))
+		w3 := math.Exp(float64(candidates[3].score*invTemp - maxScore))
+		pick := rng.Float64() * ((w0 + w1) + (w2 + w3))
+		acc := w0
+		if pick <= acc {
+			return candidates[0].id
+		}
+		acc += w1
+		if pick <= acc {
+			return candidates[1].id
+		}
+		acc += w2
+		if pick <= acc {
+			return candidates[2].id
+		}
+		return candidates[3].id
+	}
+	return candidates[len(candidates)-1].id
+}
+
+func sampleCandidateScoresTemp1Scratch(candidates []tokenScore, maxScore float32, rng float64RNG, scratch *generationScratch) int {
 	weights := makeSampleWeights(len(candidates), scratch)
 	var sum float32
 	for i, c := range candidates {
@@ -1459,17 +2041,173 @@ func sampleTopKTemp1Scratch(logits []float32, topK int, rng float64RNG, scratch 
 	return candidates[len(candidates)-1].id
 }
 
+func sampleCandidateScoresTemp1SmallScratch(candidates []tokenScore, maxScore float32, rng float64RNG, scratch *generationScratch) int {
+	if scratch == nil || len(candidates) <= 4 {
+		return sampleCandidateScoresTemp1Small(candidates, maxScore, rng)
+	}
+	weights := makeSampleWeights(len(candidates), scratch)
+	switch len(candidates) {
+	case 0:
+		return 0
+	case 1:
+		weights[0] = 1
+		return candidates[0].id
+	case 2:
+		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
+		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
+		weights[0] = w0
+		weights[1] = w1
+		pick := float32(rng.Float64()) * (w0 + w1)
+		if pick <= w0 {
+			return candidates[0].id
+		}
+		return candidates[1].id
+	case 3:
+		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
+		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
+		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
+		weights[0] = w0
+		weights[1] = w1
+		weights[2] = w2
+		pick := float32(rng.Float64()) * ((w0 + w1) + w2)
+		if pick <= w0 {
+			return candidates[0].id
+		}
+		if pick <= w0+w1 {
+			return candidates[1].id
+		}
+		return candidates[2].id
+	case 4:
+		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
+		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
+		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
+		w3 := float32(math.Exp(float64(candidates[3].score - maxScore)))
+		weights[0] = w0
+		weights[1] = w1
+		weights[2] = w2
+		weights[3] = w3
+		pick := float32(rng.Float64()) * ((w0 + w1) + (w2 + w3))
+		acc := w0
+		if pick <= acc {
+			return candidates[0].id
+		}
+		acc += w1
+		if pick <= acc {
+			return candidates[1].id
+		}
+		acc += w2
+		if pick <= acc {
+			return candidates[2].id
+		}
+		return candidates[3].id
+	}
+	var sum float32
+	for i, c := range candidates {
+		w := float32(math.Exp(float64(c.score - maxScore)))
+		weights[i] = w
+		sum += w
+	}
+	pick := float32(rng.Float64()) * sum
+	var acc float32
+	for i, w := range weights {
+		acc += w
+		if pick <= acc {
+			return candidates[i].id
+		}
+	}
+	return candidates[len(candidates)-1].id
+}
+
+func sampleCandidateScoresTemp1Small(candidates []tokenScore, maxScore float32, rng float64RNG) int {
+	switch len(candidates) {
+	case 0:
+		return 0
+	case 1:
+		return candidates[0].id
+	case 2:
+		s0 := candidates[0].score
+		s1 := candidates[1].score
+		if s0 >= s1 {
+			w1 := math.Exp(float64(s1 - s0))
+			if rng.Float64()*(1+w1) <= 1 {
+				return candidates[0].id
+			}
+			return candidates[1].id
+		}
+		w0 := math.Exp(float64(s0 - s1))
+		if rng.Float64()*(w0+1) <= w0 {
+			return candidates[0].id
+		}
+		return candidates[1].id
+	case 3:
+		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
+		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
+		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
+		pick := float32(rng.Float64()) * ((w0 + w1) + w2)
+		if pick <= w0 {
+			return candidates[0].id
+		}
+		if pick <= w0+w1 {
+			return candidates[1].id
+		}
+		return candidates[2].id
+	case 4:
+		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
+		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
+		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
+		w3 := float32(math.Exp(float64(candidates[3].score - maxScore)))
+		pick := float32(rng.Float64()) * ((w0 + w1) + (w2 + w3))
+		acc := w0
+		if pick <= acc {
+			return candidates[0].id
+		}
+		acc += w1
+		if pick <= acc {
+			return candidates[1].id
+		}
+		acc += w2
+		if pick <= acc {
+			return candidates[2].id
+		}
+		return candidates[3].id
+	}
+	var weights [8]float32
+	var sum float32
+	for i, c := range candidates {
+		w := float32(math.Exp(float64(c.score - maxScore)))
+		weights[i] = w
+		sum += w
+	}
+	pick := float32(rng.Float64()) * sum
+	var acc float32
+	for i, w := range weights[:len(candidates)] {
+		acc += w
+		if pick <= acc {
+			return candidates[i].id
+		}
+	}
+	return candidates[len(candidates)-1].id
+}
+
 func sampleFullLogits(logits []float32, temp float32, rng *rand.Rand) int {
 	return sampleFullLogitsScratch(logits, temp, rng, nil)
 }
 
 func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scratch *generationScratch) int {
+	if len(logits) == 2 {
+		return sampleTwoLogits(logits, 1/temp, rng)
+	}
 	if temp == 1 {
 		return sampleFullLogitsTemp1Scratch(logits, rng, scratch)
 	}
 	invTemp := 1 / temp
 	maxScore := maxLogit(logits) * invTemp
 	weights := makeSampleWeights(len(logits), scratch)
+	if weights == nil && len(logits) >= sampleFullLogitsAllocWeightsMin {
+		var handle *[]float32
+		weights, handle = getSampleFullLogitsWeights(len(logits))
+		defer putSampleFullLogitsWeights(handle, weights)
+	}
 	if weights == nil {
 		var sum float64
 		i := 0
@@ -1522,8 +2260,16 @@ func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scr
 }
 
 func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *generationScratch) int {
+	if len(logits) == 2 {
+		return sampleTwoLogits(logits, 1, rng)
+	}
 	maxScore := maxLogit(logits)
 	weights := makeSampleWeights(len(logits), scratch)
+	if weights == nil && len(logits) >= sampleFullLogitsAllocWeightsMin {
+		var handle *[]float32
+		weights, handle = getSampleFullLogitsWeights(len(logits))
+		defer putSampleFullLogitsWeights(handle, weights)
+	}
 	if weights == nil {
 		var sum float32
 		i := 0
@@ -1573,6 +2319,23 @@ func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *gen
 		return idx
 	}
 	return len(logits) - 1
+}
+
+func sampleTwoLogits(logits []float32, invTemp float32, rng float64RNG) int {
+	s0 := logits[0]
+	s1 := logits[1]
+	if s0 >= s1 {
+		w1 := math.Exp(float64((s1 - s0) * invTemp))
+		if rng.Float64()*(1+w1) <= 1 {
+			return 0
+		}
+		return 1
+	}
+	w0 := math.Exp(float64((s0 - s1) * invTemp))
+	if rng.Float64()*(w0+1) <= w0 {
+		return 0
+	}
+	return 1
 }
 
 func pickCumulativeFloat32(cdf []float32, pick float32) int {
@@ -1718,8 +2481,7 @@ func maxLogit(logits []float32) float32 {
 	i := 0
 	n := len(logits)
 	var m0, m1, m2, m3, m4, m5, m6, m7 = m, m, m, m, m, m, m, m
-	var m8, m9, m10, m11, m12, m13, m14, m15 = m, m, m, m, m, m, m, m
-	for ; i+15 < n; i += 16 {
+	for ; i+7 < n; i += 8 {
 		m0 = max32Local(m0, logits[i])
 		m1 = max32Local(m1, logits[i+1])
 		m2 = max32Local(m2, logits[i+2])
@@ -1728,17 +2490,8 @@ func maxLogit(logits []float32) float32 {
 		m5 = max32Local(m5, logits[i+5])
 		m6 = max32Local(m6, logits[i+6])
 		m7 = max32Local(m7, logits[i+7])
-		m8 = max32Local(m8, logits[i+8])
-		m9 = max32Local(m9, logits[i+9])
-		m10 = max32Local(m10, logits[i+10])
-		m11 = max32Local(m11, logits[i+11])
-		m12 = max32Local(m12, logits[i+12])
-		m13 = max32Local(m13, logits[i+13])
-		m14 = max32Local(m14, logits[i+14])
-		m15 = max32Local(m15, logits[i+15])
 	}
 	m = max32Local(max32Local(max32Local(m0, m1), max32Local(m2, m3)), max32Local(max32Local(m4, m5), max32Local(m6, m7)))
-	m = max32Local(m, max32Local(max32Local(max32Local(m8, m9), max32Local(m10, m11)), max32Local(max32Local(m12, m13), max32Local(m14, m15))))
 	for ; i < n; i++ {
 		m = max32Local(m, logits[i])
 	}
@@ -1812,8 +2565,11 @@ func topKCandidatesUnsorted(logits []float32, topK int, scratch *generationScrat
 }
 
 func topKCandidatesUnsortedWithMax(logits []float32, topK int, scratch *generationScratch) ([]tokenScore, float32) {
-	candidates := makeTokenScores(topK, scratch)
+	if topK > 0 && topK <= 8 {
+		return topKCandidatesSmallUnsortedWithMax(logits, topK, scratch)
+	}
 	n := min(topK, len(logits))
+	candidates := makeTokenScores(n, scratch)
 	maxScore := float32(math.Inf(-1))
 	for i := 0; i < n; i++ {
 		v := logits[i]
@@ -1895,6 +2651,147 @@ func topKCandidatesUnsortedWithMax(logits []float32, topK int, scratch *generati
 	return candidates[:n], maxScore
 }
 
+func topKCandidatesSmallUnsortedWithMax(logits []float32, topK int, scratch *generationScratch) ([]tokenScore, float32) {
+	n := min(topK, len(logits))
+	candidates := makeTokenScores(n, scratch)
+	maxScore := float32(math.Inf(-1))
+	for i := 0; i < n; i++ {
+		v := logits[i]
+		candidates[i] = tokenScore{id: i, score: v}
+		maxScore = max32Local(maxScore, v)
+	}
+	if n < topK {
+		return candidates[:n], maxScore
+	}
+	minIdx := 0
+	minScore := candidates[0].score
+	for i := 1; i < n; i++ {
+		if candidates[i].score < minScore {
+			minIdx = i
+			minScore = candidates[i].score
+		}
+	}
+	i := topK
+	for ; i+7 < len(logits); i += 8 {
+		v0, v1, v2, v3 := logits[i], logits[i+1], logits[i+2], logits[i+3]
+		v4, v5, v6, v7 := logits[i+4], logits[i+5], logits[i+6], logits[i+7]
+		if v0 <= minScore && v1 <= minScore && v2 <= minScore && v3 <= minScore &&
+			v4 <= minScore && v5 <= minScore && v6 <= minScore && v7 <= minScore {
+			continue
+		}
+		if v0 > minScore {
+			candidates[minIdx] = tokenScore{id: i, score: v0}
+			maxScore = max32Local(maxScore, v0)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v1 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 1, score: v1}
+			maxScore = max32Local(maxScore, v1)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v2 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 2, score: v2}
+			maxScore = max32Local(maxScore, v2)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v3 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 3, score: v3}
+			maxScore = max32Local(maxScore, v3)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v4 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 4, score: v4}
+			maxScore = max32Local(maxScore, v4)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v5 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 5, score: v5}
+			maxScore = max32Local(maxScore, v5)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v6 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 6, score: v6}
+			maxScore = max32Local(maxScore, v6)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+		if v7 > minScore {
+			candidates[minIdx] = tokenScore{id: i + 7, score: v7}
+			maxScore = max32Local(maxScore, v7)
+			minIdx, minScore = minTokenScore(candidates[:n])
+		}
+	}
+	for ; i < len(logits); i++ {
+		v := logits[i]
+		if v <= minScore {
+			continue
+		}
+		candidates[minIdx] = tokenScore{id: i, score: v}
+		maxScore = max32Local(maxScore, v)
+		minIdx, minScore = minTokenScore(candidates[:n])
+	}
+	return candidates[:n], maxScore
+}
+
+func minTokenScore(x []tokenScore) (int, float32) {
+	if len(x) == 4 {
+		minIdx := 0
+		minScore := x[0].score
+		if x[1].score < minScore {
+			minIdx = 1
+			minScore = x[1].score
+		}
+		if x[2].score < minScore {
+			minIdx = 2
+			minScore = x[2].score
+		}
+		if x[3].score < minScore {
+			return 3, x[3].score
+		}
+		return minIdx, minScore
+	}
+	if len(x) == 8 {
+		minIdx := 0
+		minScore := x[0].score
+		if x[1].score < minScore {
+			minIdx = 1
+			minScore = x[1].score
+		}
+		if x[2].score < minScore {
+			minIdx = 2
+			minScore = x[2].score
+		}
+		if x[3].score < minScore {
+			minIdx = 3
+			minScore = x[3].score
+		}
+		if x[4].score < minScore {
+			minIdx = 4
+			minScore = x[4].score
+		}
+		if x[5].score < minScore {
+			minIdx = 5
+			minScore = x[5].score
+		}
+		if x[6].score < minScore {
+			minIdx = 6
+			minScore = x[6].score
+		}
+		if x[7].score < minScore {
+			return 7, x[7].score
+		}
+		return minIdx, minScore
+	}
+	minIdx := 0
+	minScore := x[0].score
+	for i := 1; i < len(x); i++ {
+		if x[i].score < minScore {
+			minIdx = i
+			minScore = x[i].score
+		}
+	}
+	return minIdx, minScore
+}
+
 func buildMinTokenHeap(x []tokenScore) {
 	for i := len(x)/2 - 1; i >= 0; i-- {
 		siftDownTokenHeap(x, i)
@@ -1940,6 +2837,26 @@ func makeSampleWeights(n int, scratch *generationScratch) []float32 {
 		scratch.weights = make([]float32, n)
 	}
 	return scratch.weights[:n]
+}
+
+func getSampleFullLogitsWeights(n int) ([]float32, *[]float32) {
+	if v := sampleFullLogitsWeightsPool.Get(); v != nil {
+		p := v.(*[]float32)
+		if cap(*p) >= n {
+			return (*p)[:n], p
+		}
+	}
+	p := new([]float32)
+	*p = make([]float32, n)
+	return *p, p
+}
+
+func putSampleFullLogitsWeights(p *[]float32, buf []float32) {
+	if p == nil || cap(buf) == 0 || cap(buf) > sampleFullLogitsPooledWeightsMax {
+		return
+	}
+	*p = buf[:0]
+	sampleFullLogitsWeightsPool.Put(p)
 }
 
 func (rt *Runtime) expandSingleImagePlaceholder(input []int, n int) []int {
@@ -2371,7 +3288,11 @@ func (rt *Runtime) newKVCaches(maxTokens int) []kvCache {
 	c := rt.cfg
 	kvDim := c.NumKeyValueHeads * c.HeadDim
 	out := make([]kvCache, c.NumHiddenLayers)
+	epoch := rt.nextKVCacheEpoch()
 	if maxTokens <= 0 || kvDim <= 0 {
+		for i := range out {
+			out[i].epoch = epoch
+		}
 		return out
 	}
 	for i := range out {
@@ -2379,9 +3300,14 @@ func (rt *Runtime) newKVCaches(maxTokens int) []kvCache {
 			k:     make([]float32, 0, maxTokens*kvDim),
 			v:     make([]float32, 0, maxTokens*kvDim),
 			kvDim: kvDim,
+			epoch: epoch,
 		}
 	}
 	return out
+}
+
+func (rt *Runtime) nextKVCacheEpoch() uint64 {
+	return rt.kvCacheEpoch.Add(1)
 }
 
 func (rt *Runtime) getKVCaches(maxTokens int) ([]kvCache, *[]kvCache) {
@@ -2408,6 +3334,7 @@ func (rt *Runtime) getKVCaches(maxTokens int) ([]kvCache, *[]kvCache) {
 	}
 	kvDim := rt.cfg.NumKeyValueHeads * rt.cfg.HeadDim
 	need := maxTokens * kvDim
+	epoch := rt.nextKVCacheEpoch()
 	for i := range caches {
 		if cap(caches[i].k) < need {
 			caches[i].k = make([]float32, 0, need)
@@ -2421,6 +3348,7 @@ func (rt *Runtime) getKVCaches(maxTokens int) ([]kvCache, *[]kvCache) {
 		}
 		caches[i].len = 0
 		caches[i].kvDim = kvDim
+		caches[i].epoch = epoch
 	}
 	return caches, cachePtr
 }
@@ -2448,7 +3376,6 @@ func (rt *Runtime) newGenerationScratch() *generationScratch {
 		layers:  rt.newLayerScratch(),
 		hidden:  make([]float32, c.HiddenSize),
 		norm:    make([]float32, c.HiddenSize),
-		logits:  make([]float32, c.VocabSize),
 		ropeCos: make([]float32, c.HeadDim/2),
 		ropeSin: make([]float32, c.HeadDim/2),
 	}
@@ -2473,6 +3400,12 @@ func (rt *Runtime) putGenerationScratch(scratch *generationScratch) {
 	const maxPooledTopKCandidates = 8192
 	if cap(scratch.candidates) > maxPooledTopKCandidates {
 		scratch.candidates = nil
+	}
+	if cap(scratch.topKScores) > maxPooledTopKCandidates {
+		scratch.topKScores = nil
+	}
+	if cap(scratch.topKWork) > maxPooledTopKCandidates {
+		scratch.topKWork = nil
 	}
 	const maxPooledScoreTokens = 8192
 	if layers := len(scratch.layers); layers > 0 && cap(scratch.scoreBlock)/layers > maxPooledScoreTokens {
@@ -2516,6 +3449,20 @@ func (rt *Runtime) ensureScoreCapacity(scratch *generationScratch, tokens int) {
 	}
 }
 
+func (rt *Runtime) ensureSamplingScratchCapacity(scratch *generationScratch, opts GenerateOptions, tokens int) {
+	if generationNeedsSamplingScratch(opts) {
+		rt.ensureScoreCapacity(scratch, tokens)
+	}
+}
+
+func (rt *Runtime) ensureLogitsCapacity(scratch *generationScratch) []float32 {
+	n := rt.cfg.VocabSize
+	if cap(scratch.logits) < n {
+		scratch.logits = make([]float32, n)
+	}
+	return scratch.logits[:n]
+}
+
 func (rt *Runtime) newScratch() []layerScratch {
 	return rt.newLayerScratch()
 }
@@ -2535,16 +3482,26 @@ func (rt *Runtime) newLayerScratch() []layerScratch {
 			v:       make([]float32, kvRows),
 			headOut: make([]float32, qRows),
 			gate:    make([]float32, c.IntermediateSize),
+			up:      make([]float32, c.IntermediateSize),
 		}
 	}
 	return out
 }
 
 func (rt *Runtime) forwardEmbedding(embedding []float32, pos ropePos, caches []kvCache, scratch *generationScratch) ([]float32, error) {
+	return rt.forwardEmbeddingMaybeLogits(embedding, pos, caches, scratch, true)
+}
+
+func (rt *Runtime) forwardEmbeddingMaybeLogits(embedding []float32, pos ropePos, caches []kvCache, scratch *generationScratch, needLogits bool) ([]float32, error) {
+	fr, err := rt.forwardEmbeddingForSampling(embedding, pos, caches, scratch, needLogits, GenerateOptions{})
+	return fr.logits, err
+}
+
+func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos, caches []kvCache, scratch *generationScratch, needLogits bool, opts GenerateOptions) (generationForwardResult, error) {
 	c := rt.cfg
 	h := scratch.hidden[:c.HiddenSize]
 	if len(embedding) < c.HiddenSize {
-		return nil, fmt.Errorf("embedding length %d smaller than hidden size %d", len(embedding), c.HiddenSize)
+		return generationForwardResult{}, fmt.Errorf("embedding length %d smaller than hidden size %d", len(embedding), c.HiddenSize)
 	}
 	if len(h) == 0 || len(embedding) == 0 || &h[0] != &embedding[0] {
 		copy(h, embedding[:c.HiddenSize])
@@ -2560,87 +3517,772 @@ func (rt *Runtime) forwardEmbedding(embedding []float32, pos ropePos, caches []k
 	for li := 0; li < c.NumHiddenLayers; li++ {
 		tl := &rt.textLayers[li]
 		sc := &layers[li]
-		if li == 0 {
-			tensor.RMSNorm(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+		lastLayer := li+1 == c.NumHiddenLayers
+		if li == 0 && lastLayer && !needLogits {
+			rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+			rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
+			return generationForwardResult{}, nil
 		}
-		att := rt.attention(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
-		tensor.AddRMSNorm(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
-		mlp := rt.mlp(sc.norm, tl, sc)
-		if li+1 < c.NumHiddenLayers {
-			tensor.AddRMSNorm(layers[li+1].norm[:c.HiddenSize], h, mlp, rt.textLayers[li+1].w.ln1, float32(c.RMSNormEps))
+		if li == 0 {
+			// Try chained RMSNorm+QKVMRoPE for F32 weights; falls back to separate calls
+			if hasRoPE && rt.attentionChainedFirstLayer(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
+				// Chained path handled QKV; run attention+output+AddRMSNorm
+				att, normDone := rt.attentionWithNormPostQKV(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+				if !normDone {
+					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+				}
+			} else {
+				rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+				if lastLayer && !needLogits {
+					rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
+					return generationForwardResult{}, nil
+				}
+				att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+				if !normDone {
+					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+				}
+			}
 		} else {
-			tensor.AddRMSNorm(scratch.norm[:c.HiddenSize], h, mlp, rt.finalNorm, float32(c.RMSNormEps))
+			if lastLayer && !needLogits {
+				rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
+				return generationForwardResult{}, nil
+			}
+			att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+			if !normDone {
+				rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+			}
+		}
+		if !lastLayer {
+			nextNorm := layers[li+1].norm[:c.HiddenSize]
+			if !rt.mlpAddRMSNormMaybeVulkan(sc.norm, tl, sc, h, rt.textLayers[li+1].w.ln1, nextNorm, float32(c.RMSNormEps), true) {
+				mlp := rt.mlp(sc.norm, tl, sc)
+				rt.addRMSNormMaybeVulkan(nextNorm, h, mlp, rt.textLayers[li+1].w.ln1, float32(c.RMSNormEps))
+			}
+		} else {
+			finalNorm := scratch.norm[:c.HiddenSize]
+			if !rt.mlpAddRMSNormMaybeVulkan(sc.norm, tl, sc, h, rt.finalNorm, finalNorm, float32(c.RMSNormEps), false) {
+				mlp := rt.mlp(sc.norm, tl, sc)
+				rt.addRMSNormOutOnlyMaybeVulkan(finalNorm, h, mlp, rt.finalNorm, float32(c.RMSNormEps))
+			}
 		}
 	}
 	norm := scratch.norm[:c.HiddenSize]
+	if !needLogits {
+		return generationForwardResult{}, nil
+	}
 	if c.NumHiddenLayers == 0 {
-		tensor.RMSNorm(norm, h, rt.finalNorm, float32(c.RMSNormEps))
+		rt.rmsNormMaybeVulkan(norm, h, rt.finalNorm, float32(c.RMSNormEps))
 	}
-	logits := scratch.logits[:c.VocabSize]
-	if q := rt.q8LmHead; q != nil {
-		tensor.MatVecQ8(logits, norm, q)
-	} else if q := rt.q6LmHead; q != nil {
-		tensor.MatVecQ6(logits, norm, q)
-	} else if q := rt.q4LmHead; q != nil {
-		tensor.MatVecQ4(logits, norm, q)
-	} else {
-		tensor.MatVec(logits, norm, rt.lmHead, c.VocabSize, c.HiddenSize)
+	if generationCanReturnArgmaxOnly(opts) {
+		if token, _, ok := rt.matVecArgmaxMaybeVulkan(norm, rt.lmHead, rt.q8LmHead, rt.q6LmHead, rt.q4LmHead, c.VocabSize, c.HiddenSize); ok {
+			return generationForwardResult{token: token, hasToken: true}, nil
+		}
+		if rt.q8LmHead != nil {
+			token, _ := tensor.MatVecArgmaxQ8(norm, rt.q8LmHead)
+			return generationForwardResult{token: token, hasToken: true}, nil
+		}
+		if rt.q6LmHead != nil {
+			token, _ := tensor.MatVecArgmaxQ6(norm, rt.q6LmHead)
+			return generationForwardResult{token: token, hasToken: true}, nil
+		}
+		if rt.q4LmHead != nil {
+			token, _ := tensor.MatVecArgmaxQ4(norm, rt.q4LmHead)
+			return generationForwardResult{token: token, hasToken: true}, nil
+		}
+		if len(rt.lmHead) >= c.VocabSize*c.HiddenSize {
+			token, _ := tensor.MatVecArgmax(norm, rt.lmHead, c.VocabSize, c.HiddenSize)
+			return generationForwardResult{token: token, hasToken: true}, nil
+		}
 	}
-	return logits, nil
+	if generationCanReturnCandidatesOnly(opts) {
+		if candidates, ok := rt.matVecTopKMaybeVulkan(norm, rt.lmHead, rt.q8LmHead, rt.q6LmHead, rt.q4LmHead, c.VocabSize, c.HiddenSize, opts.TopK, scratch); ok {
+			return generationForwardResult{candidates: candidates, candidateTemp: opts.Temperature, hasCandidates: true}, nil
+		}
+		if candidates, ok := rt.matVecTopKMaybeCPU(norm, rt.lmHead, rt.q8LmHead, rt.q6LmHead, rt.q4LmHead, c.VocabSize, c.HiddenSize, opts.TopK, opts.Temperature, scratch); ok {
+			return generationForwardResult{candidates: candidates, candidateTemp: opts.Temperature, hasCandidates: true}, nil
+		}
+	}
+	logits := rt.ensureLogitsCapacity(scratch)
+	rt.matVecMaybeQuant(logits, norm, rt.lmHead, rt.q8LmHead, rt.q6LmHead, rt.q4LmHead, c.VocabSize, c.HiddenSize)
+	return generationForwardResult{logits: logits}, nil
 }
 
 func (rt *Runtime) attention(x []float32, cache *kvCache, tl *textLayer, sc *layerScratch, hasRoPE bool, ropeCos, ropeSin []float32) []float32 {
+	out, _ := rt.attentionWithNorm(x, cache, tl, sc, hasRoPE, ropeCos, ropeSin, nil, nil, nil)
+	return out
+}
+
+func (rt *Runtime) attentionCacheOnly(x []float32, cache *kvCache, tl *textLayer, sc *layerScratch, hasRoPE bool, ropeCos, ropeSin []float32) {
+	c := rt.cfg
+	kvRows := c.NumKeyValueHeads * c.HeadDim
+	k := sc.k[:kvRows]
+	v := sc.v[:kvRows]
+	kvReady := false
+	kHasRoPE := false
+	if rt.backend == "vulkan" {
+		kvReady, kHasRoPE = rt.fusedKV(k, v, x, tl, kvRows, c.HiddenSize, c.NumKeyValueHeads, c.HeadDim, hasRoPE, ropeCos, ropeSin)
+	}
+	if !kvReady {
+		rt.matVecMaybeQuant(k, x, tl.w.k, tl.q8.k, tl.q6.k, tl.q4.k, kvRows, c.HiddenSize)
+		rt.matVecMaybeQuant(v, x, tl.w.v, tl.q8.v, tl.q6.v, tl.q4.v, kvRows, c.HiddenSize)
+	}
+	if hasRoPE && !kHasRoPE {
+		rt.mropeMaybeVulkan(k, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
+	}
+	cache.append(k, v)
+}
+
+// attentionChainedFirstLayer attempts the chained RMSNorm+QKVMRoPE path for
+// layer 0 (first token generation).  Fills sc.q, sc.k, sc.v and appends to cache.
+// Returns true on success, false to fall back to separate calls.
+func (rt *Runtime) attentionChainedFirstLayer(sc *layerScratch, cache *kvCache, tl *textLayer, rawInput, normWeight []float32, hasRoPE bool, ropeCos, ropeSin []float32, c *config.Config) bool {
+	if !hasRoPE {
+		return false
+	}
+	qRows := c.NumAttentionHeads * c.HeadDim
+	kvRows := c.NumKeyValueHeads * c.HeadDim
+	q := sc.q[:qRows]
+	k := sc.k[:kvRows]
+	v := sc.v[:kvRows]
+	eps := float32(c.RMSNormEps)
+	// Try chained RMSNorm + fused Q8 QKV+MRoPE in a single command buffer
+	if rt.fusedQKVMRoPEWithNormQ8(q, k, v, rawInput, normWeight, tl, qRows, kvRows, c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin, eps) {
+		cache.append(k, v)
+		return true
+	}
+
+	if rt.fusedQKVMRoPEWithNorm(q, k, v, rawInput, normWeight, tl, qRows, kvRows, c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin, eps) {
+		cache.append(k, v)
+		return true
+	}
+	return false
+}
+
+// attentionWithNormPostQKV runs the attention + output + AddRMSNorm portion
+// of attentionWithNorm, assuming QKV has already been computed and cached.
+func (rt *Runtime) attentionWithNormPostQKV(x []float32, cache *kvCache, tl *textLayer, sc *layerScratch, hasRoPE bool, ropeCos, ropeSin, residual, normWeight, normOut []float32) ([]float32, bool) {
+	c := rt.cfg
+	qRows := c.NumAttentionHeads * c.HeadDim
+	q := sc.q[:qRows]
+	headOut := sc.headOut[:qRows]
+	// Attention + output projection + AddRMSNorm (same as attentionWithNorm after QKV)
+	if tl.q8.o == nil && tl.q6.o == nil && tl.q4.o == nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNorm(normOut, residual, q, cache, tl.w.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q8.o != nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNormQ8(normOut, residual, q, cache, tl.q8.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q6.o != nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNormQ6(normOut, residual, q, cache, tl.q6.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q4.o != nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNormQ4(normOut, residual, q, cache, tl.q4.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q8.o != nil &&
+		rt.vulkanTextCacheAttentionOutQ8(sc.att[:c.HiddenSize], q, cache, tl.q8.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if tl.q6.o != nil &&
+		rt.vulkanTextCacheAttentionOutQ6(sc.att[:c.HiddenSize], q, cache, tl.q6.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if tl.q4.o != nil &&
+		rt.vulkanTextCacheAttentionOutQ4(sc.att[:c.HiddenSize], q, cache, tl.q4.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if tl.q8.o == nil && tl.q6.o == nil && tl.q4.o == nil &&
+		rt.vulkanTextCacheAttentionOut(sc.att[:c.HiddenSize], q, cache, tl.w.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if rt.vulkanTextCacheAttention(headOut, q, cache, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		out := sc.att[:c.HiddenSize]
+		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+		return out, false
+	}
+	if cache.len <= 6 {
+		group := c.NumAttentionHeads / c.NumKeyValueHeads
+		scale := invSqrt(c.HeadDim)
+		for kvh := 0; kvh < c.NumKeyValueHeads; kvh++ {
+			for g := 0; g < group; g++ {
+				h := kvh*group + g
+				dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
+				if cache.len == 1 {
+					copyCacheValue(dst, cache, kvh, c.HeadDim)
+					continue
+				}
+				cacheAttentionSmall(dst, q[h*c.HeadDim:(h+1)*c.HeadDim], cache, kvh, c.HeadDim, scale)
+			}
+		}
+		out := sc.att[:c.HiddenSize]
+		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+		return out, false
+	}
+	group := c.NumAttentionHeads / c.NumKeyValueHeads
+	scale := invSqrt(c.HeadDim)
+	numHeads := c.NumAttentionHeads
+	if cap(sc.scores) < numHeads*cache.len {
+		sc.scores = make([]float32, numHeads*cache.len)
+	}
+	scoresBuf := sc.scores[:numHeads*cache.len]
+	if numHeads >= 8 && cache.len >= 64 && runtime.GOMAXPROCS(0) > 1 {
+		workers := 4
+		if workers > numHeads {
+			workers = numHeads
+		}
+		chunk := (numHeads + workers - 1) / workers
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			start := w * chunk
+			end := start + chunk
+			if end > numHeads {
+				end = numHeads
+			}
+			if start >= end {
+				continue
+			}
+			wg.Add(1)
+			go func(start, end int) {
+				defer wg.Done()
+				for h := start; h < end; h++ {
+					kvh := h / group
+					scores := scoresBuf[h*cache.len : (h+1)*cache.len]
+					dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
+					qv := q[h*c.HeadDim : (h+1)*c.HeadDim]
+					cacheAttentionScores(scores, qv, cache, kvh, c.HeadDim, scale)
+					tensor.SoftmaxInPlace(scores)
+					weightedCacheValueSum(dst, cache, kvh, c.HeadDim, scores)
+				}
+			}(start, end)
+		}
+		wg.Wait()
+	} else {
+		for h := 0; h < numHeads; h++ {
+			kvh := h / group
+			scores := scoresBuf[h*cache.len : (h+1)*cache.len]
+			dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
+			qv := q[h*c.HeadDim : (h+1)*c.HeadDim]
+			cacheAttentionScores(scores, qv, cache, kvh, c.HeadDim, scale)
+			tensor.SoftmaxInPlace(scores)
+			weightedCacheValueSum(dst, cache, kvh, c.HeadDim, scores)
+		}
+	}
+	out := sc.att[:c.HiddenSize]
+	rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+	return out, false
+}
+
+func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer, sc *layerScratch, hasRoPE bool, ropeCos, ropeSin, residual, normWeight, normOut []float32) ([]float32, bool) {
 	c := rt.cfg
 	qRows := c.NumAttentionHeads * c.HeadDim
 	kvRows := c.NumKeyValueHeads * c.HeadDim
 	q := sc.q[:qRows]
 	k := sc.k[:kvRows]
 	v := sc.v[:kvRows]
-	if !fusedQKV(q, k, v, x, tl, qRows, kvRows, c.HiddenSize) {
-		matVecMaybeQuant(q, x, tl.w.q, tl.q8.q, tl.q6.q, tl.q4.q, qRows, c.HiddenSize)
-		matVecMaybeQuant(k, x, tl.w.k, tl.q8.k, tl.q6.k, tl.q4.k, kvRows, c.HiddenSize)
-		matVecMaybeQuant(v, x, tl.w.v, tl.q8.v, tl.q6.v, tl.q4.v, kvRows, c.HiddenSize)
+	if cache.len == 0 {
+		qkvHasRoPE := false
+		qkvReady := false
+		if rt.backend == "vulkan" {
+			qkvReady, qkvHasRoPE = rt.fusedFirstTokenKV(q, k, v, x, tl, qRows, kvRows, c.HiddenSize, c.NumKeyValueHeads, c.HeadDim, hasRoPE, ropeCos, ropeSin)
+		}
+		if !qkvReady {
+			rt.matVecMaybeQuant(k, x, tl.w.k, tl.q8.k, tl.q6.k, tl.q4.k, kvRows, c.HiddenSize)
+			rt.matVecMaybeQuant(v, x, tl.w.v, tl.q8.v, tl.q6.v, tl.q4.v, kvRows, c.HiddenSize)
+		}
+		if hasRoPE && !qkvHasRoPE {
+			rt.mropeMaybeVulkan(k, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
+		}
+		cache.append(k, v)
+		if rt.vulkanTextFirstTokenValueOutAddRMSNorm(normOut, residual, cache, tl, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+			return nil, true
+		}
+		out := sc.att[:c.HiddenSize]
+		if len(normOut) < qRows || len(residual) < qRows || len(normWeight) < qRows {
+			if rt.vulkanTextFirstTokenAttentionOut(out, cache, tl, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+				return out, false
+			}
+		} else if rt.vulkanTextFirstTokenAttentionOut(out, cache, tl, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+			rt.addRMSNormMaybeVulkan(normOut, residual, out, normWeight, float32(c.RMSNormEps))
+			return nil, true
+		}
+		headOut := sc.headOut[:qRows]
+		expandValueHeads(headOut, v, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim)
+		if rt.matVecAddRMSNormMaybeVulkan(normOut, residual, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, normWeight, c.HiddenSize, qRows, float32(c.RMSNormEps)) {
+			return nil, true
+		}
+		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+		return out, false
 	}
+	qkvHasRoPE := false
 	if hasRoPE {
-		applyMRoPEWithTable(q, c.NumAttentionHeads, c.HeadDim, ropeCos, ropeSin)
-		applyMRoPEWithTable(k, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
+		qkvHasRoPE = rt.fusedQKVMRoPE(q, k, v, x, tl, qRows, kvRows, c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
+	}
+	if !qkvHasRoPE && !rt.fusedQKV(q, k, v, x, tl, qRows, kvRows, c.HiddenSize) {
+		rt.matVecMaybeQuant(q, x, tl.w.q, tl.q8.q, tl.q6.q, tl.q4.q, qRows, c.HiddenSize)
+		rt.matVecMaybeQuant(k, x, tl.w.k, tl.q8.k, tl.q6.k, tl.q4.k, kvRows, c.HiddenSize)
+		rt.matVecMaybeQuant(v, x, tl.w.v, tl.q8.v, tl.q6.v, tl.q4.v, kvRows, c.HiddenSize)
+	}
+	if hasRoPE && !qkvHasRoPE {
+		rt.mropePairMaybeVulkan(q, k, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
 	}
 	cache.append(k, v)
 
 	headOut := sc.headOut[:qRows]
+	if tl.q8.o == nil && tl.q6.o == nil && tl.q4.o == nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNorm(normOut, residual, q, cache, tl.w.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q8.o != nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNormQ8(normOut, residual, q, cache, tl.q8.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q6.o != nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNormQ6(normOut, residual, q, cache, tl.q6.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q4.o != nil &&
+		rt.vulkanTextCacheAttentionOutAddRMSNormQ4(normOut, residual, q, cache, tl.q4.o, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	if tl.q8.o != nil &&
+		rt.vulkanTextCacheAttentionOutQ8(sc.att[:c.HiddenSize], q, cache, tl.q8.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if tl.q6.o != nil &&
+		rt.vulkanTextCacheAttentionOutQ6(sc.att[:c.HiddenSize], q, cache, tl.q6.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if tl.q4.o != nil &&
+		rt.vulkanTextCacheAttentionOutQ4(sc.att[:c.HiddenSize], q, cache, tl.q4.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if tl.q8.o == nil && tl.q6.o == nil && tl.q4.o == nil &&
+		rt.vulkanTextCacheAttentionOut(sc.att[:c.HiddenSize], q, cache, tl.w.o, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return sc.att[:c.HiddenSize], false
+	}
+	if rt.vulkanTextCacheAttention(headOut, q, cache, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		out := sc.att[:c.HiddenSize]
+		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+		return out, false
+	}
+	if cache.len <= 6 {
+		group := c.NumAttentionHeads / c.NumKeyValueHeads
+		scale := invSqrt(c.HeadDim)
+		for kvh := 0; kvh < c.NumKeyValueHeads; kvh++ {
+			for g := 0; g < group; g++ {
+				h := kvh*group + g
+				dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
+				if cache.len == 1 {
+					copyCacheValue(dst, cache, kvh, c.HeadDim)
+					continue
+				}
+				cacheAttentionSmall(dst, q[h*c.HeadDim:(h+1)*c.HeadDim], cache, kvh, c.HeadDim, scale)
+			}
+		}
+		out := sc.att[:c.HiddenSize]
+		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+		return out, false
+	}
 	group := c.NumAttentionHeads / c.NumKeyValueHeads
 	scale := invSqrt(c.HeadDim)
-	for h := 0; h < c.NumAttentionHeads; h++ {
-		kvh := h / group
-		dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
-		if cache.len == 1 {
-			copyCacheValue(dst, cache, kvh, c.HeadDim)
-			continue
+	numHeads := c.NumAttentionHeads
+	if cap(sc.scores) < numHeads*cache.len {
+		sc.scores = make([]float32, numHeads*cache.len)
+	}
+	scoresBuf := sc.scores[:numHeads*cache.len]
+	if numHeads >= 8 && cache.len >= 64 && runtime.GOMAXPROCS(0) > 1 {
+		workers := 4
+		if workers > numHeads {
+			workers = numHeads
 		}
-		qv := q[h*c.HeadDim : (h+1)*c.HeadDim]
-		if cache.len == 2 {
-			cacheAttentionLen2(dst, qv, cache, kvh, c.HeadDim, scale)
-			continue
+		chunk := (numHeads + workers - 1) / workers
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			start := w * chunk
+			end := start + chunk
+			if end > numHeads {
+				end = numHeads
+			}
+			if start >= end {
+				continue
+			}
+			wg.Add(1)
+			go func(start, end int) {
+				defer wg.Done()
+				for h := start; h < end; h++ {
+					kvh := h / group
+					scores := scoresBuf[h*cache.len : (h+1)*cache.len]
+					dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
+					qv := q[h*c.HeadDim : (h+1)*c.HeadDim]
+					cacheAttentionScores(scores, qv, cache, kvh, c.HeadDim, scale)
+					tensor.SoftmaxInPlace(scores)
+					weightedCacheValueSum(dst, cache, kvh, c.HeadDim, scores)
+				}
+			}(start, end)
 		}
-		if cache.len == 3 {
-			cacheAttentionLen3(dst, qv, cache, kvh, c.HeadDim, scale)
-			continue
+		wg.Wait()
+	} else {
+		for h := 0; h < numHeads; h++ {
+			kvh := h / group
+			scores := scoresBuf[h*cache.len : (h+1)*cache.len]
+			dst := headOut[h*c.HeadDim : (h+1)*c.HeadDim]
+			qv := q[h*c.HeadDim : (h+1)*c.HeadDim]
+			cacheAttentionScores(scores, qv, cache, kvh, c.HeadDim, scale)
+			tensor.SoftmaxInPlace(scores)
+			weightedCacheValueSum(dst, cache, kvh, c.HeadDim, scores)
 		}
-		if cache.len == 4 && (c.HeadDim == 128 || c.HeadDim == 64) {
-			cacheAttentionLen4(dst, qv, cache, kvh, c.HeadDim, scale)
-			continue
-		}
-		if cap(sc.scores) < cache.len {
-			sc.scores = make([]float32, cache.len)
-		}
-		scores := sc.scores[:cache.len]
-		cacheAttentionScores(scores, qv, cache, kvh, c.HeadDim, scale)
-		tensor.SoftmaxInPlace(scores)
-		weightedCacheValueSum(dst, cache, kvh, c.HeadDim, scores)
 	}
 	out := sc.att[:c.HiddenSize]
-	matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
-	return out
+	rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
+	return out, false
+}
+
+func (rt *Runtime) vulkanTextCacheAttention(out, q []float32, cache *kvCache, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionF32) || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok {
+		return false
+	}
+	if !textAttentionOnlyWorkReady(cache.len, numHeads, headDim) {
+		return false
+	}
+	if len(out) < qRows || len(q) < qRows || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionF32(out, q, kCache, vCache, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOut(out, q []float32, cache *kvCache, w []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutF32) || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, false) {
+		return false
+	}
+	if len(out) < qRows || len(q) < qRows || !f32MatVecWeightsReady(w, qRows, qRows) || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutF32(out, q, kCache, vCache, w, rt.zeroBias(qRows), cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutAddRMSNorm(normOut, residual, q []float32, cache *kvCache, w, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutAddRMSNormF32) || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(q) < qRows || !f32MatVecWeightsReady(w, qRows, qRows) || len(normWeight) < qRows || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutAddRMSNormF32(normOut, residual, q, kCache, vCache, w, rt.zeroBias(qRows), normWeight, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutAddRMSNormF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextFirstTokenValueOutAddRMSNorm(normOut, residual []float32, cache *kvCache, tl *textLayer, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if tl == nil || cache == nil || cache.len != 1 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, kvDim, _, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok {
+		return false
+	}
+	if !textFirstTokenValueOutNormWorkReady(qRows, kvDim) {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(cache.k) < kvDim || len(cache.v) < kvDim || len(normWeight) < qRows {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if tl.q8.o != nil {
+		if !q8MatVecShapeOK(tl.q8.o, qRows, qRows) || !rt.vulkanOpEnabled(vulkanOpTextFirstTokenValueOutAddRMSNormQ8) {
+			return false
+		}
+		if err := backend.VulkanTextFirstTokenValueOutAddRMSNormQ8(normOut, residual, kCache, vCache, tl.q8.o, normWeight, cache.epoch, numHeads, kvHeads, headDim); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpTextFirstTokenValueOutAddRMSNormQ8, err)
+		}
+		return false
+	}
+	if tl.q6.o != nil {
+		if !q6MatVecShapeOK(tl.q6.o, qRows, qRows) || !rt.vulkanOpEnabled(vulkanOpTextFirstTokenValueOutAddRMSNormQ6) {
+			return false
+		}
+		if err := backend.VulkanTextFirstTokenValueOutAddRMSNormQ6(normOut, residual, kCache, vCache, tl.q6.o, normWeight, cache.epoch, numHeads, kvHeads, headDim); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpTextFirstTokenValueOutAddRMSNormQ6, err)
+		}
+		return false
+	}
+	if tl.q4.o != nil {
+		if !q4MatVecShapeOK(tl.q4.o, qRows, qRows) || !rt.vulkanOpEnabled(vulkanOpTextFirstTokenValueOutAddRMSNormQ4) {
+			return false
+		}
+		if err := backend.VulkanTextFirstTokenValueOutAddRMSNormQ4(normOut, residual, kCache, vCache, tl.q4.o, normWeight, cache.epoch, numHeads, kvHeads, headDim); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpTextFirstTokenValueOutAddRMSNormQ4, err)
+		}
+		return false
+	}
+	if !rt.vulkanOpEnabled(vulkanOpTextFirstTokenValueOutAddRMSNormF32) || !f32MatVecWeightsReady(tl.w.o, qRows, qRows) {
+		return false
+	}
+	if err := backend.VulkanTextFirstTokenValueOutAddRMSNormF32(normOut, residual, kCache, vCache, tl.w.o, rt.zeroBias(qRows), normWeight, cache.epoch, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextFirstTokenValueOutAddRMSNormF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextFirstTokenAttentionOut(out []float32, cache *kvCache, tl *textLayer, numHeads, kvHeads, headDim int) bool {
+	if tl == nil || cache == nil || cache.len != 1 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows := numHeads * headDim
+	if len(out) < qRows {
+		return false
+	}
+	q := rt.zeroBias(qRows)
+	if tl.q8.o != nil {
+		return rt.vulkanTextCacheAttentionOutQ8(out, q, cache, tl.q8.o, numHeads, kvHeads, headDim)
+	}
+	if tl.q6.o != nil {
+		return rt.vulkanTextCacheAttentionOutQ6(out, q, cache, tl.q6.o, numHeads, kvHeads, headDim)
+	}
+	if tl.q4.o != nil {
+		return rt.vulkanTextCacheAttentionOutQ4(out, q, cache, tl.q4.o, numHeads, kvHeads, headDim)
+	}
+	return rt.vulkanTextCacheAttentionOut(out, q, cache, tl.w.o, numHeads, kvHeads, headDim)
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutAddRMSNormQ8(normOut, residual, q []float32, cache *kvCache, w *tensor.Q8Matrix, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutAddRMSNormQ8) || cache == nil || w == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok || w.Rows != qRows || w.Cols != qRows {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(q) < qRows || !q8MatVecShapeOK(w, qRows, qRows) || len(normWeight) < qRows || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutAddRMSNormQ8(normOut, residual, q, kCache, vCache, w, normWeight, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutAddRMSNormQ8, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutAddRMSNormQ6(normOut, residual, q []float32, cache *kvCache, w *tensor.Q6Matrix, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutAddRMSNormQ6) || cache == nil || w == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok || w.Rows != qRows || w.Cols != qRows {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(q) < qRows || !q6MatVecShapeOK(w, qRows, qRows) || len(normWeight) < qRows || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutAddRMSNormQ6(normOut, residual, q, kCache, vCache, w, normWeight, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutAddRMSNormQ6, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutAddRMSNormQ4(normOut, residual, q []float32, cache *kvCache, w *tensor.Q4Matrix, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutAddRMSNormQ4) || cache == nil || w == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok || w.Rows != qRows || w.Cols != qRows {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(q) < qRows || !q4MatVecShapeOK(w, qRows, qRows) || len(normWeight) < qRows || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutAddRMSNormQ4(normOut, residual, q, kCache, vCache, w, normWeight, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutAddRMSNormQ4, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutQ8(out, q []float32, cache *kvCache, w *tensor.Q8Matrix, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutQ8) || cache == nil || w == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok || w.Rows != qRows || w.Cols != qRows {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, false) {
+		return false
+	}
+	if len(out) < qRows || len(q) < qRows || !q8MatVecShapeOK(w, qRows, qRows) || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutQ8(out, q, kCache, vCache, w, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutQ8, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutQ6(out, q []float32, cache *kvCache, w *tensor.Q6Matrix, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutQ6) || cache == nil || w == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok || w.Rows != qRows || w.Cols != qRows {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, false) {
+		return false
+	}
+	if len(out) < qRows || len(q) < qRows || !q6MatVecShapeOK(w, qRows, qRows) || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutQ6(out, q, kCache, vCache, w, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutQ6, err)
+	}
+	return false
+}
+
+func (rt *Runtime) vulkanTextCacheAttentionOutQ4(out, q []float32, cache *kvCache, w *tensor.Q4Matrix, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpTextAttentionOutQ4) || cache == nil || w == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
+		return false
+	}
+	qRows, _, cacheElems, ok := checkedTextAttentionDims(cache, numHeads, kvHeads, headDim)
+	if !ok || w.Rows != qRows || w.Cols != qRows {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, false) {
+		return false
+	}
+	if len(out) < qRows || len(q) < qRows || !q4MatVecShapeOK(w, qRows, qRows) || !textCacheStorageReady(cache, cacheElems) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	if err := backend.VulkanTextAttentionOutQ4(out, q, kCache, vCache, w, cache.epoch, cache.len, numHeads, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpTextAttentionOutQ4, err)
+	}
+	return false
+}
+
+func vulkanTextAttentionMinWork() int {
+	return cachedVulkanMinWork(&vulkanTextAttentionMinWorkOnce, &vulkanTextAttentionMinWorkValue, vulkanTextAttentionMinWorkEnv, 0)
+}
+
+func vulkanMatVecMinWork() int {
+	return cachedVulkanMinWork(&vulkanMatVecMinWorkOnce, &vulkanMatVecMinWorkValue, vulkanMatVecMinWorkEnv, defaultVulkanMatVecMinWork)
+}
+
+func vulkanVectorMinWork() int {
+	return cachedVulkanMinWork(&vulkanVectorMinWorkOnce, &vulkanVectorMinWorkValue, vulkanVectorMinWorkEnv, defaultVulkanVectorMinWork)
+}
+
+var (
+	vulkanMatVecMinWorkOnce         sync.Once
+	vulkanMatVecMinWorkValue        int
+	vulkanTextAttentionMinWorkOnce  sync.Once
+	vulkanTextAttentionMinWorkValue int
+	vulkanVectorMinWorkOnce         sync.Once
+	vulkanVectorMinWorkValue        int
+	vulkanVisionMinWorkOnce         sync.Once
+	vulkanVisionMinWorkValue        int
+)
+
+func cachedVulkanMinWork(once *sync.Once, value *int, env string, defaultValue int) int {
+	once.Do(func() {
+		*value = vulkanMinWorkFromEnv(env, defaultValue)
+	})
+	return *value
+}
+
+func vulkanMinWorkFromEnv(env string, defaultValue int) int {
+	raw := os.Getenv(env)
+	if raw == "" {
+		return defaultValue
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return defaultValue
+	}
+	return n
+}
+
+func (rt *Runtime) zeroBias(n int) []float32 {
+	if n <= 0 {
+		return nil
+	}
+	if n <= len(rt.zeroBiasSmall) {
+		return rt.zeroBiasSmall[:n]
+	}
+	rt.zeroBiasMu.Lock()
+	defer rt.zeroBiasMu.Unlock()
+	if cap(rt.zeroBiasBuf) < n {
+		rt.zeroBiasBuf = make([]float32, n)
+	}
+	rt.zeroBiasBuf = rt.zeroBiasBuf[:n]
+	return rt.zeroBiasBuf
 }
 
 func copyCacheValue(dst []float32, cache *kvCache, head, dim int) {
@@ -2648,11 +4290,28 @@ func copyCacheValue(dst []float32, cache *kvCache, head, dim int) {
 	copy(dst[:dim], cache.v[base:base+dim])
 }
 
+func expandValueHeads(dst, v []float32, numHeads, kvHeads, dim int) {
+	group := numHeads / kvHeads
+	if group == 1 {
+		copy(dst[:numHeads*dim], v[:numHeads*dim])
+		return
+	}
+	for kvh := 0; kvh < kvHeads; kvh++ {
+		src := v[kvh*dim : (kvh+1)*dim]
+		dstBase := kvh * group * dim
+		for g := 0; g < group; g++ {
+			copy(dst[dstBase+g*dim:dstBase+(g+1)*dim], src)
+		}
+	}
+}
+
 func cacheAttentionScores(scores, q []float32, cache *kvCache, head, dim int, scale float32) {
 	headBase := head * dim
 	if len(scores) == 1 {
 		if dim == 128 {
 			scores[0] = dotAt128(q, cache.k, headBase) * scale
+		} else if dim == 96 {
+			scores[0] = dotAt96(q, cache.k, headBase) * scale
 		} else if dim == 64 {
 			scores[0] = dotAt64(q, cache.k, headBase) * scale
 		} else {
@@ -2686,6 +4345,32 @@ func cacheAttentionScores(scores, q []float32, cache *kvCache, head, dim int, sc
 		}
 		return
 	}
+	if dim == 96 {
+		t := 0
+		for ; t+3 < len(scores); t += 4 {
+			base0 := t*cache.kvDim + headBase
+			base1 := base0 + cache.kvDim
+			base2 := base1 + cache.kvDim
+			base3 := base2 + cache.kvDim
+			s0, s1, s2, s3 := dotAt96QuadAt(q, cache.k, base0, base1, base2, base3)
+			scores[t] = s0 * scale
+			scores[t+1] = s1 * scale
+			scores[t+2] = s2 * scale
+			scores[t+3] = s3 * scale
+		}
+		for ; t+1 < len(scores); t += 2 {
+			base0 := t*cache.kvDim + headBase
+			base1 := base0 + cache.kvDim
+			s0, s1 := dotAt96PairAt(q, cache.k, base0, base1)
+			scores[t] = s0 * scale
+			scores[t+1] = s1 * scale
+		}
+		for ; t < len(scores); t++ {
+			base := t*cache.kvDim + headBase
+			scores[t] = dotAt96(q, cache.k, base) * scale
+		}
+		return
+	}
 	if dim == 64 {
 		t := 0
 		for ; t+3 < len(scores); t += 4 {
@@ -2712,7 +4397,26 @@ func cacheAttentionScores(scores, q []float32, cache *kvCache, head, dim int, sc
 		}
 		return
 	}
-	for t := 0; t < len(scores); t++ {
+	t := 0
+	for ; t+3 < len(scores); t += 4 {
+		base0 := t*cache.kvDim + headBase
+		base1 := base0 + cache.kvDim
+		base2 := base1 + cache.kvDim
+		base3 := base2 + cache.kvDim
+		s0, s1, s2, s3 := dotAtQuadAt(q, cache.k, base0, base1, base2, base3, dim)
+		scores[t] = s0 * scale
+		scores[t+1] = s1 * scale
+		scores[t+2] = s2 * scale
+		scores[t+3] = s3 * scale
+	}
+	for ; t+1 < len(scores); t += 2 {
+		base0 := t*cache.kvDim + headBase
+		base1 := base0 + cache.kvDim
+		s0, s1 := dotAtPairAt(q, cache.k, base0, base1, dim)
+		scores[t] = s0 * scale
+		scores[t+1] = s1 * scale
+	}
+	for ; t < len(scores); t++ {
 		base := t*cache.kvDim + headBase
 		scores[t] = dotAt(q, cache.k, base, dim) * scale
 	}
@@ -2729,9 +4433,139 @@ func cacheAttentionSmall(dst, q []float32, cache *kvCache, head, dim int, scale 
 	case 4:
 		cacheAttentionLen4(dst, q, cache, head, dim, scale)
 		return true
+	case 5:
+		cacheAttentionLen5(dst, q, cache, head, dim, scale)
+		return true
+	case 6:
+		cacheAttentionLen6(dst, q, cache, head, dim, scale)
+		return true
 	default:
 		return false
 	}
+}
+
+func cacheAttentionLen6(dst, q []float32, cache *kvCache, head, dim int, scale float32) {
+	headBase := head * dim
+	base1 := cache.kvDim + headBase
+	base2 := base1 + cache.kvDim
+	base3 := base2 + cache.kvDim
+	base4 := base3 + cache.kvDim
+	base5 := base4 + cache.kvDim
+	var s0, s1, s2, s3 float32
+	if dim == 128 {
+		s0, s1, s2, s3 = dotAt128QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else if dim == 96 {
+		s0, s1, s2, s3 = dotAt96QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else if dim == 64 {
+		s0, s1, s2, s3 = dotAt64QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else {
+		s0, s1, s2, s3 = dotAtQuadAt(q, cache.k, headBase, base1, base2, base3, dim)
+	}
+	var s4, s5 float32
+	if dim == 128 {
+		s4, s5 = dotAt128PairAt(q, cache.k, base4, base5)
+	} else if dim == 96 {
+		s4, s5 = dotAt96PairAt(q, cache.k, base4, base5)
+	} else if dim == 64 {
+		s4, s5 = dotAt64PairAt(q, cache.k, base4, base5)
+	} else {
+		s4, s5 = dotAtPairAt(q, cache.k, base4, base5, dim)
+	}
+	s0 *= scale
+	s1 *= scale
+	s2 *= scale
+	s3 *= scale
+	s4 *= scale
+	s5 *= scale
+	m := max32Local(max32Local(max32Local(s0, s1), max32Local(s2, s3)), max32Local(s4, s5))
+	e0 := float32(math.Exp(float64(s0 - m)))
+	e1 := float32(math.Exp(float64(s1 - m)))
+	e2 := float32(math.Exp(float64(s2 - m)))
+	e3 := float32(math.Exp(float64(s3 - m)))
+	e4 := float32(math.Exp(float64(s4 - m)))
+	e5 := float32(math.Exp(float64(s5 - m)))
+	inv := 1 / ((e0 + e1) + (e2 + e3) + (e4 + e5))
+	w0, w1, w2, w3, w4, w5 := e0*inv, e1*inv, e2*inv, e3*inv, e4*inv, e5*inv
+	weights := [...]float32{w0, w1, w2, w3, w4, w5}
+	if dim == 128 {
+		weightedCacheValueSum128(dst, cache, head, weights[:])
+		return
+	}
+	if dim == 96 {
+		weightedCacheValueSum96(dst, cache, head, weights[:])
+		return
+	}
+	if dim == 64 {
+		weightedCacheValueSum64(dst, cache, head, weights[:])
+		return
+	}
+	x0 := cache.v[headBase : headBase+dim]
+	x1 := cache.v[base1 : base1+dim]
+	x2 := cache.v[base2 : base2+dim]
+	x3 := cache.v[base3 : base3+dim]
+	x4 := cache.v[base4 : base4+dim]
+	x5 := cache.v[base5 : base5+dim]
+	weightedValueSum6(dst, x0, x1, x2, x3, x4, x5, w0, w1, w2, w3, w4, w5, dim)
+}
+
+func cacheAttentionLen5(dst, q []float32, cache *kvCache, head, dim int, scale float32) {
+	headBase := head * dim
+	base1 := cache.kvDim + headBase
+	base2 := base1 + cache.kvDim
+	base3 := base2 + cache.kvDim
+	base4 := base3 + cache.kvDim
+	var s0, s1, s2, s3 float32
+	if dim == 128 {
+		s0, s1, s2, s3 = dotAt128QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else if dim == 96 {
+		s0, s1, s2, s3 = dotAt96QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else if dim == 64 {
+		s0, s1, s2, s3 = dotAt64QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else {
+		s0, s1, s2, s3 = dotAtQuadAt(q, cache.k, headBase, base1, base2, base3, dim)
+	}
+	var s4 float32
+	if dim == 128 {
+		s4 = dotAt128(q, cache.k, base4)
+	} else if dim == 96 {
+		s4 = dotAt96(q, cache.k, base4)
+	} else if dim == 64 {
+		s4 = dotAt64(q, cache.k, base4)
+	} else {
+		s4 = dotAt(q, cache.k, base4, dim)
+	}
+	s0 *= scale
+	s1 *= scale
+	s2 *= scale
+	s3 *= scale
+	s4 *= scale
+	m := max32Local(max32Local(s0, s1), max32Local(max32Local(s2, s3), s4))
+	e0 := float32(math.Exp(float64(s0 - m)))
+	e1 := float32(math.Exp(float64(s1 - m)))
+	e2 := float32(math.Exp(float64(s2 - m)))
+	e3 := float32(math.Exp(float64(s3 - m)))
+	e4 := float32(math.Exp(float64(s4 - m)))
+	inv := 1 / ((e0 + e1) + (e2 + e3) + e4)
+	w0, w1, w2, w3, w4 := e0*inv, e1*inv, e2*inv, e3*inv, e4*inv
+	weights := [...]float32{w0, w1, w2, w3, w4}
+	if dim == 128 {
+		weightedCacheValueSum128(dst, cache, head, weights[:])
+		return
+	}
+	if dim == 96 {
+		weightedCacheValueSum96(dst, cache, head, weights[:])
+		return
+	}
+	if dim == 64 {
+		weightedCacheValueSum64(dst, cache, head, weights[:])
+		return
+	}
+	x0 := cache.v[headBase : headBase+dim]
+	x1 := cache.v[base1 : base1+dim]
+	x2 := cache.v[base2 : base2+dim]
+	x3 := cache.v[base3 : base3+dim]
+	x4 := cache.v[base4 : base4+dim]
+	weightedCacheValueSum5(dst, x0, x1, x2, x3, x4, w0, w1, w2, w3, w4, dim)
 }
 
 func cacheAttentionLen3(dst, q []float32, cache *kvCache, head, dim int, scale float32) {
@@ -2741,15 +4575,18 @@ func cacheAttentionLen3(dst, q []float32, cache *kvCache, head, dim int, scale f
 	var s0, s1 float32
 	if dim == 128 {
 		s0, s1 = dotAt128PairAt(q, cache.k, headBase, base1)
+	} else if dim == 96 {
+		s0, s1 = dotAt96PairAt(q, cache.k, headBase, base1)
 	} else if dim == 64 {
 		s0, s1 = dotAt64PairAt(q, cache.k, headBase, base1)
 	} else {
-		s0 = dotAt(q, cache.k, headBase, dim)
-		s1 = dotAt(q, cache.k, base1, dim)
+		s0, s1 = dotAtPairAt(q, cache.k, headBase, base1, dim)
 	}
 	var s2 float32
 	if dim == 128 {
 		s2 = dotAt128(q, cache.k, base2)
+	} else if dim == 96 {
+		s2 = dotAt96(q, cache.k, base2)
 	} else if dim == 64 {
 		s2 = dotAt64(q, cache.k, base2)
 	} else {
@@ -2771,6 +4608,10 @@ func cacheAttentionLen3(dst, q []float32, cache *kvCache, head, dim int, scale f
 		weightedValueSum3_128(dst, x0, x1, x2, w0, w1, w2)
 		return
 	}
+	if dim == 96 {
+		weightedValueSum3_96(dst, x0, x1, x2, w0, w1, w2)
+		return
+	}
 	if dim == 64 {
 		weightedValueSum3_64(dst, x0, x1, x2, w0, w1, w2)
 		return
@@ -2786,13 +4627,12 @@ func cacheAttentionLen4(dst, q []float32, cache *kvCache, head, dim int, scale f
 	var s0, s1, s2, s3 float32
 	if dim == 128 {
 		s0, s1, s2, s3 = dotAt128QuadAt(q, cache.k, headBase, base1, base2, base3)
+	} else if dim == 96 {
+		s0, s1, s2, s3 = dotAt96QuadAt(q, cache.k, headBase, base1, base2, base3)
 	} else if dim == 64 {
 		s0, s1, s2, s3 = dotAt64QuadAt(q, cache.k, headBase, base1, base2, base3)
 	} else {
-		s0 = dotAt(q, cache.k, headBase, dim)
-		s1 = dotAt(q, cache.k, base1, dim)
-		s2 = dotAt(q, cache.k, base2, dim)
-		s3 = dotAt(q, cache.k, base3, dim)
+		s0, s1, s2, s3 = dotAtQuadAt(q, cache.k, headBase, base1, base2, base3, dim)
 	}
 	s0 *= scale
 	s1 *= scale
@@ -2813,6 +4653,10 @@ func cacheAttentionLen4(dst, q []float32, cache *kvCache, head, dim int, scale f
 		weightedValueSum4_128(dst, x0, x1, x2, x3, w0, w1, w2, w3)
 		return
 	}
+	if dim == 96 {
+		weightedValueSum4_96(dst, x0, x1, x2, x3, w0, w1, w2, w3)
+		return
+	}
 	if dim == 64 {
 		weightedValueSum4_64(dst, x0, x1, x2, x3, w0, w1, w2, w3)
 		return
@@ -2826,11 +4670,12 @@ func cacheAttentionLen2(dst, q []float32, cache *kvCache, head, dim int, scale f
 	var s0, s1 float32
 	if dim == 128 {
 		s0, s1 = dotAt128PairAt(q, cache.k, headBase, base1)
+	} else if dim == 96 {
+		s0, s1 = dotAt96PairAt(q, cache.k, headBase, base1)
 	} else if dim == 64 {
 		s0, s1 = dotAt64PairAt(q, cache.k, headBase, base1)
 	} else {
-		s0 = dotAt(q, cache.k, headBase, dim)
-		s1 = dotAt(q, cache.k, base1, dim)
+		s0, s1 = dotAtPairAt(q, cache.k, headBase, base1, dim)
 	}
 	s0 *= scale
 	s1 *= scale
@@ -2852,6 +4697,10 @@ func cacheAttentionLen2(dst, q []float32, cache *kvCache, head, dim int, scale f
 		weightedValueSum2_128(dst, x0, x1, w0, w1)
 		return
 	}
+	if dim == 96 {
+		weightedValueSum2_96(dst, x0, x1, w0, w1)
+		return
+	}
 	if dim == 64 {
 		weightedValueSum2_64(dst, x0, x1, w0, w1)
 		return
@@ -2860,6 +4709,9 @@ func cacheAttentionLen2(dst, q []float32, cache *kvCache, head, dim int, scale f
 }
 
 func dotAt(a, b []float32, offset, n int) float32 {
+	if n >= 64 {
+		return tensor.Dot(a[:n], b[offset:offset+n])
+	}
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := 0
 	for ; i+15 < n; i += 16 {
@@ -2880,7 +4732,31 @@ func dotAt(a, b []float32, offset, n int) float32 {
 	return sum
 }
 
+func dotAtPairAt(a, b []float32, offset0, offset1, n int) (float32, float32) {
+	if n >= 64 {
+		return tensor.DotPair(b[offset0:offset0+n], b[offset1:offset1+n], a[:n])
+	}
+	return dotAt(a, b, offset0, n), dotAt(a, b, offset1, n)
+}
+
+func dotAtQuadAt(a, b []float32, offset0, offset1, offset2, offset3, n int) (float32, float32, float32, float32) {
+	if n >= 64 {
+		s0, s1 := tensor.DotPair(b[offset0:offset0+n], b[offset1:offset1+n], a[:n])
+		s2, s3 := tensor.DotPair(b[offset2:offset2+n], b[offset3:offset3+n], a[:n])
+		return s0, s1, s2, s3
+	}
+	return dotAt(a, b, offset0, n), dotAt(a, b, offset1, n), dotAt(a, b, offset2, n), dotAt(a, b, offset3, n)
+}
+
 func dotAt128(a, b []float32, offset int) float32 {
+	return tensor.Dot(a[:128], b[offset:offset+128])
+}
+
+func dotAt96(a, b []float32, offset int) float32 {
+	return tensor.Dot(a[:96], b[offset:offset+96])
+}
+
+func dotAt128Scalar(a, b []float32, offset int) float32 {
 	b = b[offset : offset+128]
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	for i := 0; i < 128; i += 16 {
@@ -2897,6 +4773,10 @@ func dotAt128(a, b []float32, offset int) float32 {
 }
 
 func dotAt64(a, b []float32, offset int) float32 {
+	return tensor.Dot(a[:64], b[offset:offset+64])
+}
+
+func dotAt64Scalar(a, b []float32, offset int) float32 {
 	b = b[offset : offset+64]
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	for i := 0; i < 64; i += 16 {
@@ -2913,83 +4793,33 @@ func dotAt64(a, b []float32, offset int) float32 {
 }
 
 func dotAt128PairAt(a, b []float32, offset0, offset1 int) (float32, float32) {
-	b0 := b[offset0 : offset0+128]
-	b1 := b[offset1 : offset1+128]
-	var s00, s01, s02, s03, s10, s11, s12, s13 float32
-	for i := 0; i < 128; i += 8 {
-		a0, a1, a2, a3 := a[i], a[i+1], a[i+2], a[i+3]
-		a4, a5, a6, a7 := a[i+4], a[i+5], a[i+6], a[i+7]
-		s00 += a0*b0[i] + a4*b0[i+4]
-		s01 += a1*b0[i+1] + a5*b0[i+5]
-		s02 += a2*b0[i+2] + a6*b0[i+6]
-		s03 += a3*b0[i+3] + a7*b0[i+7]
-		s10 += a0*b1[i] + a4*b1[i+4]
-		s11 += a1*b1[i+1] + a5*b1[i+5]
-		s12 += a2*b1[i+2] + a6*b1[i+6]
-		s13 += a3*b1[i+3] + a7*b1[i+7]
-	}
-	return (s00 + s01) + (s02 + s03), (s10 + s11) + (s12 + s13)
+	return tensor.DotPair(b[offset0:offset0+128], b[offset1:offset1+128], a[:128])
+}
+
+func dotAt96PairAt(a, b []float32, offset0, offset1 int) (float32, float32) {
+	return tensor.DotPair(b[offset0:offset0+96], b[offset1:offset1+96], a[:96])
 }
 
 func dotAt64PairAt(a, b []float32, offset0, offset1 int) (float32, float32) {
-	b0 := b[offset0 : offset0+64]
-	b1 := b[offset1 : offset1+64]
-	var s00, s01, s02, s03, s10, s11, s12, s13 float32
-	for i := 0; i < 64; i += 8 {
-		a0, a1, a2, a3 := a[i], a[i+1], a[i+2], a[i+3]
-		a4, a5, a6, a7 := a[i+4], a[i+5], a[i+6], a[i+7]
-		s00 += a0*b0[i] + a4*b0[i+4]
-		s01 += a1*b0[i+1] + a5*b0[i+5]
-		s02 += a2*b0[i+2] + a6*b0[i+6]
-		s03 += a3*b0[i+3] + a7*b0[i+7]
-		s10 += a0*b1[i] + a4*b1[i+4]
-		s11 += a1*b1[i+1] + a5*b1[i+5]
-		s12 += a2*b1[i+2] + a6*b1[i+6]
-		s13 += a3*b1[i+3] + a7*b1[i+7]
-	}
-	return (s00 + s01) + (s02 + s03), (s10 + s11) + (s12 + s13)
+	return tensor.DotPair(b[offset0:offset0+64], b[offset1:offset1+64], a[:64])
 }
 
 func dotAt128QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
-	b0 := b[offset0 : offset0+128]
-	b1 := b[offset1 : offset1+128]
-	b2 := b[offset2 : offset2+128]
-	b3 := b[offset3 : offset3+128]
-	var s00, s01, s10, s11, s20, s21, s30, s31 float32
-	for i := 0; i < 128; i += 8 {
-		a0, a1, a2, a3 := a[i], a[i+1], a[i+2], a[i+3]
-		a4, a5, a6, a7 := a[i+4], a[i+5], a[i+6], a[i+7]
-		s00 += a0*b0[i] + a1*b0[i+1] + a2*b0[i+2] + a3*b0[i+3]
-		s01 += a4*b0[i+4] + a5*b0[i+5] + a6*b0[i+6] + a7*b0[i+7]
-		s10 += a0*b1[i] + a1*b1[i+1] + a2*b1[i+2] + a3*b1[i+3]
-		s11 += a4*b1[i+4] + a5*b1[i+5] + a6*b1[i+6] + a7*b1[i+7]
-		s20 += a0*b2[i] + a1*b2[i+1] + a2*b2[i+2] + a3*b2[i+3]
-		s21 += a4*b2[i+4] + a5*b2[i+5] + a6*b2[i+6] + a7*b2[i+7]
-		s30 += a0*b3[i] + a1*b3[i+1] + a2*b3[i+2] + a3*b3[i+3]
-		s31 += a4*b3[i+4] + a5*b3[i+5] + a6*b3[i+6] + a7*b3[i+7]
-	}
-	return s00 + s01, s10 + s11, s20 + s21, s30 + s31
+	s0, s1 := tensor.DotPair(b[offset0:offset0+128], b[offset1:offset1+128], a[:128])
+	s2, s3 := tensor.DotPair(b[offset2:offset2+128], b[offset3:offset3+128], a[:128])
+	return s0, s1, s2, s3
+}
+
+func dotAt96QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
+	s0, s1 := tensor.DotPair(b[offset0:offset0+96], b[offset1:offset1+96], a[:96])
+	s2, s3 := tensor.DotPair(b[offset2:offset2+96], b[offset3:offset3+96], a[:96])
+	return s0, s1, s2, s3
 }
 
 func dotAt64QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
-	b0 := b[offset0 : offset0+64]
-	b1 := b[offset1 : offset1+64]
-	b2 := b[offset2 : offset2+64]
-	b3 := b[offset3 : offset3+64]
-	var s00, s01, s10, s11, s20, s21, s30, s31 float32
-	for i := 0; i < 64; i += 8 {
-		a0, a1, a2, a3 := a[i], a[i+1], a[i+2], a[i+3]
-		a4, a5, a6, a7 := a[i+4], a[i+5], a[i+6], a[i+7]
-		s00 += a0*b0[i] + a1*b0[i+1] + a2*b0[i+2] + a3*b0[i+3]
-		s01 += a4*b0[i+4] + a5*b0[i+5] + a6*b0[i+6] + a7*b0[i+7]
-		s10 += a0*b1[i] + a1*b1[i+1] + a2*b1[i+2] + a3*b1[i+3]
-		s11 += a4*b1[i+4] + a5*b1[i+5] + a6*b1[i+6] + a7*b1[i+7]
-		s20 += a0*b2[i] + a1*b2[i+1] + a2*b2[i+2] + a3*b2[i+3]
-		s21 += a4*b2[i+4] + a5*b2[i+5] + a6*b2[i+6] + a7*b2[i+7]
-		s30 += a0*b3[i] + a1*b3[i+1] + a2*b3[i+2] + a3*b3[i+3]
-		s31 += a4*b3[i+4] + a5*b3[i+5] + a6*b3[i+6] + a7*b3[i+7]
-	}
-	return s00 + s01, s10 + s11, s20 + s21, s30 + s31
+	s0, s1 := tensor.DotPair(b[offset0:offset0+64], b[offset1:offset1+64], a[:64])
+	s2, s3 := tensor.DotPair(b[offset2:offset2+64], b[offset3:offset3+64], a[:64])
+	return s0, s1, s2, s3
 }
 
 func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights []float32) {
@@ -3011,6 +4841,10 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 			weightedValueSum2_128(dst, x0, x1, a0, a1)
 			return
 		}
+		if dim == 96 {
+			weightedValueSum2_96(dst, x0, x1, a0, a1)
+			return
+		}
 		if dim == 64 {
 			weightedValueSum2_64(dst, x0, x1, a0, a1)
 			return
@@ -3027,6 +4861,10 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 		x2 := cache.v[base2 : base2+dim]
 		if dim == 128 {
 			weightedValueSum3_128(dst, x0, x1, x2, a0, a1, a2)
+			return
+		}
+		if dim == 96 {
+			weightedValueSum3_96(dst, x0, x1, x2, a0, a1, a2)
 			return
 		}
 		if dim == 64 {
@@ -3049,6 +4887,10 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 			weightedValueSum4_128(dst, x0, x1, x2, x3, a0, a1, a2, a3)
 			return
 		}
+		if dim == 96 {
+			weightedValueSum4_96(dst, x0, x1, x2, x3, a0, a1, a2, a3)
+			return
+		}
 		if dim == 64 {
 			weightedValueSum4_64(dst, x0, x1, x2, x3, a0, a1, a2, a3)
 			return
@@ -3056,8 +4898,66 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 		weightedCacheValueSum4(dst, x0, x1, x2, x3, a0, a1, a2, a3, dim)
 		return
 	}
+	if len(weights) == 5 {
+		a0, a1, a2, a3, a4 := weights[0], weights[1], weights[2], weights[3], weights[4]
+		base1 := cache.kvDim + headBase
+		base2 := base1 + cache.kvDim
+		base3 := base2 + cache.kvDim
+		base4 := base3 + cache.kvDim
+		x0 := cache.v[headBase : headBase+dim]
+		x1 := cache.v[base1 : base1+dim]
+		x2 := cache.v[base2 : base2+dim]
+		x3 := cache.v[base3 : base3+dim]
+		x4 := cache.v[base4 : base4+dim]
+		if dim == 128 {
+			weightedValueSum5_128(dst, x0, x1, x2, x3, x4, a0, a1, a2, a3, a4)
+			return
+		}
+		if dim == 96 {
+			weightedValueSum5_96(dst, x0, x1, x2, x3, x4, a0, a1, a2, a3, a4)
+			return
+		}
+		if dim == 64 {
+			weightedValueSum5_64(dst, x0, x1, x2, x3, x4, a0, a1, a2, a3, a4)
+			return
+		}
+		weightedCacheValueSum5(dst, x0, x1, x2, x3, x4, a0, a1, a2, a3, a4, dim)
+		return
+	}
+	if len(weights) == 6 {
+		a0, a1, a2, a3, a4, a5 := weights[0], weights[1], weights[2], weights[3], weights[4], weights[5]
+		base1 := cache.kvDim + headBase
+		base2 := base1 + cache.kvDim
+		base3 := base2 + cache.kvDim
+		base4 := base3 + cache.kvDim
+		base5 := base4 + cache.kvDim
+		x0 := cache.v[headBase : headBase+dim]
+		x1 := cache.v[base1 : base1+dim]
+		x2 := cache.v[base2 : base2+dim]
+		x3 := cache.v[base3 : base3+dim]
+		x4 := cache.v[base4 : base4+dim]
+		x5 := cache.v[base5 : base5+dim]
+		if dim == 128 {
+			weightedValueSum6_128(dst, x0, x1, x2, x3, x4, x5, a0, a1, a2, a3, a4, a5)
+			return
+		}
+		if dim == 96 {
+			weightedValueSum6_96(dst, x0, x1, x2, x3, x4, x5, a0, a1, a2, a3, a4, a5)
+			return
+		}
+		if dim == 64 {
+			weightedValueSum6_64(dst, x0, x1, x2, x3, x4, x5, a0, a1, a2, a3, a4, a5)
+			return
+		}
+		weightedValueSum6(dst, x0, x1, x2, x3, x4, x5, a0, a1, a2, a3, a4, a5, dim)
+		return
+	}
 	if dim == 64 {
 		weightedCacheValueSum64(dst, cache, head, weights)
+		return
+	}
+	if dim == 96 {
+		weightedCacheValueSum96(dst, cache, head, weights)
 		return
 	}
 	if dim == 128 {
@@ -3081,9 +4981,10 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 		dst[i] = a * x[i]
 	}
 	t := 1
-	for ; t+3 < len(weights); t += 4 {
+	base := cache.kvDim + headBase
+	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
 		a0, a1, a2, a3 := weights[t], weights[t+1], weights[t+2], weights[t+3]
-		base0 := t*cache.kvDim + headBase
+		base0 := base
 		base1 := base0 + cache.kvDim
 		base2 := base1 + cache.kvDim
 		base3 := base2 + cache.kvDim
@@ -3106,9 +5007,9 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
 		}
 	}
-	for ; t+1 < len(weights); t += 2 {
+	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
-		base0 := t*cache.kvDim + headBase
+		base0 := base
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+dim]
 		x1 := cache.v[base1 : base1+dim]
@@ -3127,9 +5028,8 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 			dst[i] += a0*x0[i] + a1*x1[i]
 		}
 	}
-	for ; t < len(weights); t++ {
+	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
-		base := t*cache.kvDim + headBase
 		x := cache.v[base : base+dim]
 		i := 0
 		for ; i+7 < dim; i += 8 {
@@ -3178,6 +5078,19 @@ func weightedValueSum2_128(dst, x0, x1 []float32, a0, a1 float32) {
 	}
 }
 
+func weightedValueSum2_96(dst, x0, x1 []float32, a0, a1 float32) {
+	for i := 0; i < 96; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7]
+	}
+}
+
 func weightedValueSum2_64(dst, x0, x1 []float32, a0, a1 float32) {
 	for i := 0; i < 64; i += 8 {
 		dst[i] = a0*x0[i] + a1*x1[i]
@@ -3193,6 +5106,19 @@ func weightedValueSum2_64(dst, x0, x1 []float32, a0, a1 float32) {
 
 func weightedValueSum3_128(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
 	for i := 0; i < 128; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7]
+	}
+}
+
+func weightedValueSum3_96(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
+	for i := 0; i < 96; i += 8 {
 		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
 		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1]
 		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2]
@@ -3247,6 +5173,19 @@ func weightedValueSum4_128(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32
 	}
 }
 
+func weightedValueSum4_96(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
+	for i := 0; i < 96; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
+	}
+}
+
 func weightedValueSum4_64(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
 	for i := 0; i < 64; i += 8 {
 		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
@@ -3277,6 +5216,174 @@ func weightedCacheValueSum4(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float3
 	}
 }
 
+func weightedValueSum5_128(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32) {
+	for i := 0; i < 128; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
+	}
+}
+
+func weightedValueSum5_96(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32) {
+	for i := 0; i < 96; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
+	}
+}
+
+func weightedValueSum5_64(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32) {
+	for i := 0; i < 64; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
+	}
+}
+
+func weightedCacheValueSum5(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32, dim int) {
+	i := 0
+	for ; i+7 < dim; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
+	}
+	for ; i < dim; i++ {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
+	}
+}
+
+func weightedValueSum6(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32, dim int) {
+	i := 0
+	for ; i+7 < dim; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
+	}
+	for ; i < dim; i++ {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
+	}
+}
+
+func weightedValueSum6_128(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32) {
+	for i := 0; i < 128; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
+	}
+}
+
+func weightedValueSum6_96(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32) {
+	for i := 0; i < 96; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
+	}
+}
+
+func weightedValueSum6_64(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32) {
+	for i := 0; i < 64; i += 8 {
+		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
+		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
+		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
+		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
+		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
+		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
+		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
+		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
+	}
+}
+
+func addWeightedValueSum(dst, x []float32, a float32, dim int) {
+	i := 0
+	for ; i+7 < dim; i += 8 {
+		dst[i] += a * x[i]
+		dst[i+1] += a * x[i+1]
+		dst[i+2] += a * x[i+2]
+		dst[i+3] += a * x[i+3]
+		dst[i+4] += a * x[i+4]
+		dst[i+5] += a * x[i+5]
+		dst[i+6] += a * x[i+6]
+		dst[i+7] += a * x[i+7]
+	}
+	for ; i < dim; i++ {
+		dst[i] += a * x[i]
+	}
+}
+
+func addWeightedValueSum128(dst, x []float32, a float32) {
+	for i := 0; i < 128; i += 8 {
+		dst[i] += a * x[i]
+		dst[i+1] += a * x[i+1]
+		dst[i+2] += a * x[i+2]
+		dst[i+3] += a * x[i+3]
+		dst[i+4] += a * x[i+4]
+		dst[i+5] += a * x[i+5]
+		dst[i+6] += a * x[i+6]
+		dst[i+7] += a * x[i+7]
+	}
+}
+
+func addWeightedValueSum96(dst, x []float32, a float32) {
+	for i := 0; i < 96; i += 8 {
+		dst[i] += a * x[i]
+		dst[i+1] += a * x[i+1]
+		dst[i+2] += a * x[i+2]
+		dst[i+3] += a * x[i+3]
+		dst[i+4] += a * x[i+4]
+		dst[i+5] += a * x[i+5]
+		dst[i+6] += a * x[i+6]
+		dst[i+7] += a * x[i+7]
+	}
+}
+
+func addWeightedValueSum64(dst, x []float32, a float32) {
+	for i := 0; i < 64; i += 8 {
+		dst[i] += a * x[i]
+		dst[i+1] += a * x[i+1]
+		dst[i+2] += a * x[i+2]
+		dst[i+3] += a * x[i+3]
+		dst[i+4] += a * x[i+4]
+		dst[i+5] += a * x[i+5]
+		dst[i+6] += a * x[i+6]
+		dst[i+7] += a * x[i+7]
+	}
+}
+
 func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights []float32) {
 	headBase := head * 128
 	if len(weights) == 1 {
@@ -3296,9 +5403,10 @@ func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights [
 		dst[i+7] = a * x[i+7]
 	}
 	t := 1
-	for ; t+3 < len(weights); t += 4 {
+	base := cache.kvDim + headBase
+	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
 		a0, a1, a2, a3 := weights[t], weights[t+1], weights[t+2], weights[t+3]
-		base0 := t*cache.kvDim + headBase
+		base0 := base
 		base1 := base0 + cache.kvDim
 		base2 := base1 + cache.kvDim
 		base3 := base2 + cache.kvDim
@@ -3317,9 +5425,9 @@ func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights [
 			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
 		}
 	}
-	for ; t+1 < len(weights); t += 2 {
+	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
-		base0 := t*cache.kvDim + headBase
+		base0 := base
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+128]
 		x1 := cache.v[base1 : base1+128]
@@ -3334,9 +5442,8 @@ func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights [
 			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
 		}
 	}
-	for ; t < len(weights); t++ {
+	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
-		base := t*cache.kvDim + headBase
 		x := cache.v[base : base+128]
 		for i := 0; i < 128; i += 8 {
 			dst[i] += a * x[i]
@@ -3370,9 +5477,10 @@ func weightedCacheValueSum64(dst []float32, cache *kvCache, head int, weights []
 		dst[i+7] = a * x[i+7]
 	}
 	t := 1
-	for ; t+3 < len(weights); t += 4 {
+	base := cache.kvDim + headBase
+	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
 		a0, a1, a2, a3 := weights[t], weights[t+1], weights[t+2], weights[t+3]
-		base0 := t*cache.kvDim + headBase
+		base0 := base
 		base1 := base0 + cache.kvDim
 		base2 := base1 + cache.kvDim
 		base3 := base2 + cache.kvDim
@@ -3391,9 +5499,9 @@ func weightedCacheValueSum64(dst []float32, cache *kvCache, head int, weights []
 			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
 		}
 	}
-	for ; t+1 < len(weights); t += 2 {
+	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
-		base0 := t*cache.kvDim + headBase
+		base0 := base
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+64]
 		x1 := cache.v[base1 : base1+64]
@@ -3408,11 +5516,84 @@ func weightedCacheValueSum64(dst []float32, cache *kvCache, head int, weights []
 			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
 		}
 	}
-	for ; t < len(weights); t++ {
+	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
-		base := t*cache.kvDim + headBase
 		x := cache.v[base : base+64]
 		for i := 0; i < 64; i += 8 {
+			dst[i] += a * x[i]
+			dst[i+1] += a * x[i+1]
+			dst[i+2] += a * x[i+2]
+			dst[i+3] += a * x[i+3]
+			dst[i+4] += a * x[i+4]
+			dst[i+5] += a * x[i+5]
+			dst[i+6] += a * x[i+6]
+			dst[i+7] += a * x[i+7]
+		}
+	}
+}
+
+func weightedCacheValueSum96(dst []float32, cache *kvCache, head int, weights []float32) {
+	headBase := head * 96
+	if len(weights) == 1 {
+		copy(dst[:96], cache.v[headBase:headBase+96])
+		return
+	}
+	a := weights[0]
+	x := cache.v[headBase : headBase+96]
+	for i := 0; i < 96; i += 8 {
+		dst[i] = a * x[i]
+		dst[i+1] = a * x[i+1]
+		dst[i+2] = a * x[i+2]
+		dst[i+3] = a * x[i+3]
+		dst[i+4] = a * x[i+4]
+		dst[i+5] = a * x[i+5]
+		dst[i+6] = a * x[i+6]
+		dst[i+7] = a * x[i+7]
+	}
+	t := 1
+	base := cache.kvDim + headBase
+	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
+		a0, a1, a2, a3 := weights[t], weights[t+1], weights[t+2], weights[t+3]
+		base0 := base
+		base1 := base0 + cache.kvDim
+		base2 := base1 + cache.kvDim
+		base3 := base2 + cache.kvDim
+		x0 := cache.v[base0 : base0+96]
+		x1 := cache.v[base1 : base1+96]
+		x2 := cache.v[base2 : base2+96]
+		x3 := cache.v[base3 : base3+96]
+		for i := 0; i < 96; i += 8 {
+			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
+			dst[i+1] += a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
+			dst[i+2] += a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
+			dst[i+3] += a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
+			dst[i+4] += a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
+			dst[i+5] += a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
+			dst[i+6] += a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
+			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
+		}
+	}
+	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
+		a0, a1 := weights[t], weights[t+1]
+		base0 := base
+		base1 := base0 + cache.kvDim
+		x0 := cache.v[base0 : base0+96]
+		x1 := cache.v[base1 : base1+96]
+		for i := 0; i < 96; i += 8 {
+			dst[i] += a0*x0[i] + a1*x1[i]
+			dst[i+1] += a0*x0[i+1] + a1*x1[i+1]
+			dst[i+2] += a0*x0[i+2] + a1*x1[i+2]
+			dst[i+3] += a0*x0[i+3] + a1*x1[i+3]
+			dst[i+4] += a0*x0[i+4] + a1*x1[i+4]
+			dst[i+5] += a0*x0[i+5] + a1*x1[i+5]
+			dst[i+6] += a0*x0[i+6] + a1*x1[i+6]
+			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
+		}
+	}
+	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
+		a := weights[t]
+		x := cache.v[base : base+96]
+		for i := 0; i < 96; i += 8 {
 			dst[i] += a * x[i]
 			dst[i+1] += a * x[i+1]
 			dst[i+2] += a * x[i+2]
@@ -3429,9 +5610,33 @@ func (c *kvCache) append(k, v []float32) {
 	if c.kvDim == 0 {
 		c.kvDim = len(k)
 	}
+	if c.kvDim > 0 && len(k) == c.kvDim && len(v) == c.kvDim {
+		base := c.len * c.kvDim
+		next := base + c.kvDim
+		if cap(c.k) >= next && cap(c.v) >= next {
+			c.k = c.k[:next]
+			c.v = c.v[:next]
+			copy(c.k[base:next], k)
+			copy(c.v[base:next], v)
+			c.len++
+			return
+		}
+	}
 	c.k = append(c.k, k...)
 	c.v = append(c.v, v...)
 	c.len++
+}
+
+func (c *kvCache) vulkanBufferSlices() ([]float32, []float32) {
+	k := c.k
+	v := c.v
+	if cap(k) > len(k) {
+		k = k[:cap(k)]
+	}
+	if cap(v) > len(v) {
+		v = v[:cap(v)]
+	}
+	return k, v
 }
 
 func (c *kvCache) key(t, head, headDim int) []float32 {
@@ -3447,21 +5652,288 @@ func (c *kvCache) value(t, head, headDim int) []float32 {
 func (rt *Runtime) mlp(x []float32, tl *textLayer, sc *layerScratch) []float32 {
 	c := rt.cfg
 	out := sc.mlp[:c.HiddenSize]
+	useVulkan := fusedSwiGLUWork(c.IntermediateSize, c.HiddenSize, c.HiddenSize) >= vulkanMatVecMinWork()
 	if tl.q8.gate != nil && tl.q8.up != nil && tl.q8.down != nil {
+		if useVulkan && q8SwiGLUDownShapeOK(out, x, tl.q8.gate, tl.q8.up, tl.q8.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+			rt.vulkanOpEnabled(vulkanOpSwiGLUDownQ8) {
+			if err := backend.VulkanSwiGLUDownQ8(out, x, tl.q8.gate, tl.q8.up, tl.q8.down); err == nil {
+				return out
+			} else {
+				rt.disableVulkanOp(vulkanOpSwiGLUDownQ8, err)
+			}
+		}
+		if rt.swiGLUGateUpQ8MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q8.gate, tl.q8.up, tl.q8.down) {
+			rt.matVecMaybeQuant(out, sc.gate[:c.IntermediateSize], nil, tl.q8.down, nil, nil, c.HiddenSize, c.IntermediateSize)
+			return out
+		}
 		tensor.FusedSwiGLUQ8Scratch(out, x, tl.q8.gate, tl.q8.up, tl.q8.down, sc.gate)
 		return out
 	}
 	if tl.q6.gate != nil && tl.q6.up != nil && tl.q6.down != nil {
+		if useVulkan && q6SwiGLUDownShapeOK(out, x, tl.q6.gate, tl.q6.up, tl.q6.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+			rt.vulkanOpEnabled(vulkanOpSwiGLUDownQ6) {
+			if err := backend.VulkanSwiGLUDownQ6(out, x, tl.q6.gate, tl.q6.up, tl.q6.down); err == nil {
+				return out
+			} else {
+				rt.disableVulkanOp(vulkanOpSwiGLUDownQ6, err)
+			}
+		}
+		if rt.swiGLUGateUpQ6MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q6.gate, tl.q6.up, tl.q6.down) {
+			rt.matVecMaybeQuant(out, sc.gate[:c.IntermediateSize], nil, nil, tl.q6.down, nil, c.HiddenSize, c.IntermediateSize)
+			return out
+		}
 		tensor.FusedSwiGLUQ6Scratch(out, x, tl.q6.gate, tl.q6.up, tl.q6.down, sc.gate)
 		return out
 	}
 	if tl.q4.gate != nil && tl.q4.up != nil && tl.q4.down != nil {
+		if useVulkan && q4SwiGLUDownShapeOK(out, x, tl.q4.gate, tl.q4.up, tl.q4.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+			rt.vulkanOpEnabled(vulkanOpSwiGLUDownQ4) {
+			if err := backend.VulkanSwiGLUDownQ4(out, x, tl.q4.gate, tl.q4.up, tl.q4.down); err == nil {
+				return out
+			} else {
+				rt.disableVulkanOp(vulkanOpSwiGLUDownQ4, err)
+			}
+		}
+		if rt.swiGLUGateUpQ4MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q4.gate, tl.q4.up, tl.q4.down) {
+			rt.matVecMaybeQuant(out, sc.gate[:c.IntermediateSize], nil, nil, nil, tl.q4.down, c.HiddenSize, c.IntermediateSize)
+			return out
+		}
 		tensor.FusedSwiGLUQ4Scratch(out, x, tl.q4.gate, tl.q4.up, tl.q4.down, sc.gate)
 		return out
 	}
 	g := sc.gate[:c.IntermediateSize]
+	if useVulkan && rt.vulkanOpEnabled(vulkanOpSwiGLUDownF32) &&
+		f32SwiGLUDownShapeOK(out, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) {
+		if err := backend.VulkanSwiGLUDownF32(out, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize); err == nil {
+			return out
+		} else {
+			rt.disableVulkanOp(vulkanOpSwiGLUDownF32, err)
+		}
+	}
+	if rt.swiGLUGateUpMaybeVulkan(g, x, tl.w.gate, tl.w.up, c.IntermediateSize, c.HiddenSize, c.HiddenSize) {
+		rt.matVecMaybeQuant(out, g, tl.w.down, nil, nil, nil, c.HiddenSize, c.IntermediateSize)
+		return out
+	}
 	tensor.FusedSwiGLUF32Scratch(out, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize, g)
 	return out
+}
+
+func (rt *Runtime) swiGLUGateUpMaybeVulkan(out, x, gate, up []float32, rows, cols, outRows int) bool {
+	if !f32SwiGLUGateUpShapeOK(out, x, gate, up, rows, cols) {
+		return false
+	}
+	if !swiGLUSplitVulkanWorkReady(rows, cols, outRows) || !rt.vulkanOpEnabled(vulkanOpSwiGLUGateUpF32) {
+		return false
+	}
+	if err := backend.VulkanSwiGLUGateUpF32(out, x, gate, up, rows, cols); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpSwiGLUGateUpF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) swiGLUGateUpQ8MaybeVulkan(out, x []float32, gate, up, down *tensor.Q8Matrix) bool {
+	if gate == nil || up == nil || down == nil || !q8SwiGLUGateUpShapeOK(out, x, gate, up, down, gate.Rows, gate.Cols, down.Rows) {
+		return false
+	}
+	if !swiGLUSplitVulkanWorkReady(gate.Rows, gate.Cols, down.Rows) || !rt.vulkanOpEnabled(vulkanOpSwiGLUGateUpQ8) {
+		return false
+	}
+	if err := backend.VulkanSwiGLUGateUpQ8(out, x, gate, up); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpSwiGLUGateUpQ8, err)
+	}
+	return false
+}
+
+func (rt *Runtime) swiGLUGateUpQ6MaybeVulkan(out, x []float32, gate, up, down *tensor.Q6Matrix) bool {
+	if gate == nil || up == nil || down == nil || !q6SwiGLUGateUpShapeOK(out, x, gate, up, down, gate.Rows, gate.Cols, down.Rows) {
+		return false
+	}
+	if !swiGLUSplitVulkanWorkReady(gate.Rows, gate.Cols, down.Rows) || !rt.vulkanOpEnabled(vulkanOpSwiGLUGateUpQ6) {
+		return false
+	}
+	if err := backend.VulkanSwiGLUGateUpQ6(out, x, gate, up); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpSwiGLUGateUpQ6, err)
+	}
+	return false
+}
+
+func (rt *Runtime) swiGLUGateUpQ4MaybeVulkan(out, x []float32, gate, up, down *tensor.Q4Matrix) bool {
+	if gate == nil || up == nil || down == nil || !q4SwiGLUGateUpShapeOK(out, x, gate, up, down, gate.Rows, gate.Cols, down.Rows) {
+		return false
+	}
+	if !swiGLUSplitVulkanWorkReady(gate.Rows, gate.Cols, down.Rows) || !rt.vulkanOpEnabled(vulkanOpSwiGLUGateUpQ4) {
+		return false
+	}
+	if err := backend.VulkanSwiGLUGateUpQ4(out, x, gate, up); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpSwiGLUGateUpQ4, err)
+	}
+	return false
+}
+
+func (rt *Runtime) mlpAddRMSNormMaybeVulkan(x []float32, tl *textLayer, sc *layerScratch, residual, normWeight, normOut []float32, eps float32, readResidual bool) bool {
+	c := rt.cfg
+	useVulkan := fusedSwiGLUWork(c.IntermediateSize, c.HiddenSize, c.HiddenSize) >= vulkanMatVecMinWork()
+	if eps != 1e-6 || !useVulkan {
+		return false
+	}
+	if len(normOut) < c.HiddenSize || len(residual) < c.HiddenSize || len(x) < c.HiddenSize ||
+		len(normWeight) < c.HiddenSize {
+		return false
+	}
+	if tl.q8.gate != nil && tl.q8.up != nil && tl.q8.down != nil {
+		op := vulkanOpSwiGLUDownAddRMSNormOutOnlyQ8
+		if readResidual {
+			op = vulkanOpSwiGLUDownAddRMSNormQ8
+		}
+		if q8SwiGLUDownShapeOK(normOut, x, tl.q8.gate, tl.q8.up, tl.q8.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+			rt.vulkanOpEnabled(op) {
+			var err error
+			if readResidual {
+				err = backend.VulkanSwiGLUDownAddRMSNormQ8(normOut, residual, x, tl.q8.gate, tl.q8.up, tl.q8.down, normWeight)
+			} else {
+				err = backend.VulkanSwiGLUDownAddRMSNormQ8OutOnly(normOut, residual, x, tl.q8.gate, tl.q8.up, tl.q8.down, normWeight)
+			}
+			if err == nil {
+				return true
+			}
+			rt.disableVulkanOp(op, err)
+		}
+		if readResidual &&
+			rt.matVecAddRMSNormVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], nil, tl.q8.down, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps) &&
+			rt.swiGLUGateUpQ8MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q8.gate, tl.q8.up, tl.q8.down) &&
+			rt.matVecAddRMSNormMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], nil, tl.q8.down, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps) {
+			return true
+		}
+		if !readResidual &&
+			rt.matVecAddRMSNormOutOnlyVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], nil, tl.q8.down, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) &&
+			rt.swiGLUGateUpQ8MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q8.gate, tl.q8.up, tl.q8.down) &&
+			rt.matVecAddRMSNormOutOnlyMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], nil, tl.q8.down, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) {
+			return true
+		}
+		return false
+	}
+	if tl.q6.gate != nil && tl.q6.up != nil && tl.q6.down != nil {
+		op := vulkanOpSwiGLUDownAddRMSNormOutOnlyQ6
+		if readResidual {
+			op = vulkanOpSwiGLUDownAddRMSNormQ6
+		}
+		if q6SwiGLUDownShapeOK(normOut, x, tl.q6.gate, tl.q6.up, tl.q6.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+			rt.vulkanOpEnabled(op) {
+			var err error
+			if readResidual {
+				err = backend.VulkanSwiGLUDownAddRMSNormQ6(normOut, residual, x, tl.q6.gate, tl.q6.up, tl.q6.down, normWeight)
+			} else {
+				err = backend.VulkanSwiGLUDownAddRMSNormQ6OutOnly(normOut, residual, x, tl.q6.gate, tl.q6.up, tl.q6.down, normWeight)
+			}
+			if err == nil {
+				return true
+			}
+			rt.disableVulkanOp(op, err)
+		}
+		if readResidual &&
+			rt.matVecAddRMSNormVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, tl.q6.down, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps) &&
+			rt.swiGLUGateUpQ6MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q6.gate, tl.q6.up, tl.q6.down) &&
+			rt.matVecAddRMSNormMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, tl.q6.down, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps) {
+			return true
+		}
+		if !readResidual &&
+			rt.matVecAddRMSNormOutOnlyVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, tl.q6.down, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) &&
+			rt.swiGLUGateUpQ6MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q6.gate, tl.q6.up, tl.q6.down) &&
+			rt.matVecAddRMSNormOutOnlyMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, tl.q6.down, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) {
+			return true
+		}
+		return false
+	}
+	if tl.q4.gate != nil && tl.q4.up != nil && tl.q4.down != nil {
+		op := vulkanOpSwiGLUDownAddRMSNormOutOnlyQ4
+		if readResidual {
+			op = vulkanOpSwiGLUDownAddRMSNormQ4
+		}
+		if q4SwiGLUDownShapeOK(normOut, x, tl.q4.gate, tl.q4.up, tl.q4.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+			rt.vulkanOpEnabled(op) {
+			var err error
+			if readResidual {
+				err = backend.VulkanSwiGLUDownAddRMSNormQ4(normOut, residual, x, tl.q4.gate, tl.q4.up, tl.q4.down, normWeight)
+			} else {
+				err = backend.VulkanSwiGLUDownAddRMSNormQ4OutOnly(normOut, residual, x, tl.q4.gate, tl.q4.up, tl.q4.down, normWeight)
+			}
+			if err == nil {
+				return true
+			}
+			rt.disableVulkanOp(op, err)
+		}
+		if readResidual &&
+			rt.matVecAddRMSNormVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, nil, tl.q4.down, normWeight, c.HiddenSize, c.IntermediateSize, eps) &&
+			rt.swiGLUGateUpQ4MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q4.gate, tl.q4.up, tl.q4.down) &&
+			rt.matVecAddRMSNormMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, nil, tl.q4.down, normWeight, c.HiddenSize, c.IntermediateSize, eps) {
+			return true
+		}
+		if !readResidual &&
+			rt.matVecAddRMSNormOutOnlyVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, nil, tl.q4.down, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) &&
+			rt.swiGLUGateUpQ4MaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.q4.gate, tl.q4.up, tl.q4.down) &&
+			rt.matVecAddRMSNormOutOnlyMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], nil, nil, nil, tl.q4.down, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) {
+			return true
+		}
+		return false
+	}
+	if tl.q6.gate != nil || tl.q6.up != nil || tl.q6.down != nil || tl.q4.gate != nil || tl.q4.up != nil || tl.q4.down != nil {
+		return false
+	}
+	op := vulkanOpSwiGLUDownAddRMSNormOutOnlyF32
+	if readResidual {
+		op = vulkanOpSwiGLUDownAddRMSNormF32
+	}
+	if rt.vulkanOpEnabled(op) &&
+		f32SwiGLUDownShapeOK(normOut, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) {
+		var err error
+		if readResidual {
+			err = backend.VulkanSwiGLUDownAddRMSNormF32(normOut, residual, x, tl.w.gate, tl.w.up, tl.w.down, normWeight, c.IntermediateSize, c.HiddenSize, c.HiddenSize)
+		} else {
+			err = backend.VulkanSwiGLUDownAddRMSNormF32OutOnly(normOut, residual, x, tl.w.gate, tl.w.up, tl.w.down, normWeight, c.IntermediateSize, c.HiddenSize, c.HiddenSize)
+		}
+		if err == nil {
+			return true
+		}
+		rt.disableVulkanOp(op, err)
+	}
+	if readResidual &&
+		rt.matVecAddRMSNormVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], tl.w.down, nil, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps) &&
+		rt.swiGLUGateUpMaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.w.gate, tl.w.up, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+		rt.matVecAddRMSNormMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], tl.w.down, nil, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps) {
+		return true
+	}
+	if !readResidual &&
+		rt.matVecAddRMSNormOutOnlyVulkanReady(normOut, residual, sc.gate[:c.IntermediateSize], tl.w.down, nil, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) &&
+		rt.swiGLUGateUpMaybeVulkan(sc.gate[:c.IntermediateSize], x, tl.w.gate, tl.w.up, c.IntermediateSize, c.HiddenSize, c.HiddenSize) &&
+		rt.matVecAddRMSNormOutOnlyMaybeVulkan(normOut, residual, sc.gate[:c.IntermediateSize], tl.w.down, nil, nil, nil, normWeight, c.HiddenSize, c.IntermediateSize, eps, sc.mlp[:c.HiddenSize]) {
+		return true
+	}
+	return false
+}
+
+func fusedSwiGLUWork(rows, cols, outRows int) int {
+	gateUp, ok := checkedModelMulInt(rows, cols)
+	if !ok || gateUp > maxModelInt()/2 {
+		return 0
+	}
+	gateUp *= 2
+	down, ok := checkedModelMulInt(outRows, rows)
+	if !ok || gateUp > maxModelInt()-down {
+		return 0
+	}
+	return gateUp + down
+}
+
+func swiGLUSplitVulkanWorkReady(rows, cols, outRows int) bool {
+	return fusedSwiGLUWork(rows, cols, outRows) >= vulkanMatVecMinWork()
 }
 
 func matVecMaybeQ8(out, x, w []float32, q *tensor.Q8Matrix, rows, cols int) {
@@ -3472,24 +5944,477 @@ func matVecMaybeQ8(out, x, w []float32, q *tensor.Q8Matrix, rows, cols int) {
 	tensor.MatVec(out, x, w, rows, cols)
 }
 
-func fusedQKV(q, k, v, x []float32, tl *textLayer, qRows, kvRows, hidden int) bool {
+func (rt *Runtime) fusedQKV(q, k, v, x []float32, tl *textLayer, qRows, kvRows, hidden int) bool {
+	useVulkan := fusedMatVec3Work(qRows, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
 	if tl.q8.q != nil && tl.q8.k != nil && tl.q8.v != nil && sameColsQ8(hidden, tl.q8.q, tl.q8.k, tl.q8.v) {
+		if useVulkan && q8FusedMatVec3ShapeOK(q, k, v, x, tl.q8.q, tl.q8.k, tl.q8.v, qRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVQ8) {
+			if err := backend.VulkanFusedMatVec3Q8(q, k, v, x, tl.q8.q, tl.q8.k, tl.q8.v); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVQ8, err)
+			}
+		}
+		if rt.matVec3MaybeVulkan(q, k, v, x, nil, nil, nil, tl.q8.q, tl.q8.k, tl.q8.v, nil, nil, nil, nil, nil, nil, qRows, kvRows, kvRows, hidden) {
+			return true
+		}
 		tensor.FusedMatVec3Q8(q, k, v, x, tl.q8.q, tl.q8.k, tl.q8.v)
 		return true
 	}
 	if tl.q6.q != nil && tl.q6.k != nil && tl.q6.v != nil && sameColsQ6(hidden, tl.q6.q, tl.q6.k, tl.q6.v) {
+		if useVulkan && q6FusedMatVec3ShapeOK(q, k, v, x, tl.q6.q, tl.q6.k, tl.q6.v, qRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVQ6) {
+			if err := backend.VulkanFusedMatVec3Q6(q, k, v, x, tl.q6.q, tl.q6.k, tl.q6.v); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVQ6, err)
+			}
+		}
+		if rt.matVec3MaybeVulkan(q, k, v, x, nil, nil, nil, nil, nil, nil, tl.q6.q, tl.q6.k, tl.q6.v, nil, nil, nil, qRows, kvRows, kvRows, hidden) {
+			return true
+		}
 		tensor.FusedMatVec3Q6(q, k, v, x, tl.q6.q, tl.q6.k, tl.q6.v)
 		return true
 	}
 	if tl.q4.q != nil && tl.q4.k != nil && tl.q4.v != nil && sameColsQ4(hidden, tl.q4.q, tl.q4.k, tl.q4.v) {
+		if useVulkan && q4FusedMatVec3ShapeOK(q, k, v, x, tl.q4.q, tl.q4.k, tl.q4.v, qRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVQ4) {
+			if err := backend.VulkanFusedMatVec3Q4(q, k, v, x, tl.q4.q, tl.q4.k, tl.q4.v); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVQ4, err)
+			}
+		}
+		if rt.matVec3MaybeVulkan(q, k, v, x, nil, nil, nil, nil, nil, nil, nil, nil, nil, tl.q4.q, tl.q4.k, tl.q4.v, qRows, kvRows, kvRows, hidden) {
+			return true
+		}
 		tensor.FusedMatVec3Q4(q, k, v, x, tl.q4.q, tl.q4.k, tl.q4.v)
 		return true
 	}
 	if len(tl.w.q) >= qRows*hidden && len(tl.w.k) >= kvRows*hidden && len(tl.w.v) >= kvRows*hidden {
+		if useVulkan && f32FusedMatVec3ShapeOK(q, k, v, x, tl.w.q, tl.w.k, tl.w.v, qRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVF32) {
+			if err := backend.VulkanFusedMatVec3F32(q, k, v, x, tl.w.q, tl.w.k, tl.w.v, qRows, kvRows, kvRows, hidden); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVF32, err)
+			}
+		}
+		if rt.matVec3MaybeVulkan(q, k, v, x, tl.w.q, tl.w.k, tl.w.v, nil, nil, nil, nil, nil, nil, nil, nil, nil, qRows, kvRows, kvRows, hidden) {
+			return true
+		}
 		tensor.FusedMatVec3(q, k, v, x, tl.w.q, tl.w.k, tl.w.v, qRows, kvRows, kvRows, hidden)
 		return true
 	}
 	return false
+}
+
+func (rt *Runtime) fusedQKVMRoPE(q, k, v, x []float32, tl *textLayer, qRows, kvRows, hidden, qHeads, kvHeads, headDim int, cosTable, sinTable []float32) bool {
+	useVulkan := fusedMatVec3Work(qRows, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
+	if tl.q8.q != nil && tl.q8.k != nil && tl.q8.v != nil && sameColsQ8(hidden, tl.q8.q, tl.q8.k, tl.q8.v) {
+		if useVulkan && q8FusedMatVec3ShapeOK(q, k, v, x, tl.q8.q, tl.q8.k, tl.q8.v, qRows, kvRows, kvRows, hidden) &&
+			fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEQ8) {
+			if err := backend.VulkanFusedMatVec3MRoPEQ8(q, k, v, x, tl.q8.q, tl.q8.k, tl.q8.v, cosTable, sinTable, qHeads, kvHeads, headDim); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVMRoPEQ8, err)
+			}
+		}
+		return false
+	}
+	if tl.q6.q != nil && tl.q6.k != nil && tl.q6.v != nil && sameColsQ6(hidden, tl.q6.q, tl.q6.k, tl.q6.v) {
+		if useVulkan && q6FusedMatVec3ShapeOK(q, k, v, x, tl.q6.q, tl.q6.k, tl.q6.v, qRows, kvRows, kvRows, hidden) &&
+			fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEQ6) {
+			if err := backend.VulkanFusedMatVec3MRoPEQ6(q, k, v, x, tl.q6.q, tl.q6.k, tl.q6.v, cosTable, sinTable, qHeads, kvHeads, headDim); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVMRoPEQ6, err)
+			}
+		}
+		return false
+	}
+	if tl.q4.q != nil && tl.q4.k != nil && tl.q4.v != nil && sameColsQ4(hidden, tl.q4.q, tl.q4.k, tl.q4.v) {
+		if useVulkan && q4FusedMatVec3ShapeOK(q, k, v, x, tl.q4.q, tl.q4.k, tl.q4.v, qRows, kvRows, kvRows, hidden) &&
+			fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEQ4) {
+			if err := backend.VulkanFusedMatVec3MRoPEQ4(q, k, v, x, tl.q4.q, tl.q4.k, tl.q4.v, cosTable, sinTable, qHeads, kvHeads, headDim); err == nil {
+				return true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedQKVMRoPEQ4, err)
+			}
+		}
+		return false
+	}
+	if tl.q8.q != nil || tl.q8.k != nil || tl.q8.v != nil || tl.q6.q != nil || tl.q6.k != nil || tl.q6.v != nil || tl.q4.q != nil || tl.q4.k != nil || tl.q4.v != nil {
+		return false
+	}
+	if len(tl.w.q) < qRows*hidden || len(tl.w.k) < kvRows*hidden || len(tl.w.v) < kvRows*hidden {
+		return false
+	}
+	if useVulkan && f32FusedMatVec3ShapeOK(q, k, v, x, tl.w.q, tl.w.k, tl.w.v, qRows, kvRows, kvRows, hidden) &&
+		fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEF32) {
+		if err := backend.VulkanFusedMatVec3MRoPEF32(q, k, v, x, tl.w.q, tl.w.k, tl.w.v, cosTable, sinTable, qRows, kvRows, kvRows, hidden, qHeads, kvHeads, headDim); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpFusedQKVMRoPEF32, err)
+		}
+	}
+	return false
+}
+
+// fusedQKVMRoPEWithNorm chains RMSNorm(rawInput, normWeight) with fused QKV+MRoPE
+// into a single Vulkan command buffer.  Only for F32 weights.  Returns true on
+// success, false to fall back to separate RMSNorm + fusedQKVMRoPE.
+func (rt *Runtime) fusedQKVMRoPEWithNorm(q, k, v, rawInput, normWeight []float32, tl *textLayer, qRows, kvRows, hidden, qHeads, kvHeads, headDim int, cosTable, sinTable []float32, eps float32) bool {
+	if eps != 1e-6 || !rt.vulkanOpEnabled(vulkanOpChainedRMSNormQKVMRoPEF32) {
+		return false
+	}
+	if tl.q8.q != nil || tl.q6.q != nil || tl.q4.q != nil {
+		return false
+	}
+	useVulkan := fusedMatVec3Work(qRows, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
+	if !useVulkan {
+		return false
+	}
+	if !rmsNormShapeOK(rawInput, rawInput, normWeight) || !f32FusedMatVec3ShapeOK(q, k, v, rawInput, tl.w.q, tl.w.k, tl.w.v, qRows, kvRows, kvRows, hidden) {
+		return false
+	}
+	if !fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) {
+		return false
+	}
+	n := hidden
+	if n < vulkanVectorMinWork() {
+		return false
+	}
+	if err := backend.VulkanChainedRMSNormFusedQKVMRoPEF32(q, k, v, rawInput, normWeight, tl.w.q, tl.w.k, tl.w.v, cosTable, sinTable, n, qRows, kvRows, kvRows, hidden, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedRMSNormQKVMRoPEF32, err)
+	}
+	return false
+}
+
+// fusedQKVMRoPEWithNormQ8 chains RMSNorm(rawInput, normWeight) with the fused
+// Q8 QKV+MRoPE projection into a single Vulkan command buffer.  Only for Q8
+// weights.  Returns true on success, false to fall back to separate RMSNorm +
+// fusedQKVMRoPE.
+func (rt *Runtime) fusedQKVMRoPEWithNormQ8(q, k, v, rawInput, normWeight []float32, tl *textLayer, qRows, kvRows, hidden, qHeads, kvHeads, headDim int, cosTable, sinTable []float32, eps float32) bool {
+	if eps != 1e-6 || !rt.vulkanOpEnabled(vulkanOpChainedRMSNormQKVMRoPEQ8) {
+		return false
+	}
+	if tl.q8.q == nil || tl.q8.k == nil || tl.q8.v == nil || !sameColsQ8(hidden, tl.q8.q, tl.q8.k, tl.q8.v) {
+		return false
+	}
+	useVulkan := fusedMatVec3Work(qRows, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
+	if !useVulkan {
+		return false
+	}
+	if !rmsNormShapeOK(rawInput, rawInput, normWeight) || !q8FusedMatVec3ShapeOK(q, k, v, rawInput, tl.q8.q, tl.q8.k, tl.q8.v, qRows, kvRows, kvRows, hidden) {
+		return false
+	}
+	if !fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) {
+		return false
+	}
+	n := hidden
+	if n < vulkanVectorMinWork() {
+		return false
+	}
+	if err := backend.VulkanChainedRMSNormFusedQKVMRoPEQ8(q, k, v, rawInput, normWeight, cosTable, sinTable, tl.q8.q, tl.q8.k, tl.q8.v, n, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedRMSNormQKVMRoPEQ8, err)
+	}
+	return false
+}
+
+func (rt *Runtime) fusedFirstTokenKV(q, k, v, x []float32, tl *textLayer, qRows, kvRows, hidden, kvHeads, headDim int, hasRoPE bool, cosTable, sinTable []float32) (ready bool, kHasRoPE bool) {
+	dummyRows := headDim
+	if dummyRows <= 0 {
+		return false, false
+	}
+	haveDummyQ := qRows >= dummyRows && len(q) >= dummyRows
+	useVulkan := fusedMatVec3Work(dummyRows, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
+	kvUseVulkan := fusedMatVec3Work(1, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
+	if tl.q8.k != nil && tl.q8.v != nil && tl.q8.k.Cols == hidden && tl.q8.v.Cols == hidden {
+		dummyQ := &tensor.Q8Matrix{Cols: hidden}
+		if kvUseVulkan && hasRoPE && q8FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q8.k, tl.q8.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEQ8) {
+			if err := backend.VulkanFusedMatVec2MRoPEQ8(k, v, x, dummyQ, tl.q8.k, tl.q8.v, cosTable, sinTable, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEQ8, err)
+			}
+		}
+		if kvUseVulkan && q8FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q8.k, tl.q8.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVQ8) {
+			if err := backend.VulkanFusedMatVec2Q8(k, v, x, dummyQ, tl.q8.k, tl.q8.v); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVQ8, err)
+			}
+		}
+		if haveDummyQ && tl.q8.q != nil && sameColsQ8(hidden, tl.q8.q, tl.q8.k, tl.q8.v) && q8MatVecMinRowsShapeOK(tl.q8.q, dummyRows, hidden) {
+			qHead := *tl.q8.q
+			qHead.Rows = dummyRows
+			qHead.Data = qHead.Data[:dummyRows*qHead.Cols]
+			qHead.Scale = qHead.Scale[:dummyRows]
+			if useVulkan && hasRoPE && q8FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, &qHead, tl.q8.k, tl.q8.v, dummyRows, kvRows, kvRows, hidden) &&
+				fusedMRoPEShapeOK(q[:dummyRows], k, 1, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEQ8) {
+				if err := backend.VulkanFusedMatVec3MRoPEQ8(q[:dummyRows], k, v, x, &qHead, tl.q8.k, tl.q8.v, cosTable, sinTable, 1, kvHeads, headDim); err == nil {
+					return true, true
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVMRoPEQ8, err)
+				}
+			}
+			if useVulkan && q8FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, &qHead, tl.q8.k, tl.q8.v, dummyRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVQ8) {
+				if err := backend.VulkanFusedMatVec3Q8(q[:dummyRows], k, v, x, &qHead, tl.q8.k, tl.q8.v); err == nil {
+					return true, false
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVQ8, err)
+				}
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, nil, nil, tl.q8.k, tl.q8.v, nil, nil, nil, nil, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2Q8(k, v, x, tl.q8.k, tl.q8.v)
+		return true, false
+	}
+	if tl.q6.k != nil && tl.q6.v != nil && tl.q6.k.Cols == hidden && tl.q6.v.Cols == hidden {
+		dummyQ := &tensor.Q6Matrix{Cols: hidden}
+		if kvUseVulkan && hasRoPE && q6FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q6.k, tl.q6.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEQ6) {
+			if err := backend.VulkanFusedMatVec2MRoPEQ6(k, v, x, dummyQ, tl.q6.k, tl.q6.v, cosTable, sinTable, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEQ6, err)
+			}
+		}
+		if kvUseVulkan && q6FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q6.k, tl.q6.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVQ6) {
+			if err := backend.VulkanFusedMatVec2Q6(k, v, x, dummyQ, tl.q6.k, tl.q6.v); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVQ6, err)
+			}
+		}
+		if haveDummyQ && tl.q6.q != nil && sameColsQ6(hidden, tl.q6.q, tl.q6.k, tl.q6.v) && q6MatVecMinRowsShapeOK(tl.q6.q, dummyRows, hidden) {
+			qHead := *tl.q6.q
+			qHead.Rows = dummyRows
+			packedCols := tensor.PackedQ6Cols(qHead.Cols)
+			qHead.Data = qHead.Data[:dummyRows*packedCols]
+			qHead.Scale = qHead.Scale[:dummyRows]
+			if useVulkan && hasRoPE && q6FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, &qHead, tl.q6.k, tl.q6.v, dummyRows, kvRows, kvRows, hidden) &&
+				fusedMRoPEShapeOK(q[:dummyRows], k, 1, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEQ6) {
+				if err := backend.VulkanFusedMatVec3MRoPEQ6(q[:dummyRows], k, v, x, &qHead, tl.q6.k, tl.q6.v, cosTable, sinTable, 1, kvHeads, headDim); err == nil {
+					return true, true
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVMRoPEQ6, err)
+				}
+			}
+			if useVulkan && q6FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, &qHead, tl.q6.k, tl.q6.v, dummyRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVQ6) {
+				if err := backend.VulkanFusedMatVec3Q6(q[:dummyRows], k, v, x, &qHead, tl.q6.k, tl.q6.v); err == nil {
+					return true, false
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVQ6, err)
+				}
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, nil, nil, nil, nil, tl.q6.k, tl.q6.v, nil, nil, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2Q6(k, v, x, tl.q6.k, tl.q6.v)
+		return true, false
+	}
+	if tl.q4.k != nil && tl.q4.v != nil && tl.q4.k.Cols == hidden && tl.q4.v.Cols == hidden {
+		dummyQ := &tensor.Q4Matrix{Cols: hidden}
+		if kvUseVulkan && hasRoPE && q4FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q4.k, tl.q4.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEQ4) {
+			if err := backend.VulkanFusedMatVec2MRoPEQ4(k, v, x, dummyQ, tl.q4.k, tl.q4.v, cosTable, sinTable, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEQ4, err)
+			}
+		}
+		if kvUseVulkan && q4FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q4.k, tl.q4.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVQ4) {
+			if err := backend.VulkanFusedMatVec2Q4(k, v, x, dummyQ, tl.q4.k, tl.q4.v); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVQ4, err)
+			}
+		}
+		if haveDummyQ && tl.q4.q != nil && sameColsQ4(hidden, tl.q4.q, tl.q4.k, tl.q4.v) && q4MatVecMinRowsShapeOK(tl.q4.q, dummyRows, hidden) {
+			qHead := *tl.q4.q
+			qHead.Rows = dummyRows
+			qHead.Data = qHead.Data[:dummyRows*((qHead.Cols+1)/2)]
+			qHead.Scale = qHead.Scale[:dummyRows]
+			if useVulkan && hasRoPE && q4FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, &qHead, tl.q4.k, tl.q4.v, dummyRows, kvRows, kvRows, hidden) &&
+				fusedMRoPEShapeOK(q[:dummyRows], k, 1, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEQ4) {
+				if err := backend.VulkanFusedMatVec3MRoPEQ4(q[:dummyRows], k, v, x, &qHead, tl.q4.k, tl.q4.v, cosTable, sinTable, 1, kvHeads, headDim); err == nil {
+					return true, true
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVMRoPEQ4, err)
+				}
+			}
+			if useVulkan && q4FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, &qHead, tl.q4.k, tl.q4.v, dummyRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVQ4) {
+				if err := backend.VulkanFusedMatVec3Q4(q[:dummyRows], k, v, x, &qHead, tl.q4.k, tl.q4.v); err == nil {
+					return true, false
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVQ4, err)
+				}
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, nil, nil, nil, nil, nil, nil, tl.q4.k, tl.q4.v, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2Q4(k, v, x, tl.q4.k, tl.q4.v)
+		return true, false
+	}
+	if len(tl.w.k) >= kvRows*hidden && len(tl.w.v) >= kvRows*hidden {
+		if kvUseVulkan && hasRoPE && f32FusedMatVec2ShapeOK(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEF32) {
+			if err := backend.VulkanFusedMatVec2MRoPEF32(k, v, x, nil, tl.w.k, tl.w.v, cosTable, sinTable, kvRows, kvRows, hidden, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEF32, err)
+			}
+		}
+		if kvUseVulkan && f32FusedMatVec2ShapeOK(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVF32) {
+			if err := backend.VulkanFusedMatVec2F32(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVF32, err)
+			}
+		}
+		if haveDummyQ && len(tl.w.q) >= dummyRows*hidden {
+			if useVulkan && hasRoPE && f32FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, tl.w.q[:dummyRows*hidden], tl.w.k, tl.w.v, dummyRows, kvRows, kvRows, hidden) &&
+				fusedMRoPEShapeOK(q[:dummyRows], k, 1, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEF32) {
+				if err := backend.VulkanFusedMatVec3MRoPEF32(q[:dummyRows], k, v, x, tl.w.q[:dummyRows*hidden], tl.w.k, tl.w.v, cosTable, sinTable, dummyRows, kvRows, kvRows, hidden, 1, kvHeads, headDim); err == nil {
+					return true, true
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVMRoPEF32, err)
+				}
+			}
+			if useVulkan && f32FusedMatVec3ShapeOK(q[:dummyRows], k, v, x, tl.w.q[:dummyRows*hidden], tl.w.k, tl.w.v, dummyRows, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedQKVF32) {
+				if err := backend.VulkanFusedMatVec3F32(q[:dummyRows], k, v, x, tl.w.q[:dummyRows*hidden], tl.w.k, tl.w.v, dummyRows, kvRows, kvRows, hidden); err == nil {
+					return true, false
+				} else {
+					rt.disableVulkanOp(vulkanOpFusedQKVF32, err)
+				}
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, tl.w.k, tl.w.v, nil, nil, nil, nil, nil, nil, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden)
+		return true, false
+	}
+	return false, false
+}
+
+func (rt *Runtime) fusedKV(k, v, x []float32, tl *textLayer, kvRows, hidden, kvHeads, headDim int, hasRoPE bool, cosTable, sinTable []float32) (ready bool, kHasRoPE bool) {
+	kvUseVulkan := fusedMatVec3Work(1, kvRows, kvRows, hidden) >= vulkanMatVecMinWork()
+	if tl.q8.k != nil && tl.q8.v != nil && tl.q8.k.Cols == hidden && tl.q8.v.Cols == hidden {
+		dummyQ := &tensor.Q8Matrix{Cols: hidden}
+		if kvUseVulkan && hasRoPE && q8FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q8.k, tl.q8.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEQ8) {
+			if err := backend.VulkanFusedMatVec2MRoPEQ8(k, v, x, dummyQ, tl.q8.k, tl.q8.v, cosTable, sinTable, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEQ8, err)
+			}
+		}
+		if kvUseVulkan && q8FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q8.k, tl.q8.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVQ8) {
+			if err := backend.VulkanFusedMatVec2Q8(k, v, x, dummyQ, tl.q8.k, tl.q8.v); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVQ8, err)
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, nil, nil, tl.q8.k, tl.q8.v, nil, nil, nil, nil, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2Q8(k, v, x, tl.q8.k, tl.q8.v)
+		return true, false
+	}
+	if tl.q6.k != nil && tl.q6.v != nil && tl.q6.k.Cols == hidden && tl.q6.v.Cols == hidden {
+		dummyQ := &tensor.Q6Matrix{Cols: hidden}
+		if kvUseVulkan && hasRoPE && q6FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q6.k, tl.q6.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEQ6) {
+			if err := backend.VulkanFusedMatVec2MRoPEQ6(k, v, x, dummyQ, tl.q6.k, tl.q6.v, cosTable, sinTable, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEQ6, err)
+			}
+		}
+		if kvUseVulkan && q6FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q6.k, tl.q6.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVQ6) {
+			if err := backend.VulkanFusedMatVec2Q6(k, v, x, dummyQ, tl.q6.k, tl.q6.v); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVQ6, err)
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, nil, nil, nil, nil, tl.q6.k, tl.q6.v, nil, nil, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2Q6(k, v, x, tl.q6.k, tl.q6.v)
+		return true, false
+	}
+	if tl.q4.k != nil && tl.q4.v != nil && tl.q4.k.Cols == hidden && tl.q4.v.Cols == hidden {
+		dummyQ := &tensor.Q4Matrix{Cols: hidden}
+		if kvUseVulkan && hasRoPE && q4FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q4.k, tl.q4.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEQ4) {
+			if err := backend.VulkanFusedMatVec2MRoPEQ4(k, v, x, dummyQ, tl.q4.k, tl.q4.v, cosTable, sinTable, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEQ4, err)
+			}
+		}
+		if kvUseVulkan && q4FusedMatVec2ShapeOK(k, v, x, dummyQ, tl.q4.k, tl.q4.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVQ4) {
+			if err := backend.VulkanFusedMatVec2Q4(k, v, x, dummyQ, tl.q4.k, tl.q4.v); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVQ4, err)
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, nil, nil, nil, nil, nil, nil, tl.q4.k, tl.q4.v, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2Q4(k, v, x, tl.q4.k, tl.q4.v)
+		return true, false
+	}
+	if len(tl.w.k) >= kvRows*hidden && len(tl.w.v) >= kvRows*hidden {
+		if kvUseVulkan && hasRoPE && f32FusedMatVec2ShapeOK(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden) &&
+			mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpFusedKVMRoPEF32) {
+			if err := backend.VulkanFusedMatVec2MRoPEF32(k, v, x, nil, tl.w.k, tl.w.v, cosTable, sinTable, kvRows, kvRows, hidden, kvHeads, headDim); err == nil {
+				return true, true
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVMRoPEF32, err)
+			}
+		}
+		if kvUseVulkan && f32FusedMatVec2ShapeOK(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden) && rt.vulkanOpEnabled(vulkanOpFusedKVF32) {
+			if err := backend.VulkanFusedMatVec2F32(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden); err == nil {
+				return true, false
+			} else {
+				rt.disableVulkanOp(vulkanOpFusedKVF32, err)
+			}
+		}
+		if rt.matVec2MaybeVulkan(k, v, x, tl.w.k, tl.w.v, nil, nil, nil, nil, nil, nil, kvRows, kvRows, hidden) {
+			return true, false
+		}
+		tensor.FusedMatVec2(k, v, x, tl.w.k, tl.w.v, kvRows, kvRows, hidden)
+		return true, false
+	}
+	return false, false
+}
+
+func fusedMatVec3Work(rowsA, rowsB, rowsC, cols int) int {
+	rows, ok := checkedModelAddInt(rowsA, rowsB)
+	if !ok {
+		return 0
+	}
+	rows, ok = checkedModelAddInt(rows, rowsC)
+	if !ok {
+		return 0
+	}
+	work, ok := checkedModelMulInt(rows, cols)
+	if !ok {
+		return 0
+	}
+	return work
 }
 
 func sameColsQ8(cols int, a, b, c *tensor.Q8Matrix) bool {
@@ -3504,7 +6429,564 @@ func sameColsQ4(cols int, a, b, c *tensor.Q4Matrix) bool {
 	return a.Cols == cols && b.Cols == cols && c.Cols == cols
 }
 
-func matVecMaybeQuant(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) {
+func q8MatVecShapeOK(q *tensor.Q8Matrix, rows, cols int) bool {
+	elements, ok := checkedModelMulInt(rows, cols)
+	return ok && q != nil && q.Rows == rows && q.Cols == cols && len(q.Data) >= elements && len(q.Scale) >= rows
+}
+
+func q6MatVecShapeOK(q *tensor.Q6Matrix, rows, cols int) bool {
+	packedCols, ok := checkedPackedQ6Cols(cols)
+	elements, elemOK := checkedModelMulInt(rows, packedCols)
+	return ok && elemOK && q != nil && q.Rows == rows && q.Cols == cols && len(q.Data) >= elements && len(q.Scale) >= rows
+}
+
+func q4MatVecShapeOK(q *tensor.Q4Matrix, rows, cols int) bool {
+	packedCols, ok := checkedPackedQ4Cols(cols)
+	elements, elemOK := checkedModelMulInt(rows, packedCols)
+	return ok && elemOK && q != nil && q.Rows == rows && q.Cols == cols && len(q.Data) >= elements && len(q.Scale) >= rows
+}
+
+func q8FusedMatVec3ShapeOK(outA, outB, outC, x []float32, a, b, c *tensor.Q8Matrix, rowsA, rowsB, rowsC, cols int) bool {
+	return q8MatVecShapeOK(a, rowsA, cols) && q8MatVecShapeOK(b, rowsB, cols) && q8MatVecShapeOK(c, rowsC, cols) &&
+		len(outA) >= rowsA && len(outB) >= rowsB && len(outC) >= rowsC && len(x) >= cols
+}
+
+func q6FusedMatVec3ShapeOK(outA, outB, outC, x []float32, a, b, c *tensor.Q6Matrix, rowsA, rowsB, rowsC, cols int) bool {
+	return q6MatVecShapeOK(a, rowsA, cols) && q6MatVecShapeOK(b, rowsB, cols) && q6MatVecShapeOK(c, rowsC, cols) &&
+		len(outA) >= rowsA && len(outB) >= rowsB && len(outC) >= rowsC && len(x) >= cols
+}
+
+func q4FusedMatVec3ShapeOK(outA, outB, outC, x []float32, a, b, c *tensor.Q4Matrix, rowsA, rowsB, rowsC, cols int) bool {
+	return q4MatVecShapeOK(a, rowsA, cols) && q4MatVecShapeOK(b, rowsB, cols) && q4MatVecShapeOK(c, rowsC, cols) &&
+		len(outA) >= rowsA && len(outB) >= rowsB && len(outC) >= rowsC && len(x) >= cols
+}
+
+func q8MatVecMinRowsShapeOK(q *tensor.Q8Matrix, rows, cols int) bool {
+	elements, ok := checkedModelMulInt(rows, cols)
+	return ok && q != nil && q.Rows >= rows && q.Cols == cols && len(q.Data) >= elements && len(q.Scale) >= rows
+}
+
+func q6MatVecMinRowsShapeOK(q *tensor.Q6Matrix, rows, cols int) bool {
+	packedCols, ok := checkedPackedQ6Cols(cols)
+	elements, elemOK := checkedModelMulInt(rows, packedCols)
+	return ok && elemOK && q != nil && q.Rows >= rows && q.Cols == cols && len(q.Data) >= elements && len(q.Scale) >= rows
+}
+
+func q4MatVecMinRowsShapeOK(q *tensor.Q4Matrix, rows, cols int) bool {
+	packedCols, ok := checkedPackedQ4Cols(cols)
+	elements, elemOK := checkedModelMulInt(rows, packedCols)
+	return ok && elemOK && q != nil && q.Rows >= rows && q.Cols == cols && len(q.Data) >= elements && len(q.Scale) >= rows
+}
+
+func f32FusedMatVec3ShapeOK(outA, outB, outC, x, wa, wb, wc []float32, rowsA, rowsB, rowsC, cols int) bool {
+	return f32MatVecShapeOK(outA, x, wa, rowsA, cols) && f32MatVecShapeOK(outB, x, wb, rowsB, cols) && f32MatVecShapeOK(outC, x, wc, rowsC, cols)
+}
+
+func q8FusedMatVec2ShapeOK(outB, outC, x []float32, a, b, c *tensor.Q8Matrix, rowsB, rowsC, cols int) bool {
+	return a != nil && a.Cols == cols && q8MatVecShapeOK(b, rowsB, cols) && q8MatVecShapeOK(c, rowsC, cols) &&
+		len(outB) >= rowsB && len(outC) >= rowsC && len(x) >= cols
+}
+
+func q6FusedMatVec2ShapeOK(outB, outC, x []float32, a, b, c *tensor.Q6Matrix, rowsB, rowsC, cols int) bool {
+	return a != nil && a.Cols == cols && q6MatVecShapeOK(b, rowsB, cols) && q6MatVecShapeOK(c, rowsC, cols) &&
+		len(outB) >= rowsB && len(outC) >= rowsC && len(x) >= cols
+}
+
+func q4FusedMatVec2ShapeOK(outB, outC, x []float32, a, b, c *tensor.Q4Matrix, rowsB, rowsC, cols int) bool {
+	return a != nil && a.Cols == cols && q4MatVecShapeOK(b, rowsB, cols) && q4MatVecShapeOK(c, rowsC, cols) &&
+		len(outB) >= rowsB && len(outC) >= rowsC && len(x) >= cols
+}
+
+func q8SwiGLUGateUpShapeOK(out, x []float32, gate, up, down *tensor.Q8Matrix, rows, cols, outRows int) bool {
+	return q8MatVecShapeOK(gate, rows, cols) && q8MatVecShapeOK(up, rows, cols) &&
+		down != nil && down.Rows == outRows && down.Cols == rows && len(out) >= rows && len(x) >= cols
+}
+
+func q6SwiGLUGateUpShapeOK(out, x []float32, gate, up, down *tensor.Q6Matrix, rows, cols, outRows int) bool {
+	return q6MatVecShapeOK(gate, rows, cols) && q6MatVecShapeOK(up, rows, cols) &&
+		down != nil && down.Rows == outRows && down.Cols == rows && len(out) >= rows && len(x) >= cols
+}
+
+func q4SwiGLUGateUpShapeOK(out, x []float32, gate, up, down *tensor.Q4Matrix, rows, cols, outRows int) bool {
+	return q4MatVecShapeOK(gate, rows, cols) && q4MatVecShapeOK(up, rows, cols) &&
+		down != nil && down.Rows == outRows && down.Cols == rows && len(out) >= rows && len(x) >= cols
+}
+
+func q8SwiGLUDownShapeOK(out, x []float32, gate, up, down *tensor.Q8Matrix, rows, cols, outRows int) bool {
+	return q8SwiGLUGateUpShapeOK(out, x, gate, up, down, rows, cols, outRows) && q8MatVecShapeOK(down, outRows, rows) && len(out) >= outRows
+}
+
+func q6SwiGLUDownShapeOK(out, x []float32, gate, up, down *tensor.Q6Matrix, rows, cols, outRows int) bool {
+	return q6SwiGLUGateUpShapeOK(out, x, gate, up, down, rows, cols, outRows) && q6MatVecShapeOK(down, outRows, rows) && len(out) >= outRows
+}
+
+func q4SwiGLUDownShapeOK(out, x []float32, gate, up, down *tensor.Q4Matrix, rows, cols, outRows int) bool {
+	return q4SwiGLUGateUpShapeOK(out, x, gate, up, down, rows, cols, outRows) && q4MatVecShapeOK(down, outRows, rows) && len(out) >= outRows
+}
+
+func f32SwiGLUDownShapeOK(out, x, gate, up, down []float32, rows, cols, outRows int) bool {
+	return f32SwiGLUGateUpWeightsShapeOK(x, gate, up, rows, cols) &&
+		outRows > 0 && len(out) >= outRows && f32MatVecWeightsReady(down, outRows, rows)
+}
+
+func f32SwiGLUGateUpShapeOK(out, x, gate, up []float32, rows, cols int) bool {
+	return len(out) >= rows && f32SwiGLUGateUpWeightsShapeOK(x, gate, up, rows, cols)
+}
+
+func f32SwiGLUGateUpWeightsShapeOK(x, gate, up []float32, rows, cols int) bool {
+	return len(x) >= cols && f32MatVecWeightsReady(gate, rows, cols) && f32MatVecWeightsReady(up, rows, cols)
+}
+
+func f32FusedMatVec2ShapeOK(outB, outC, x, wb, wc []float32, rowsB, rowsC, cols int) bool {
+	return f32MatVecShapeOK(outB, x, wb, rowsB, cols) && f32MatVecShapeOK(outC, x, wc, rowsC, cols)
+}
+
+func fusedMRoPEShapeOK(q, k []float32, qHeads, kvHeads, headDim int, cosTable, sinTable []float32) bool {
+	return headDim%2 == 0 && mropeShapeOK(q, qHeads, headDim, cosTable, sinTable) && mropeShapeOK(k, kvHeads, headDim, cosTable, sinTable)
+}
+
+func f32MatVecShapeOK(out, x, w []float32, rows, cols int) bool {
+	elements, ok := checkedModelMulInt(rows, cols)
+	return ok && len(out) >= rows && len(x) >= cols && len(w) >= elements
+}
+
+func f32MatVecWeightsReady(w []float32, rows, cols int) bool {
+	elements, ok := checkedModelMulInt(rows, cols)
+	return ok && len(w) >= elements
+}
+
+func checkedTextAttentionDims(cache *kvCache, numHeads, kvHeads, headDim int) (qRows, kvDim, cacheElems int, ok bool) {
+	if cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || numHeads%kvHeads != 0 {
+		return 0, 0, 0, false
+	}
+	qRows, ok = checkedModelMulInt(numHeads, headDim)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	kvDim, ok = checkedModelMulInt(kvHeads, headDim)
+	if !ok || cache.kvDim != kvDim {
+		return 0, 0, 0, false
+	}
+	cacheElems, ok = checkedModelMulInt(cache.len, cache.kvDim)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return qRows, kvDim, cacheElems, true
+}
+
+func textCacheStorageReady(cache *kvCache, cacheElems int) bool {
+	return cache != nil && cacheElems > 0 && len(cache.k) >= cacheElems && len(cache.v) >= cacheElems
+}
+
+func textAttentionOnlyWorkReady(cacheLen, numHeads, headDim int) bool {
+	work, ok := checkedModelMulInt(cacheLen, numHeads)
+	if ok {
+		work, ok = checkedModelMulInt(work, headDim)
+	}
+	return ok && work >= vulkanTextAttentionMinWork()
+}
+
+func textAttentionOutWorkReady(cacheLen, numHeads, headDim, qRows int, includeNorm bool) bool {
+	attn, ok := checkedTextAttentionOnlyWork(cacheLen, numHeads, headDim)
+	if !ok {
+		return false
+	}
+	proj, ok := checkedModelMulInt(qRows, qRows)
+	if !ok {
+		return false
+	}
+	work, ok := checkedModelAddInt(attn, proj)
+	if !ok {
+		return false
+	}
+	if includeNorm {
+		work, ok = checkedModelAddInt(work, qRows)
+		if !ok {
+			return false
+		}
+	}
+	return work >= vulkanTextAttentionMinWork()
+}
+
+func textFirstTokenValueOutNormWorkReady(qRows, kvDim int) bool {
+	proj, ok := checkedModelMulInt(qRows, qRows)
+	if !ok {
+		return false
+	}
+	work, ok := checkedModelAddInt(proj, kvDim)
+	if ok {
+		work, ok = checkedModelAddInt(work, qRows)
+	}
+	return ok && work >= vulkanTextAttentionMinWork()
+}
+
+func checkedTextAttentionOnlyWork(cacheLen, numHeads, headDim int) (int, bool) {
+	work, ok := checkedModelMulInt(cacheLen, numHeads)
+	if ok {
+		work, ok = checkedModelMulInt(work, headDim)
+	}
+	return work, ok
+}
+
+func vulkanMatVecWorkReady(rows, cols int) bool {
+	work, ok := checkedModelMulInt(rows, cols)
+	return ok && work >= vulkanMatVecMinWork()
+}
+
+func groupedVulkanMatVecWorkReady(cols int, rows ...int) bool {
+	if cols <= 0 {
+		return false
+	}
+	total := 0
+	for _, row := range rows {
+		if row <= 0 || total > maxModelInt()-row {
+			return false
+		}
+		total += row
+	}
+	return vulkanMatVecWorkReady(total, cols)
+}
+
+func vulkanMatVecAddNormWorkReady(rows, cols int) bool {
+	work, ok := checkedModelMulInt(rows, cols)
+	if !ok || work > maxModelInt()-rows {
+		return false
+	}
+	return work+rows >= vulkanMatVecMinWork()
+}
+
+func vulkanVectorWorkReady(rows, cols int) bool {
+	work, ok := checkedModelMulInt(rows, cols)
+	return ok && work >= vulkanVectorMinWork()
+}
+
+func groupedVulkanVectorWorkReady(cols int, rows ...int) bool {
+	if cols <= 0 {
+		return false
+	}
+	total := 0
+	for _, row := range rows {
+		if row <= 0 || total > maxModelInt()-row {
+			return false
+		}
+		total += row
+	}
+	return vulkanVectorWorkReady(total, cols)
+}
+
+func checkedPackedQ6Cols(cols int) (int, bool) {
+	if cols <= 0 || cols > (maxModelInt()-7)/6 {
+		return 0, false
+	}
+	return tensor.PackedQ6Cols(cols), true
+}
+
+func checkedPackedQ4Cols(cols int) (int, bool) {
+	if cols <= 0 || cols == maxModelInt() {
+		return 0, false
+	}
+	return (cols + 1) / 2, true
+}
+
+func checkedModelMulInt(a, b int) (int, bool) {
+	if a <= 0 || b <= 0 || a > maxModelInt()/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func checkedModelAddInt(a, b int) (int, bool) {
+	if a <= 0 || b <= 0 || a > maxModelInt()-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func maxModelInt() int {
+	return int(^uint(0) >> 1)
+}
+
+func rmsNormShapeOK(out, x, weight []float32) bool {
+	n := len(x)
+	return n > 0 && len(out) >= n && len(weight) >= n
+}
+
+func addRMSNormShapeOK(out, dst, add, weight []float32) bool {
+	n := len(dst)
+	return n > 0 && len(out) >= n && len(add) >= n && len(weight) >= n
+}
+
+func mropeShapeOK(x []float32, heads, dim int, cosTable, sinTable []float32) bool {
+	half := dim / 2
+	width, ok := checkedModelMulInt(heads, dim)
+	return ok && len(x) >= width && len(cosTable) >= half && len(sinTable) >= half
+}
+
+func (rt *Runtime) rmsNormMaybeVulkan(out, x, weight []float32, eps float32) {
+	if eps == 1e-6 && len(x) >= vulkanVectorMinWork() && rmsNormShapeOK(out, x, weight) && rt.vulkanOpEnabled(vulkanOpRMSNormF32) {
+		if err := backend.VulkanRMSNormF32(out, x, weight); err == nil {
+			return
+		} else {
+			rt.disableVulkanOp(vulkanOpRMSNormF32, err)
+		}
+	}
+	tensor.RMSNorm(out, x, weight, eps)
+}
+
+// rmsNormMatVecChainedMaybeVulkan chains RMSNorm followed by a F32 matvec into a
+// single command buffer submission.  The intermediate (RMSNorm output) stays in
+// GPU memory, eliminating one host readback + upload + fence wait.
+// Returns true on success; caller falls back to separate calls on false.
+func (rt *Runtime) rmsNormMatVecChainedMaybeVulkan(matvecOut, x, normWeight, w []float32, n, rows, cols int, eps float32) bool {
+	if eps != 1e-6 || n < vulkanVectorMinWork() || !rt.vulkanOpEnabled(vulkanOpChainedRMSNormMatVecF32) {
+		return false
+	}
+	if !rmsNormShapeOK(x, x, normWeight) || !f32MatVecShapeOK(matvecOut, x, w, rows, cols) {
+		return false
+	}
+	if len(x) < n || len(normWeight) < n || len(w) < rows*cols || len(matvecOut) < rows {
+		return false
+	}
+	if err := backend.VulkanChainedRMSNormMatVecF32(matvecOut, x, normWeight, w, n, rows, cols); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedRMSNormMatVecF32, err)
+	}
+	return false
+}
+
+// rmsNormQKVMRoPEChainedMaybeVulkan chains RMSNorm followed by fused QKV+MRoPE
+// into a single command buffer submission.  The intermediate (RMSNorm output)
+// stays in GPU memory, eliminating one host readback + upload + fence wait.
+// Returns true on success; caller falls back to separate calls on false.
+func (rt *Runtime) rmsNormQKVMRoPEChainedMaybeVulkan(q, k, v, x, normWeight, wa, wb, wc, cosTable, sinTable []float32, n, qRows, kvRows, hidden, qHeads, kvHeads, headDim int, eps float32) bool {
+	if eps != 1e-6 || n < vulkanVectorMinWork() || !rt.vulkanOpEnabled(vulkanOpChainedRMSNormQKVMRoPEF32) {
+		return false
+	}
+	if !rt.vulkanOpEnabled(vulkanOpFusedQKVMRoPEF32) || !rt.vulkanOpEnabled(vulkanOpRMSNormF32) {
+		return false
+	}
+	if !rmsNormShapeOK(x, x, normWeight) || !fusedMRoPEShapeOK(q, k, qHeads, kvHeads, headDim, cosTable, sinTable) {
+		return false
+	}
+	if !f32MatVecShapeOK(q, x, wa, qRows, hidden) || !f32MatVecShapeOK(k, x, wb, kvRows, hidden) || !f32MatVecShapeOK(v, x, wc, kvRows, hidden) {
+		return false
+	}
+	if err := backend.VulkanChainedRMSNormFusedQKVMRoPEF32(q, k, v, x, normWeight, wa, wb, wc, cosTable, sinTable, n, qRows, kvRows, kvRows, hidden, kvHeads, headDim); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedRMSNormQKVMRoPEF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) addRMSNormMaybeVulkan(out, dst, add, weight []float32, eps float32) {
+	if eps == 1e-6 && len(dst) >= vulkanVectorMinWork() && addRMSNormShapeOK(out, dst, add, weight) && rt.vulkanOpEnabled(vulkanOpAddRMSNormF32) {
+		if err := backend.VulkanAddRMSNormF32(out, dst, add, weight); err == nil {
+			return
+		} else {
+			rt.disableVulkanOp(vulkanOpAddRMSNormF32, err)
+		}
+	}
+	tensor.AddRMSNorm(out, dst, add, weight, eps)
+}
+
+func (rt *Runtime) addRMSNormOutOnlyMaybeVulkan(out, dst, add, weight []float32, eps float32) {
+	if eps == 1e-6 && len(dst) >= vulkanVectorMinWork() && addRMSNormShapeOK(out, dst, add, weight) && rt.vulkanOpEnabled(vulkanOpAddRMSNormOutOnlyF32) {
+		if err := backend.VulkanAddRMSNormF32OutOnly(out, dst, add, weight); err == nil {
+			return
+		} else {
+			rt.disableVulkanOp(vulkanOpAddRMSNormOutOnlyF32, err)
+		}
+	}
+	tensor.AddRMSNormOutOnly(out, dst, add, weight, eps)
+}
+
+func (rt *Runtime) matVecAddRMSNormMaybeVulkan(normOut, residual, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, normWeight []float32, rows, cols int, eps float32) bool {
+	if !rt.matVecAddRMSNormVulkanReady(normOut, residual, x, w, q8, q6, q4, normWeight, rows, cols, eps) {
+		return false
+	}
+	if q8 != nil {
+		if err := backend.VulkanMatVecAddRMSNormQ8(normOut, residual, x, q8, normWeight); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpMatVecAddRMSNormQ8, err)
+		}
+		return false
+	}
+	if q6 != nil {
+		if err := backend.VulkanMatVecAddRMSNormQ6(normOut, residual, x, q6, normWeight); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpMatVecAddRMSNormQ6, err)
+		}
+		return false
+	}
+	if q4 != nil {
+		if err := backend.VulkanMatVecAddRMSNormQ4(normOut, residual, x, q4, normWeight); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpMatVecAddRMSNormQ4, err)
+		}
+		return false
+	}
+	if err := backend.VulkanMatVecAddRMSNormF32(normOut, residual, x, w, normWeight, rows, cols); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpMatVecAddRMSNormF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) matVecAddRMSNormVulkanReady(normOut, residual, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, normWeight []float32, rows, cols int, eps float32) bool {
+	if eps != 1e-6 || !vulkanMatVecAddNormWorkReady(rows, cols) {
+		return false
+	}
+	if len(normOut) < rows || len(residual) < rows || len(x) < cols || len(normWeight) < rows {
+		return false
+	}
+	if q8 != nil {
+		return q8MatVecShapeOK(q8, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecAddRMSNormQ8)
+	}
+	if q6 != nil {
+		return q6MatVecShapeOK(q6, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecAddRMSNormQ6)
+	}
+	if q4 != nil {
+		return q4MatVecShapeOK(q4, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecAddRMSNormQ4)
+	}
+	elements, ok := checkedModelMulInt(rows, cols)
+	return ok && len(w) >= elements && rt.vulkanOpEnabled(vulkanOpMatVecAddRMSNormF32)
+}
+
+func (rt *Runtime) matVecAddRMSNormOutOnlyMaybeVulkan(normOut, residual, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, normWeight []float32, rows, cols int, eps float32, tmp []float32) bool {
+	if !rt.matVecAddRMSNormOutOnlyVulkanReady(normOut, residual, x, w, q8, q6, q4, normWeight, rows, cols, eps, tmp) {
+		return false
+	}
+	if !rt.matVecOnlyMaybeVulkan(tmp[:rows], x, w, q8, q6, q4, rows, cols) {
+		return false
+	}
+	if err := backend.VulkanAddRMSNormF32OutOnly(normOut, residual, tmp[:rows], normWeight); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpAddRMSNormOutOnlyF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) matVecAddRMSNormOutOnlyVulkanReady(normOut, residual, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, normWeight []float32, rows, cols int, eps float32, tmp []float32) bool {
+	if eps != 1e-6 || rows <= 0 || cols <= 0 || len(tmp) < rows ||
+		len(normOut) < rows || len(residual) < rows || len(x) < cols || len(normWeight) < rows {
+		return false
+	}
+	if rows < vulkanVectorMinWork() || !rt.vulkanOpEnabled(vulkanOpAddRMSNormOutOnlyF32) {
+		return false
+	}
+	return rt.matVecVulkanReady(tmp[:rows], x, w, q8, q6, q4, rows, cols)
+}
+
+func (rt *Runtime) matVecOnlyMaybeVulkan(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) bool {
+	if !rt.matVecVulkanReady(out, x, w, q8, q6, q4, rows, cols) {
+		return false
+	}
+	return rt.matVecOnlyVulkanDispatch(out, x, w, q8, q6, q4, rows, cols)
+}
+
+func (rt *Runtime) matVecOnlyVulkanDispatch(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) bool {
+	if q8 != nil {
+		if err := backend.VulkanMatVecQ8(out, x, q8); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpMatVecQ8, err)
+		}
+		return false
+	}
+	if q6 != nil {
+		if err := backend.VulkanMatVecQ6(out, x, q6); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpMatVecQ6, err)
+		}
+		return false
+	}
+	if q4 != nil {
+		if err := backend.VulkanMatVecQ4(out, x, q4); err == nil {
+			return true
+		} else {
+			rt.disableVulkanOp(vulkanOpMatVecQ4, err)
+		}
+		return false
+	}
+	if err := backend.VulkanMatVecF32(out, x, w, rows, cols); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpMatVecF32, err)
+	}
+	return false
+}
+
+func (rt *Runtime) matVecVulkanReady(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) bool {
+	if len(out) < rows || len(x) < cols || !vulkanMatVecWorkReady(rows, cols) {
+		return false
+	}
+	return rt.matVecVulkanShapeReady(out, x, w, q8, q6, q4, rows, cols)
+}
+
+func (rt *Runtime) matVecVulkanShapeReady(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) bool {
+	if rows <= 0 || cols <= 0 || len(out) < rows || len(x) < cols {
+		return false
+	}
+	if q8 != nil {
+		return q8MatVecShapeOK(q8, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecQ8)
+	}
+	if q6 != nil {
+		return q6MatVecShapeOK(q6, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecQ6)
+	}
+	if q4 != nil {
+		return q4MatVecShapeOK(q4, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecQ4)
+	}
+	return f32MatVecShapeOK(out, x, w, rows, cols) && rt.vulkanOpEnabled(vulkanOpMatVecF32)
+}
+
+func (rt *Runtime) matVec2MaybeVulkan(outA, outB, x, wa, wb []float32, q8a, q8b *tensor.Q8Matrix, q6a, q6b *tensor.Q6Matrix, q4a, q4b *tensor.Q4Matrix, rowsA, rowsB, cols int) bool {
+	if !rt.matVec2VulkanReady(outA, outB, x, wa, wb, q8a, q8b, q6a, q6b, q4a, q4b, rowsA, rowsB, cols) {
+		return false
+	}
+	if !rt.matVecOnlyVulkanDispatch(outA, x, wa, q8a, q6a, q4a, rowsA, cols) {
+		return false
+	}
+	return rt.matVecOnlyVulkanDispatch(outB, x, wb, q8b, q6b, q4b, rowsB, cols)
+}
+
+func (rt *Runtime) matVec2VulkanReady(outA, outB, x, wa, wb []float32, q8a, q8b *tensor.Q8Matrix, q6a, q6b *tensor.Q6Matrix, q4a, q4b *tensor.Q4Matrix, rowsA, rowsB, cols int) bool {
+	return groupedVulkanMatVecWorkReady(cols, rowsA, rowsB) &&
+		rt.matVecVulkanShapeReady(outA, x, wa, q8a, q6a, q4a, rowsA, cols) &&
+		rt.matVecVulkanShapeReady(outB, x, wb, q8b, q6b, q4b, rowsB, cols)
+}
+
+func (rt *Runtime) matVec3MaybeVulkan(outA, outB, outC, x, wa, wb, wc []float32, q8a, q8b, q8c *tensor.Q8Matrix, q6a, q6b, q6c *tensor.Q6Matrix, q4a, q4b, q4c *tensor.Q4Matrix, rowsA, rowsB, rowsC, cols int) bool {
+	if !rt.matVec3VulkanReady(outA, outB, outC, x, wa, wb, wc, q8a, q8b, q8c, q6a, q6b, q6c, q4a, q4b, q4c, rowsA, rowsB, rowsC, cols) {
+		return false
+	}
+	if !rt.matVecOnlyVulkanDispatch(outA, x, wa, q8a, q6a, q4a, rowsA, cols) {
+		return false
+	}
+	if !rt.matVecOnlyVulkanDispatch(outB, x, wb, q8b, q6b, q4b, rowsB, cols) {
+		return false
+	}
+	return rt.matVecOnlyVulkanDispatch(outC, x, wc, q8c, q6c, q4c, rowsC, cols)
+}
+
+func (rt *Runtime) matVec3VulkanReady(outA, outB, outC, x, wa, wb, wc []float32, q8a, q8b, q8c *tensor.Q8Matrix, q6a, q6b, q6c *tensor.Q6Matrix, q4a, q4b, q4c *tensor.Q4Matrix, rowsA, rowsB, rowsC, cols int) bool {
+	return groupedVulkanMatVecWorkReady(cols, rowsA, rowsB, rowsC) &&
+		rt.matVecVulkanShapeReady(outA, x, wa, q8a, q6a, q4a, rowsA, cols) &&
+		rt.matVecVulkanShapeReady(outB, x, wb, q8b, q6b, q4b, rowsB, cols) &&
+		rt.matVecVulkanShapeReady(outC, x, wc, q8c, q6c, q4c, rowsC, cols)
+}
+
+func (rt *Runtime) matVecMaybeQuant(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) {
+	if rt.matVecOnlyMaybeVulkan(out, x, w, q8, q6, q4, rows, cols) {
+		return
+	}
 	if q8 != nil {
 		tensor.MatVecQ8(out, x, q8)
 		return
@@ -3520,12 +7002,232 @@ func matVecMaybeQuant(out, x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Mat
 	tensor.MatVec(out, x, w, rows, cols)
 }
 
+func (rt *Runtime) matVecArgmaxMaybeVulkan(x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols int) (int, float32, bool) {
+	if !vulkanMatVecWorkReady(rows, cols) {
+		return 0, 0, false
+	}
+	if len(x) < cols {
+		return 0, 0, false
+	}
+	if q8 != nil {
+		if !q8MatVecShapeOK(q8, rows, cols) || !rt.vulkanOpEnabled(vulkanOpMatVecArgmaxQ8) {
+			return 0, 0, false
+		}
+		token, score, err := backend.VulkanMatVecArgmaxQ8(x, q8)
+		if err == nil {
+			return token, score, true
+		}
+		rt.disableVulkanOp(vulkanOpMatVecArgmaxQ8, err)
+		return 0, 0, false
+	}
+	if q6 != nil {
+		if !q6MatVecShapeOK(q6, rows, cols) || !rt.vulkanOpEnabled(vulkanOpMatVecArgmaxQ6) {
+			return 0, 0, false
+		}
+		token, score, err := backend.VulkanMatVecArgmaxQ6(x, q6)
+		if err == nil {
+			return token, score, true
+		}
+		rt.disableVulkanOp(vulkanOpMatVecArgmaxQ6, err)
+		return 0, 0, false
+	}
+	if q4 != nil {
+		if !q4MatVecShapeOK(q4, rows, cols) || !rt.vulkanOpEnabled(vulkanOpMatVecArgmaxQ4) {
+			return 0, 0, false
+		}
+		token, score, err := backend.VulkanMatVecArgmaxQ4(x, q4)
+		if err == nil {
+			return token, score, true
+		}
+		rt.disableVulkanOp(vulkanOpMatVecArgmaxQ4, err)
+		return 0, 0, false
+	}
+	elements, ok := checkedModelMulInt(rows, cols)
+	if !ok || len(w) < elements || !rt.vulkanOpEnabled(vulkanOpMatVecArgmaxF32) {
+		return 0, 0, false
+	}
+	token, score, err := backend.VulkanMatVecArgmaxF32(x, w, rows, cols)
+	if err == nil {
+		return token, score, true
+	}
+	rt.disableVulkanOp(vulkanOpMatVecArgmaxF32, err)
+	return 0, 0, false
+}
+
+func (rt *Runtime) matVecTopKMaybeVulkan(x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols, topK int, scratch *generationScratch) ([]tokenScore, bool) {
+	const maxVulkanMatVecTopK = 64
+	if topK <= 1 || topK > maxVulkanMatVecTopK || !vulkanMatVecWorkReady(rows, cols) {
+		return nil, false
+	}
+	if len(x) < cols {
+		return nil, false
+	}
+	convertCandidates := func(gpuCandidates []backend.VulkanTokenScore) ([]tokenScore, bool) {
+		candidates := makeTokenScores(len(gpuCandidates), scratch)
+		for i, c := range gpuCandidates {
+			candidates[i] = tokenScore{id: c.Token, score: c.Score}
+		}
+		return candidates, true
+	}
+	if q8 != nil {
+		if !q8MatVecShapeOK(q8, rows, cols) || !rt.vulkanOpEnabled(vulkanOpMatVecTopKQ8) {
+			return nil, false
+		}
+		gpuCandidates, err := backend.VulkanMatVecTopKQ8(x, q8, topK)
+		if err != nil {
+			rt.disableVulkanOp(vulkanOpMatVecTopKQ8, err)
+			return nil, false
+		}
+		return convertCandidates(gpuCandidates)
+	}
+	if q6 != nil {
+		if !q6MatVecShapeOK(q6, rows, cols) || !rt.vulkanOpEnabled(vulkanOpMatVecTopKQ6) {
+			return nil, false
+		}
+		gpuCandidates, err := backend.VulkanMatVecTopKQ6(x, q6, topK)
+		if err != nil {
+			rt.disableVulkanOp(vulkanOpMatVecTopKQ6, err)
+			return nil, false
+		}
+		return convertCandidates(gpuCandidates)
+	}
+	if q4 != nil {
+		if !q4MatVecShapeOK(q4, rows, cols) || !rt.vulkanOpEnabled(vulkanOpMatVecTopKQ4) {
+			return nil, false
+		}
+		gpuCandidates, err := backend.VulkanMatVecTopKQ4(x, q4, topK)
+		if err != nil {
+			rt.disableVulkanOp(vulkanOpMatVecTopKQ4, err)
+			return nil, false
+		}
+		return convertCandidates(gpuCandidates)
+	}
+	elements, ok := checkedModelMulInt(rows, cols)
+	if !ok || len(w) < elements || !rt.vulkanOpEnabled(vulkanOpMatVecTopKF32) {
+		return nil, false
+	}
+	gpuCandidates, err := backend.VulkanMatVecTopKF32(x, w, rows, cols, topK)
+	if err != nil {
+		rt.disableVulkanOp(vulkanOpMatVecTopKF32, err)
+		return nil, false
+	}
+	return convertCandidates(gpuCandidates)
+}
+
+func (rt *Runtime) matVecTopKMaybeCPU(x, w []float32, q8 *tensor.Q8Matrix, q6 *tensor.Q6Matrix, q4 *tensor.Q4Matrix, rows, cols, topK int, temp float64, scratch *generationScratch) ([]tokenScore, bool) {
+	if temp <= 0 || topK <= 1 || topK >= rows || rows <= 0 || cols <= 0 || len(x) < cols {
+		return nil, false
+	}
+	var scores []tensor.TopKScore
+	var work []tensor.TopKScore
+	if scratch != nil {
+		scores = scratch.topKScores
+		work = scratch.topKWork
+	}
+	switch {
+	case q8 != nil:
+		scores, work, _ = tensor.MatVecTopKQ8WithWork(scores, work, x, q8, topK)
+	case q6 != nil:
+		scores, work, _ = tensor.MatVecTopKQ6WithWork(scores, work, x, q6, topK)
+	case q4 != nil:
+		scores, work, _ = tensor.MatVecTopKQ4WithWork(scores, work, x, q4, topK)
+	case f32MatVecWeightsReady(w, rows, cols):
+		scores, work, _ = tensor.MatVecTopKWithWork(scores, work, x, w, rows, cols, topK)
+	default:
+		return nil, false
+	}
+	if scratch != nil {
+		scratch.topKScores = scores
+		scratch.topKWork = work
+	}
+	candidates := makeTokenScores(len(scores), scratch)
+	for i, s := range scores {
+		candidates[i] = tokenScore{id: s.ID, score: s.Score}
+	}
+	return candidates, true
+}
+
+func (rt *Runtime) vulkanOpEnabled(op vulkanOp) bool {
+	bank, bit := vulkanOpBankBit(op)
+	return rt.backend == "vulkan" && rt.vulkanDisabledOps[bank].Load()&bit == 0
+}
+
+func (rt *Runtime) disableVulkanOp(op vulkanOp, reasons ...any) {
+	reason := vulkanDisableReasonText(reasons...)
+	if reason != "" {
+		rt.vulkanDisabledMu.Lock()
+		if rt.vulkanDisabledReasons == nil {
+			rt.vulkanDisabledReasons = map[vulkanOp]string{}
+		}
+		rt.vulkanDisabledReasons[op] = reason
+		rt.vulkanDisabledMu.Unlock()
+	}
+	bank, bit := vulkanOpBankBit(op)
+	for {
+		old := rt.vulkanDisabledOps[bank].Load()
+		next := old | bit
+		if old == next || rt.vulkanDisabledOps[bank].CompareAndSwap(old, next) {
+			return
+		}
+	}
+}
+
+func vulkanDisableReasonText(reasons ...any) string {
+	for _, reason := range reasons {
+		switch v := reason.(type) {
+		case nil:
+		case error:
+			if v != nil {
+				return v.Error()
+			}
+		case string:
+			if v != "" {
+				return v
+			}
+		default:
+			text := fmt.Sprint(v)
+			if text != "" && text != "<nil>" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func vulkanOpBankBit(op vulkanOp) (int, uint64) {
+	idx := uint(op)
+	return int(idx >> 6), uint64(1) << (idx & 63)
+}
+
 func (rt *Runtime) applyMRoPE(x []float32, heads, dim int, pos ropePos) {
 	half := dim / 2
 	cosTable := make([]float32, half)
 	sinTable := make([]float32, half)
 	rt.buildMRoPETable(cosTable, sinTable, pos)
+	rt.mropeMaybeVulkan(x, heads, dim, cosTable, sinTable)
+}
+
+func (rt *Runtime) mropeMaybeVulkan(x []float32, heads, dim int, cosTable, sinTable []float32) {
+	if vulkanVectorWorkReady(heads, dim) && mropeShapeOK(x, heads, dim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpMRoPEF32) {
+		if err := backend.VulkanMRoPEF32(x, cosTable, sinTable, heads, dim); err == nil {
+			return
+		} else {
+			rt.disableVulkanOp(vulkanOpMRoPEF32, err)
+		}
+	}
 	applyMRoPEWithTable(x, heads, dim, cosTable, sinTable)
+}
+
+func (rt *Runtime) mropePairMaybeVulkan(q, k []float32, qHeads, kvHeads, dim int, cosTable, sinTable []float32) {
+	if groupedVulkanVectorWorkReady(dim, qHeads, kvHeads) && mropeShapeOK(q, qHeads, dim, cosTable, sinTable) && mropeShapeOK(k, kvHeads, dim, cosTable, sinTable) && rt.vulkanOpEnabled(vulkanOpMRoPEPairF32) {
+		if err := backend.VulkanMRoPEPairF32(q, k, cosTable, sinTable, qHeads, kvHeads, dim); err == nil {
+			return
+		} else {
+			rt.disableVulkanOp(vulkanOpMRoPEPairF32, err)
+		}
+	}
+	applyMRoPEWithTable(q, qHeads, dim, cosTable, sinTable)
+	applyMRoPEWithTable(k, kvHeads, dim, cosTable, sinTable)
 }
 
 func (rt *Runtime) buildMRoPETable(cosTable, sinTable []float32, pos ropePos) {
