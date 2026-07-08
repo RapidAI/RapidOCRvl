@@ -3525,7 +3525,7 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 		}
 		if li == 0 {
 			// Try chained RMSNorm+QKVMRoPE for F32 weights; falls back to separate calls
-			if hasRoPE && rt.attentionChainedFirstLayer(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
+			if hasRoPE && rt.attentionChainedQKV(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
 				// Chained path handled QKV; run attention+output+AddRMSNorm
 				att, normDone := rt.attentionWithNormPostQKV(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
 				if !normDone {
@@ -3544,7 +3544,7 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 			}
 		} else {
 			// Try chained RMSNorm+QKVMRoPE (F32/Q8 weights); falls back to separate calls
-			if hasRoPE && rt.attentionChainedFirstLayer(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
+			if hasRoPE && rt.attentionChainedQKV(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
 				// Chained path handled QKV; run attention+output+AddRMSNorm
 				att, normDone := rt.attentionWithNormPostQKV(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
 				if !normDone {
@@ -3642,10 +3642,10 @@ func (rt *Runtime) attentionCacheOnly(x []float32, cache *kvCache, tl *textLayer
 	cache.append(k, v)
 }
 
-// attentionChainedFirstLayer attempts the chained RMSNorm+QKVMRoPE path for
-// layer 0 (first token generation).  Fills sc.q, sc.k, sc.v and appends to cache.
-// Returns true on success, false to fall back to separate calls.
-func (rt *Runtime) attentionChainedFirstLayer(sc *layerScratch, cache *kvCache, tl *textLayer, rawInput, normWeight []float32, hasRoPE bool, ropeCos, ropeSin []float32, c *config.Config) bool {
+// attentionChainedQKV attempts the chained RMSNorm+QKVMRoPE path for a text
+// attention layer.  Fills sc.q, sc.k, sc.v and appends to cache.  Returns true
+// on success, false to fall back to separate calls.
+func (rt *Runtime) attentionChainedQKV(sc *layerScratch, cache *kvCache, tl *textLayer, rawInput, normWeight []float32, hasRoPE bool, ropeCos, ropeSin []float32, c *config.Config) bool {
 	if !hasRoPE {
 		return false
 	}
