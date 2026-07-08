@@ -3543,13 +3543,23 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 				}
 			}
 		} else {
-			if lastLayer && !needLogits {
-				rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
-				return generationForwardResult{}, nil
-			}
-			att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
-			if !normDone {
-				rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+			// Try chained RMSNorm+QKVMRoPE (F32/Q8 weights); falls back to separate calls
+			if hasRoPE && rt.attentionChainedFirstLayer(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
+				// Chained path handled QKV; run attention+output+AddRMSNorm
+				att, normDone := rt.attentionWithNormPostQKV(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+				if !normDone {
+					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+				}
+			} else {
+				rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+				if lastLayer && !needLogits {
+					rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
+					return generationForwardResult{}, nil
+				}
+				att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+				if !normDone {
+					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+				}
 			}
 		}
 		if !lastLayer {
