@@ -700,6 +700,11 @@ func dotF32Quad(a, b, c, d, x []float32) (float32, float32, float32, float32) {
 	if useDotFMA && len(a) >= 8 {
 		return dotF32QuadFMA(a, b, c, d, x)
 	}
+	if useDotF32AVX && len(a) >= 8 {
+		s0, s1 := dotF32PairAVX(a, b, x)
+		s2, s3 := dotF32PairAVX(c, d, x)
+		return s0, s1, s2, s3
+	}
 	return dotF32QuadScalar(a, b, c, d, x)
 }
 
