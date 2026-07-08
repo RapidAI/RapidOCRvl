@@ -1,0 +1,13 @@
+.codegraph/
+
+# Go cache/build artifacts
+.gocache/
+.gocache_*/
+.gotmp/
+*.exe
+backend.test.exe
+
+# IDE / build output
+.vs/
+dist/
+out/
