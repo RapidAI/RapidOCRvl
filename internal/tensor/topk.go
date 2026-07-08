@@ -48,8 +48,8 @@ func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 		val float32
 	}
 	workers := runtime.GOMAXPROCS(0)
-	if workers > 8 {
-		workers = 8
+	if workers > 16 {
+		workers = 16
 	}
 	if workers > rows {
 		workers = rows

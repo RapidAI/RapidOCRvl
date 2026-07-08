@@ -31,8 +31,8 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 		val float32
 	}
 	workers := runtime.GOMAXPROCS(0)
-	if workers > 8 {
-		workers = 8
+	if workers > 16 {
+		workers = 16
 	}
 	if workers > q.Rows {
 		workers = q.Rows
@@ -181,8 +181,8 @@ func matVecArgmaxUnpackedParallel(rows, cols int, data []int8, scale []float32, 
 		val float32
 	}
 	workers := runtime.GOMAXPROCS(0)
-	if workers > 8 {
-		workers = 8
+	if workers > 16 {
+		workers = 16
 	}
 	if workers > rows {
 		workers = rows
