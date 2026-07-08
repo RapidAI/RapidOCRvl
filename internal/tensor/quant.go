@@ -1399,6 +1399,9 @@ func dotQ4UnpackedTriplet(a, b, c []int8, x []float32) (float32, float32, float3
 }
 
 func dotQ4(a []byte, b []float32, cols int) float32 {
+	if useDotFMA && useDotQ4AVX2 && cols >= 8 {
+		return dotQ4FMA(a, b, cols)
+	}
 	if useDotQ4AVX2 && cols >= 8 {
 		return dotQ4AVX2(a, b, cols)
 	}

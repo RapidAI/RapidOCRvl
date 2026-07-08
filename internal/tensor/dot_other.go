@@ -312,6 +312,7 @@ func dotQ8FMA(a []int8, b []float32) float32 { return dotQ8Scalar(a, b) }
 func dotQ8PairFMA(a, b []int8, x []float32) (float32, float32) { return dotQ8PairScalar(a, b, x) }
 func dotQ8TripletFMA(a, b, c []int8, x []float32) (float32, float32, float32) { return dotQ8TripletScalar(a, b, c, x) }
 
+func dotQ4FMA(a []byte, b []float32, cols int) float32 { return dotQ4Scalar(a, b, cols) }
 
 func siluMulInPlaceFMA(gate, up []float32) { siluMulInPlaceAVX(gate, up) }
 func geluTanhFMA(x []float32) { geluTanhAVX(x) }
