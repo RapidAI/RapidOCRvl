@@ -126,8 +126,11 @@ float dotRowA(uint row) {
   uint lid = gl_LocalInvocationID.x; float s = 0.0;
   uint base = row * pc.cols;
   for (uint c = lid; c < pc.cols; c += 256) {
-    uint w = da[(base + c) >> 2];
-    int v = int(bitfieldExtract(w, int(((base + c) & 3u) * 8u), 8));
+    uint idx = base + c;
+    uint w = da[idx >> 2];
+    uint raw = (w >> ((idx & 3u) * 8u)) & 0xFFu;
+    int v = int(raw);
+    if ((raw & 0x80u) != 0u) v -= 256;
     s += float(v) * x[c];
   }
   scratch[lid] = s; barrier();
@@ -138,8 +141,11 @@ float dotRowB(uint row) {
   uint lid = gl_LocalInvocationID.x; float s = 0.0;
   uint base = row * pc.cols;
   for (uint c = lid; c < pc.cols; c += 256) {
-    uint w = db[(base + c) >> 2];
-    int v = int(bitfieldExtract(w, int(((base + c) & 3u) * 8u), 8));
+    uint idx = base + c;
+    uint w = db[idx >> 2];
+    uint raw = (w >> ((idx & 3u) * 8u)) & 0xFFu;
+    int v = int(raw);
+    if ((raw & 0x80u) != 0u) v -= 256;
     s += float(v) * x[c];
   }
   scratch[lid] = s; barrier();
@@ -150,8 +156,11 @@ float dotRowC(uint row) {
   uint lid = gl_LocalInvocationID.x; float s = 0.0;
   uint base = row * pc.cols;
   for (uint c = lid; c < pc.cols; c += 256) {
-    uint w = dc[(base + c) >> 2];
-    int v = int(bitfieldExtract(w, int(((base + c) & 3u) * 8u), 8));
+    uint idx = base + c;
+    uint w = dc[idx >> 2];
+    uint raw = (w >> ((idx & 3u) * 8u)) & 0xFFu;
+    int v = int(raw);
+    if ((raw & 0x80u) != 0u) v -= 256;
     s += float(v) * x[c];
   }
   scratch[lid] = s; barrier();
