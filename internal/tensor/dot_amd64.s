@@ -5582,3 +5582,85 @@ wsumAdd2FmaTail:
 
 wsumAdd2FmaDone:
 	RET
+// maxF32AVX2: improved max with 4 independent accumulators for better ILP
+TEXT ·maxF32AVX2(SB), NOSPLIT, $32-28
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+
+	// Initialize Y0,Y2,Y4,Y6 with -inf
+	LEAQ maxF32NegInf<>(SB), AX
+	VBROADCASTSS (AX), Y0
+	VORPS Y0, Y0, Y2
+	VORPS Y0, Y0, Y4
+	VORPS Y0, Y0, Y6
+	CMPQ CX, $8
+	JB maxF32v2Tail
+
+maxF32v2Loop64:
+	CMPQ CX, $64
+	JB maxF32v2Loop32
+	VMAXPS (SI), Y0, Y0
+	VMAXPS 32(SI), Y2, Y2
+	VMAXPS 64(SI), Y4, Y4
+	VMAXPS 96(SI), Y6, Y6
+	VMAXPS 128(SI), Y0, Y0
+	VMAXPS 160(SI), Y2, Y2
+	VMAXPS 192(SI), Y4, Y4
+	VMAXPS 224(SI), Y6, Y6
+	ADDQ $256, SI
+	SUBQ $64, CX
+	JMP maxF32v2Loop64
+
+maxF32v2Loop32:
+	CMPQ CX, $32
+	JB maxF32v2Loop8
+	VMAXPS (SI), Y0, Y0
+	VMAXPS 32(SI), Y2, Y2
+	VMAXPS 64(SI), Y4, Y4
+	VMAXPS 96(SI), Y6, Y6
+	ADDQ $128, SI
+	SUBQ $32, CX
+	JMP maxF32v2Loop32
+
+maxF32v2Loop8:
+	CMPQ CX, $8
+	JB maxF32v2Reduce
+	VMAXPS (SI), Y0, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP maxF32v2Loop8
+
+maxF32v2Reduce:
+	VMAXPS Y2, Y0, Y0
+	VMAXPS Y4, Y0, Y0
+	VMAXPS Y6, Y0, Y0
+	VEXTRACTF128 $1, Y0, X2
+	VMAXPS X2, X0, X0
+	VSHUFPS $0x4E, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VSHUFPS $0xB1, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VZEROUPPER
+	JMP maxF32v2TailScalar
+
+maxF32v2Tail:
+	VZEROUPPER
+	VPCMPEQD X0, X0, X0
+	VPSRLD $1, X0, X0
+	VXORPS X1, X1, X1
+	VSUBSS X0, X1, X0
+
+maxF32v2TailScalar:
+	CMPQ CX, $0
+	JE maxF32v2Done
+	VMAXSS (SI), X0, X0
+	ADDQ $4, SI
+	DECQ CX
+	JMP maxF32v2TailScalar
+
+maxF32v2Done:
+	MOVSS X0, ret+24(FP)
+	RET
+
+DATA maxF32NegInf<>+0(SB)/4, $0xFF800000
+GLOBL maxF32NegInf<>(SB), RODATA, $4

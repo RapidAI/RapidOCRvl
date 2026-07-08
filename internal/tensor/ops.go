@@ -1152,7 +1152,7 @@ func SoftmaxInPlace(x []float32) {
 	n := len(x)
 	m := float32(math.Inf(-1))
 	if useDotF32AVX && n >= 8 {
-		m = maxF32AVX(x)
+		m = maxF32AVX2(x)
 	} else {
 		var m0, m1, m2, m3, m4, m5, m6, m7 = m, m, m, m, m, m, m, m
 		i := 0
@@ -1208,7 +1208,7 @@ func Argmax(x []float32) int {
 	}
 	if useDotF32AVX && n >= 8 {
 		// Use AVX to find the max value, then scalar scan for first index
-		bestVal := maxF32AVX(x)
+		bestVal := maxF32AVX2(x)
 		for i := 0; i < n; i++ {
 			if x[i] == bestVal {
 				return i
