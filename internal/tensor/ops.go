@@ -810,7 +810,9 @@ func AddInPlace(dst, x []float32) {
 func AddRMSNorm(out, dst, add, weight []float32, eps float32) {
 	n := len(dst)
 	var ss float32
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 8 {
+		ss = addInPlaceSumSquaresFMA(dst, add)
+	} else if useDotF32AVX && n >= 8 {
 		ss = addInPlaceSumSquaresAVX(dst, add)
 	} else {
 		ss = addInPlaceSumSquaresScalar(dst, add)
