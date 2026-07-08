@@ -385,7 +385,7 @@ func abs32(v float32) float32 {
 
 func maxAbsFloat32(x []float32) float32 {
 	if useDotQ8AVX2 && len(x) >= 8 {
-		return maxAbsFloat32AVX(x)
+		return maxAbsFloat32AVX2(x)
 	}
 	return maxAbsFloat32Scalar(x)
 }
