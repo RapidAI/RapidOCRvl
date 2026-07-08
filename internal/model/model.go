@@ -2949,7 +2949,9 @@ func (rt *Runtime) preloadTextWeights() error {
 			if hasQ4 {
 				data, scales, shape, err := q4s.Q4Row(name)
 				if err == nil {
-					rt.q4w[name] = &tensor.Q4Matrix{Rows: int(shape[0]), Cols: int(shape[1]), Data: data, Scale: scales}
+					q4 := &tensor.Q4Matrix{Rows: int(shape[0]), Cols: int(shape[1]), Data: data, Scale: scales}
+				tensor.UnpackQ4Matrix(q4)
+				rt.q4w[name] = q4
 					continue
 				}
 			}
@@ -2958,7 +2960,9 @@ func (rt *Runtime) preloadTextWeights() error {
 			if hasQ6 {
 				data, scales, shape, err := q6s.Q6Row(name)
 				if err == nil {
-					rt.q6w[name] = &tensor.Q6Matrix{Rows: int(shape[0]), Cols: int(shape[1]), Data: data, Scale: scales}
+					q6 := &tensor.Q6Matrix{Rows: int(shape[0]), Cols: int(shape[1]), Data: data, Scale: scales}
+				tensor.UnpackQ6Matrix(q6)
+				rt.q6w[name] = q6
 					continue
 				}
 			}
@@ -3042,6 +3046,7 @@ func (rt *Runtime) quantizeRowsFromStore(name string, rs rowTensorStore, rowFloa
 			return nil
 		})
 		if err == nil {
+			tensor.UnpackQ6Matrix(q)
 			rt.q6w[name] = q
 		}
 	case "q4":
@@ -3053,6 +3058,7 @@ func (rt *Runtime) quantizeRowsFromStore(name string, rs rowTensorStore, rowFloa
 			return nil
 		})
 		if err == nil {
+			tensor.UnpackQ4Matrix(q)
 			rt.q4w[name] = q
 		}
 	default:
@@ -4762,9 +4768,7 @@ func dotAtPairAt(a, b []float32, offset0, offset1, n int) (float32, float32) {
 
 func dotAtQuadAt(a, b []float32, offset0, offset1, offset2, offset3, n int) (float32, float32, float32, float32) {
 	if n >= 64 {
-		s0, s1 := tensor.DotPair(b[offset0:offset0+n], b[offset1:offset1+n], a[:n])
-		s2, s3 := tensor.DotPair(b[offset2:offset2+n], b[offset3:offset3+n], a[:n])
-		return s0, s1, s2, s3
+		return tensor.DotQuad(b[offset0:offset0+n], b[offset1:offset1+n], b[offset2:offset2+n], b[offset3:offset3+n], a[:n])
 	}
 	return dotAt(a, b, offset0, n), dotAt(a, b, offset1, n), dotAt(a, b, offset2, n), dotAt(a, b, offset3, n)
 }
@@ -4826,21 +4830,15 @@ func dotAt64PairAt(a, b []float32, offset0, offset1 int) (float32, float32) {
 }
 
 func dotAt128QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
-	s0, s1 := tensor.DotPair(b[offset0:offset0+128], b[offset1:offset1+128], a[:128])
-	s2, s3 := tensor.DotPair(b[offset2:offset2+128], b[offset3:offset3+128], a[:128])
-	return s0, s1, s2, s3
+	return tensor.DotQuad(b[offset0:offset0+128], b[offset1:offset1+128], b[offset2:offset2+128], b[offset3:offset3+128], a[:128])
 }
 
 func dotAt96QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
-	s0, s1 := tensor.DotPair(b[offset0:offset0+96], b[offset1:offset1+96], a[:96])
-	s2, s3 := tensor.DotPair(b[offset2:offset2+96], b[offset3:offset3+96], a[:96])
-	return s0, s1, s2, s3
+	return tensor.DotQuad(b[offset0:offset0+96], b[offset1:offset1+96], b[offset2:offset2+96], b[offset3:offset3+96], a[:96])
 }
 
 func dotAt64QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
-	s0, s1 := tensor.DotPair(b[offset0:offset0+64], b[offset1:offset1+64], a[:64])
-	s2, s3 := tensor.DotPair(b[offset2:offset2+64], b[offset3:offset3+64], a[:64])
-	return s0, s1, s2, s3
+	return tensor.DotQuad(b[offset0:offset0+64], b[offset1:offset1+64], b[offset2:offset2+64], b[offset3:offset3+64], a[:64])
 }
 
 func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights []float32) {
@@ -4987,20 +4985,7 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 	}
 	a := weights[0]
 	x := cache.v[headBase : headBase+dim]
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] = a * x[i]
-		dst[i+1] = a * x[i+1]
-		dst[i+2] = a * x[i+2]
-		dst[i+3] = a * x[i+3]
-		dst[i+4] = a * x[i+4]
-		dst[i+5] = a * x[i+5]
-		dst[i+6] = a * x[i+6]
-		dst[i+7] = a * x[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] = a * x[i]
-	}
+	tensor.ScaleCopy(dst[:dim], x, a)
 	t := 1
 	base := cache.kvDim + headBase
 	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
@@ -5013,20 +4998,7 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 		x1 := cache.v[base1 : base1+dim]
 		x2 := cache.v[base2 : base2+dim]
 		x3 := cache.v[base3 : base3+dim]
-		i := 0
-		for ; i+7 < dim; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-		}
-		for ; i < dim; i++ {
-			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-		}
+		tensor.WeightedSumAdd4(dst[:dim], x0, x1, x2, x3, a0, a1, a2, a3)
 	}
 	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
@@ -5034,375 +5006,117 @@ func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+dim]
 		x1 := cache.v[base1 : base1+dim]
-		i := 0
-		for ; i+7 < dim; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
-		}
-		for ; i < dim; i++ {
-			dst[i] += a0*x0[i] + a1*x1[i]
-		}
+		tensor.WeightedSumAdd2(dst[:dim], x0, x1, a0, a1)
 	}
 	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
 		x := cache.v[base : base+dim]
-		i := 0
-		for ; i+7 < dim; i += 8 {
-			dst[i] += a * x[i]
-			dst[i+1] += a * x[i+1]
-			dst[i+2] += a * x[i+2]
-			dst[i+3] += a * x[i+3]
-			dst[i+4] += a * x[i+4]
-			dst[i+5] += a * x[i+5]
-			dst[i+6] += a * x[i+6]
-			dst[i+7] += a * x[i+7]
-		}
-		for ; i < dim; i++ {
-			dst[i] += a * x[i]
-		}
+		tensor.AddScaled(dst[:dim], x, a)
 	}
 }
 
 func weightedCacheValueSum2(dst, x0, x1 []float32, a0, a1 float32, dim int) {
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] = a0*x0[i] + a1*x1[i]
-	}
+	tensor.WeightedSum2(dst[:dim], x0, x1, a0, a1)
 }
 
 func weightedValueSum2_128(dst, x0, x1 []float32, a0, a1 float32) {
-	for i := 0; i < 128; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7]
-	}
+	tensor.WeightedSum2(dst[:128], x0, x1, a0, a1)
 }
 
 func weightedValueSum2_96(dst, x0, x1 []float32, a0, a1 float32) {
-	for i := 0; i < 96; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7]
-	}
+	tensor.WeightedSum2(dst[:96], x0, x1, a0, a1)
 }
 
 func weightedValueSum2_64(dst, x0, x1 []float32, a0, a1 float32) {
-	for i := 0; i < 64; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7]
-	}
+	tensor.WeightedSum2(dst[:64], x0, x1, a0, a1)
 }
 
 func weightedValueSum3_128(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
-	for i := 0; i < 128; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7]
-	}
+	tensor.WeightedSum3(dst[:128], x0, x1, x2, a0, a1, a2)
 }
 
 func weightedValueSum3_96(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
-	for i := 0; i < 96; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7]
-	}
+	tensor.WeightedSum3(dst[:96], x0, x1, x2, a0, a1, a2)
 }
 
 func weightedValueSum3_64(dst, x0, x1, x2 []float32, a0, a1, a2 float32) {
-	for i := 0; i < 64; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7]
-	}
+	tensor.WeightedSum3(dst[:64], x0, x1, x2, a0, a1, a2)
 }
 
 func weightedCacheValueSum3(dst, x0, x1, x2 []float32, a0, a1, a2 float32, dim int) {
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
-	}
+	tensor.WeightedSum3(dst[:dim], x0, x1, x2, a0, a1, a2)
 }
 
 func weightedValueSum4_128(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
-	for i := 0; i < 128; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-	}
+	tensor.WeightedSum4(dst[:128], x0, x1, x2, x3, a0, a1, a2, a3)
 }
 
 func weightedValueSum4_96(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
-	for i := 0; i < 96; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-	}
+	tensor.WeightedSum4(dst[:96], x0, x1, x2, x3, a0, a1, a2, a3)
 }
 
 func weightedValueSum4_64(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32) {
-	for i := 0; i < 64; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-	}
+	tensor.WeightedSum4(dst[:64], x0, x1, x2, x3, a0, a1, a2, a3)
 }
 
 func weightedCacheValueSum4(dst, x0, x1, x2, x3 []float32, a0, a1, a2, a3 float32, dim int) {
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-	}
+	tensor.WeightedSum4(dst[:dim], x0, x1, x2, x3, a0, a1, a2, a3)
 }
 
 func weightedValueSum5_128(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32) {
-	for i := 0; i < 128; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
-	}
+	tensor.WeightedSum4(dst[:128], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.ScaleAdd(dst[:128], x4, a4)
 }
 
 func weightedValueSum5_96(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32) {
-	for i := 0; i < 96; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
-	}
+	tensor.WeightedSum4(dst[:96], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.ScaleAdd(dst[:96], x4, a4)
 }
 
 func weightedValueSum5_64(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32) {
-	for i := 0; i < 64; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
-	}
+	tensor.WeightedSum4(dst[:64], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.ScaleAdd(dst[:64], x4, a4)
 }
 
 func weightedCacheValueSum5(dst, x0, x1, x2, x3, x4 []float32, a0, a1, a2, a3, a4 float32, dim int) {
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i]
-	}
+	tensor.WeightedSum4(dst[:dim], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.ScaleAdd(dst[:dim], x4, a4)
 }
 
 func weightedValueSum6(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32, dim int) {
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
-	}
+	tensor.WeightedSum4(dst[:dim], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.WeightedSumAdd2(dst[:dim], x4, x5, a4, a5)
 }
 
 func weightedValueSum6_128(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32) {
-	for i := 0; i < 128; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
-	}
+	tensor.WeightedSum4(dst[:128], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.WeightedSumAdd2(dst[:128], x4, x5, a4, a5)
 }
 
 func weightedValueSum6_96(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32) {
-	for i := 0; i < 96; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
-	}
+	tensor.WeightedSum4(dst[:96], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.WeightedSumAdd2(dst[:96], x4, x5, a4, a5)
 }
 
 func weightedValueSum6_64(dst, x0, x1, x2, x3, x4, x5 []float32, a0, a1, a2, a3, a4, a5 float32) {
-	for i := 0; i < 64; i += 8 {
-		dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] + a4*x4[i] + a5*x5[i]
-		dst[i+1] = a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1] + a4*x4[i+1] + a5*x5[i+1]
-		dst[i+2] = a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2] + a4*x4[i+2] + a5*x5[i+2]
-		dst[i+3] = a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3] + a4*x4[i+3] + a5*x5[i+3]
-		dst[i+4] = a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4] + a4*x4[i+4] + a5*x5[i+4]
-		dst[i+5] = a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5] + a4*x4[i+5] + a5*x5[i+5]
-		dst[i+6] = a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6] + a4*x4[i+6] + a5*x5[i+6]
-		dst[i+7] = a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7] + a4*x4[i+7] + a5*x5[i+7]
-	}
+	tensor.WeightedSum4(dst[:64], x0, x1, x2, x3, a0, a1, a2, a3)
+	tensor.WeightedSumAdd2(dst[:64], x4, x5, a4, a5)
 }
 
 func addWeightedValueSum(dst, x []float32, a float32, dim int) {
-	i := 0
-	for ; i+7 < dim; i += 8 {
-		dst[i] += a * x[i]
-		dst[i+1] += a * x[i+1]
-		dst[i+2] += a * x[i+2]
-		dst[i+3] += a * x[i+3]
-		dst[i+4] += a * x[i+4]
-		dst[i+5] += a * x[i+5]
-		dst[i+6] += a * x[i+6]
-		dst[i+7] += a * x[i+7]
-	}
-	for ; i < dim; i++ {
-		dst[i] += a * x[i]
-	}
+	tensor.ScaleAdd(dst[:dim], x, a)
 }
 
 func addWeightedValueSum128(dst, x []float32, a float32) {
-	for i := 0; i < 128; i += 8 {
-		dst[i] += a * x[i]
-		dst[i+1] += a * x[i+1]
-		dst[i+2] += a * x[i+2]
-		dst[i+3] += a * x[i+3]
-		dst[i+4] += a * x[i+4]
-		dst[i+5] += a * x[i+5]
-		dst[i+6] += a * x[i+6]
-		dst[i+7] += a * x[i+7]
-	}
+	tensor.ScaleAdd(dst[:128], x, a)
 }
 
 func addWeightedValueSum96(dst, x []float32, a float32) {
-	for i := 0; i < 96; i += 8 {
-		dst[i] += a * x[i]
-		dst[i+1] += a * x[i+1]
-		dst[i+2] += a * x[i+2]
-		dst[i+3] += a * x[i+3]
-		dst[i+4] += a * x[i+4]
-		dst[i+5] += a * x[i+5]
-		dst[i+6] += a * x[i+6]
-		dst[i+7] += a * x[i+7]
-	}
+	tensor.ScaleAdd(dst[:96], x, a)
 }
 
 func addWeightedValueSum64(dst, x []float32, a float32) {
-	for i := 0; i < 64; i += 8 {
-		dst[i] += a * x[i]
-		dst[i+1] += a * x[i+1]
-		dst[i+2] += a * x[i+2]
-		dst[i+3] += a * x[i+3]
-		dst[i+4] += a * x[i+4]
-		dst[i+5] += a * x[i+5]
-		dst[i+6] += a * x[i+6]
-		dst[i+7] += a * x[i+7]
-	}
+	tensor.ScaleAdd(dst[:64], x, a)
 }
 
 func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights []float32) {
@@ -5413,16 +5127,7 @@ func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights [
 	}
 	a := weights[0]
 	x := cache.v[headBase : headBase+128]
-	for i := 0; i < 128; i += 8 {
-		dst[i] = a * x[i]
-		dst[i+1] = a * x[i+1]
-		dst[i+2] = a * x[i+2]
-		dst[i+3] = a * x[i+3]
-		dst[i+4] = a * x[i+4]
-		dst[i+5] = a * x[i+5]
-		dst[i+6] = a * x[i+6]
-		dst[i+7] = a * x[i+7]
-	}
+	tensor.ScaleCopy(dst[:128], x, a)
 	t := 1
 	base := cache.kvDim + headBase
 	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
@@ -5435,16 +5140,7 @@ func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights [
 		x1 := cache.v[base1 : base1+128]
 		x2 := cache.v[base2 : base2+128]
 		x3 := cache.v[base3 : base3+128]
-		for i := 0; i < 128; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-		}
+		tensor.WeightedSumAdd4(dst[:128], x0, x1, x2, x3, a0, a1, a2, a3)
 	}
 	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
@@ -5452,30 +5148,12 @@ func weightedCacheValueSum128(dst []float32, cache *kvCache, head int, weights [
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+128]
 		x1 := cache.v[base1 : base1+128]
-		for i := 0; i < 128; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
-		}
+		tensor.WeightedSumAdd2(dst[:128], x0, x1, a0, a1)
 	}
 	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
 		x := cache.v[base : base+128]
-		for i := 0; i < 128; i += 8 {
-			dst[i] += a * x[i]
-			dst[i+1] += a * x[i+1]
-			dst[i+2] += a * x[i+2]
-			dst[i+3] += a * x[i+3]
-			dst[i+4] += a * x[i+4]
-			dst[i+5] += a * x[i+5]
-			dst[i+6] += a * x[i+6]
-			dst[i+7] += a * x[i+7]
-		}
+		tensor.ScaleAdd(dst[:128], x, a)
 	}
 }
 
@@ -5487,16 +5165,7 @@ func weightedCacheValueSum64(dst []float32, cache *kvCache, head int, weights []
 	}
 	a := weights[0]
 	x := cache.v[headBase : headBase+64]
-	for i := 0; i < 64; i += 8 {
-		dst[i] = a * x[i]
-		dst[i+1] = a * x[i+1]
-		dst[i+2] = a * x[i+2]
-		dst[i+3] = a * x[i+3]
-		dst[i+4] = a * x[i+4]
-		dst[i+5] = a * x[i+5]
-		dst[i+6] = a * x[i+6]
-		dst[i+7] = a * x[i+7]
-	}
+	tensor.ScaleCopy(dst[:64], x, a)
 	t := 1
 	base := cache.kvDim + headBase
 	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
@@ -5509,16 +5178,7 @@ func weightedCacheValueSum64(dst []float32, cache *kvCache, head int, weights []
 		x1 := cache.v[base1 : base1+64]
 		x2 := cache.v[base2 : base2+64]
 		x3 := cache.v[base3 : base3+64]
-		for i := 0; i < 64; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-		}
+		tensor.WeightedSumAdd4(dst[:64], x0, x1, x2, x3, a0, a1, a2, a3)
 	}
 	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
@@ -5526,30 +5186,12 @@ func weightedCacheValueSum64(dst []float32, cache *kvCache, head int, weights []
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+64]
 		x1 := cache.v[base1 : base1+64]
-		for i := 0; i < 64; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
-		}
+		tensor.WeightedSumAdd2(dst[:64], x0, x1, a0, a1)
 	}
 	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
 		x := cache.v[base : base+64]
-		for i := 0; i < 64; i += 8 {
-			dst[i] += a * x[i]
-			dst[i+1] += a * x[i+1]
-			dst[i+2] += a * x[i+2]
-			dst[i+3] += a * x[i+3]
-			dst[i+4] += a * x[i+4]
-			dst[i+5] += a * x[i+5]
-			dst[i+6] += a * x[i+6]
-			dst[i+7] += a * x[i+7]
-		}
+		tensor.ScaleAdd(dst[:64], x, a)
 	}
 }
 
@@ -5561,16 +5203,7 @@ func weightedCacheValueSum96(dst []float32, cache *kvCache, head int, weights []
 	}
 	a := weights[0]
 	x := cache.v[headBase : headBase+96]
-	for i := 0; i < 96; i += 8 {
-		dst[i] = a * x[i]
-		dst[i+1] = a * x[i+1]
-		dst[i+2] = a * x[i+2]
-		dst[i+3] = a * x[i+3]
-		dst[i+4] = a * x[i+4]
-		dst[i+5] = a * x[i+5]
-		dst[i+6] = a * x[i+6]
-		dst[i+7] = a * x[i+7]
-	}
+	tensor.ScaleCopy(dst[:96], x, a)
 	t := 1
 	base := cache.kvDim + headBase
 	for ; t+3 < len(weights); t, base = t+4, base+4*cache.kvDim {
@@ -5583,16 +5216,7 @@ func weightedCacheValueSum96(dst []float32, cache *kvCache, head int, weights []
 		x1 := cache.v[base1 : base1+96]
 		x2 := cache.v[base2 : base2+96]
 		x3 := cache.v[base3 : base3+96]
-		for i := 0; i < 96; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1] + a2*x2[i+1] + a3*x3[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2] + a2*x2[i+2] + a3*x3[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3] + a2*x2[i+3] + a3*x3[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4] + a2*x2[i+4] + a3*x3[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5] + a2*x2[i+5] + a3*x3[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6] + a2*x2[i+6] + a3*x3[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7] + a2*x2[i+7] + a3*x3[i+7]
-		}
+		tensor.WeightedSumAdd4(dst[:96], x0, x1, x2, x3, a0, a1, a2, a3)
 	}
 	for ; t+1 < len(weights); t, base = t+2, base+2*cache.kvDim {
 		a0, a1 := weights[t], weights[t+1]
@@ -5600,30 +5224,12 @@ func weightedCacheValueSum96(dst []float32, cache *kvCache, head int, weights []
 		base1 := base0 + cache.kvDim
 		x0 := cache.v[base0 : base0+96]
 		x1 := cache.v[base1 : base1+96]
-		for i := 0; i < 96; i += 8 {
-			dst[i] += a0*x0[i] + a1*x1[i]
-			dst[i+1] += a0*x0[i+1] + a1*x1[i+1]
-			dst[i+2] += a0*x0[i+2] + a1*x1[i+2]
-			dst[i+3] += a0*x0[i+3] + a1*x1[i+3]
-			dst[i+4] += a0*x0[i+4] + a1*x1[i+4]
-			dst[i+5] += a0*x0[i+5] + a1*x1[i+5]
-			dst[i+6] += a0*x0[i+6] + a1*x1[i+6]
-			dst[i+7] += a0*x0[i+7] + a1*x1[i+7]
-		}
+		tensor.WeightedSumAdd2(dst[:96], x0, x1, a0, a1)
 	}
 	for ; t < len(weights); t, base = t+1, base+cache.kvDim {
 		a := weights[t]
 		x := cache.v[base : base+96]
-		for i := 0; i < 96; i += 8 {
-			dst[i] += a * x[i]
-			dst[i+1] += a * x[i+1]
-			dst[i+2] += a * x[i+2]
-			dst[i+3] += a * x[i+3]
-			dst[i+4] += a * x[i+4]
-			dst[i+5] += a * x[i+5]
-			dst[i+6] += a * x[i+6]
-			dst[i+7] += a * x[i+7]
-		}
+		tensor.ScaleAdd(dst[:96], x, a)
 	}
 }
 
@@ -5735,7 +5341,13 @@ func (rt *Runtime) mlp(x []float32, tl *textLayer, sc *layerScratch) []float32 {
 		rt.matVecMaybeQuant(out, g, tl.w.down, nil, nil, nil, c.HiddenSize, c.IntermediateSize)
 		return out
 	}
-	tensor.FusedSwiGLUF32Scratch(out, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize, g)
+	uScratch := sc.up
+	if cap(uScratch) >= c.IntermediateSize {
+		uScratch = uScratch[:c.IntermediateSize]
+	} else {
+		uScratch = nil
+	}
+	tensor.FusedSwiGLUF32ScratchWithU(out, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize, g, uScratch)
 	return out
 }
 
@@ -7293,35 +6905,7 @@ func (rt *Runtime) buildMRoPETable(cosTable, sinTable []float32, pos ropePos) {
 }
 
 func applyMRoPEWithTable(x []float32, heads, dim int, cosTable, sinTable []float32) {
-	half := dim / 2
-	for h := 0; h < heads; h++ {
-		base := h * dim
-		i := 0
-		for ; i+3 < half; i += 4 {
-			cs, sn := cosTable[i], sinTable[i]
-			a, b := x[base+i], x[base+half+i]
-			x[base+i] = a*cs - b*sn
-			x[base+half+i] = b*cs + a*sn
-			cs, sn = cosTable[i+1], sinTable[i+1]
-			a, b = x[base+i+1], x[base+half+i+1]
-			x[base+i+1] = a*cs - b*sn
-			x[base+half+i+1] = b*cs + a*sn
-			cs, sn = cosTable[i+2], sinTable[i+2]
-			a, b = x[base+i+2], x[base+half+i+2]
-			x[base+i+2] = a*cs - b*sn
-			x[base+half+i+2] = b*cs + a*sn
-			cs, sn = cosTable[i+3], sinTable[i+3]
-			a, b = x[base+i+3], x[base+half+i+3]
-			x[base+i+3] = a*cs - b*sn
-			x[base+half+i+3] = b*cs + a*sn
-		}
-		for ; i < half; i++ {
-			cs, sn := cosTable[i], sinTable[i]
-			a, b := x[base+i], x[base+half+i]
-			x[base+i] = a*cs - b*sn
-			x[base+half+i] = b*cs + a*sn
-		}
-	}
+	tensor.ApplyMRoPETable(x, cosTable, sinTable, heads, dim)
 }
 
 func applyMRoPE(x []float32, heads, dim int, pos ropePos, theta float64) {

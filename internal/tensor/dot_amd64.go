@@ -50,6 +50,7 @@ func siluMulInPlaceAVX(gate, up []float32)
 func dotF32FMA(a, b []float32) float32
 func dotF32PairFMA(a, b, x []float32) (ret0, ret1 float32)
 func dotF32TripletFMA(a, b, c, x []float32) (ret0, ret1, ret2 float32)
+func dotF32QuadFMA(a, b, c, d, x []float32) (ret0, ret1, ret2, ret3 float32)
 func dotQ8FMA(a []int8, b []float32) float32
 func dotQ8PairFMA(a, b []int8, x []float32) (ret0, ret1 float32)
 func dotQ8TripletFMA(a, b, c []int8, x []float32) (ret0, ret1, ret2 float32)
@@ -76,5 +77,7 @@ func scaleAddFMA(dst, x []float32, a float32)
 func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32)
 
 func maxF32AVX2(x []float32) float32
+
+func sumSquaresF32FMA(x []float32) float32
 
 func maxAbsFloat32AVX2(x []float32) float32

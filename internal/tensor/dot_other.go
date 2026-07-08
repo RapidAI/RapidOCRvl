@@ -303,6 +303,7 @@ func siluMulInPlaceAVX(gate, up []float32) {
 func dotF32FMA(a, b []float32) float32 { return dotF32Scalar(a, b) }
 func dotF32PairFMA(a, b, x []float32) (float32, float32) { return dotF32PairScalar(a, b, x) }
 func dotF32TripletFMA(a, b, c, x []float32) (float32, float32, float32) { return dotF32TripletScalar(a, b, c, x) }
+func dotF32QuadFMA(a, b, c, d, x []float32) (float32, float32, float32, float32) { return dotF32QuadScalar(a, b, c, d, x) }
 func dotQ8FMA(a []int8, b []float32) float32 { return dotQ8Scalar(a, b) }
 func dotQ8PairFMA(a, b []int8, x []float32) (float32, float32) { return dotQ8PairScalar(a, b, x) }
 func dotQ8TripletFMA(a, b, c []int8, x []float32) (float32, float32, float32) { return dotQ8TripletScalar(a, b, c, x) }
@@ -350,5 +351,7 @@ func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32) { weightedSumAdd2
 
 func maxF32AVX2(x []float32) float32 { return maxF32AVX(x) }
 
+
+func sumSquaresF32FMA(x []float32) float32 { return sumSquaresF32AVX(x) }
 
 func maxAbsFloat32AVX2(x []float32) float32 { return maxAbsFloat32AVX(x) }

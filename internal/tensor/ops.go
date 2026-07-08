@@ -687,6 +687,51 @@ func dotF32TripletScalar(a, b, c, x []float32) (float32, float32, float32) {
 	return sa, sb, sc
 }
 
+func dotF32Quad(a, b, c, d, x []float32) (float32, float32, float32, float32) {
+	if useDotFMA && len(a) >= 8 {
+		return dotF32QuadFMA(a, b, c, d, x)
+	}
+	return dotF32QuadScalar(a, b, c, d, x)
+}
+
+func dotF32QuadScalar(a, b, c, d, x []float32) (float32, float32, float32, float32) {
+	var a0, a1, a2, a3, b0, b1, b2, b3, c0, c1, c2, c3, d0, d1, d2, d3 float32
+	i := 0
+	n := len(x)
+	for ; i+7 < n; i += 8 {
+		x0, x1, x2, x3 := x[i], x[i+1], x[i+2], x[i+3]
+		x4, x5, x6, x7 := x[i+4], x[i+5], x[i+6], x[i+7]
+		a0 += a[i]*x0 + a[i+4]*x4
+		a1 += a[i+1]*x1 + a[i+5]*x5
+		a2 += a[i+2]*x2 + a[i+6]*x6
+		a3 += a[i+3]*x3 + a[i+7]*x7
+		b0 += b[i]*x0 + b[i+4]*x4
+		b1 += b[i+1]*x1 + b[i+5]*x5
+		b2 += b[i+2]*x2 + b[i+6]*x6
+		b3 += b[i+3]*x3 + b[i+7]*x7
+		c0 += c[i]*x0 + c[i+4]*x4
+		c1 += c[i+1]*x1 + c[i+5]*x5
+		c2 += c[i+2]*x2 + c[i+6]*x6
+		c3 += c[i+3]*x3 + c[i+7]*x7
+		d0 += d[i]*x0 + d[i+4]*x4
+		d1 += d[i+1]*x1 + d[i+5]*x5
+		d2 += d[i+2]*x2 + d[i+6]*x6
+		d3 += d[i+3]*x3 + d[i+7]*x7
+	}
+	sa := (a0 + a1) + (a2 + a3)
+	sb := (b0 + b1) + (b2 + b3)
+	sc := (c0 + c1) + (c2 + c3)
+	sd := (d0 + d1) + (d2 + d3)
+	for ; i < n; i++ {
+		xi := x[i]
+		sa += a[i] * xi
+		sb += b[i] * xi
+		sc += c[i] * xi
+		sd += d[i] * xi
+	}
+	return sa, sb, sc, sd
+}
+
 func AddScaled(dst, x []float32, scale float32) {
 	if useDotF32AVX && len(dst) >= 8 {
 		addScaledAVX(dst, x, scale)
@@ -844,7 +889,9 @@ func parallelForNormRows(rows int, fn func(start, end int)) {
 func RMSNorm(out, x, weight []float32, eps float32) {
 	n := len(x)
 	var ss float32
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 8 {
+		ss = sumSquaresF32FMA(x)
+	} else if useDotF32AVX && n >= 8 {
 		ss = sumSquaresF32AVX(x)
 	} else {
 		ss = sumSquaresScalar(x)
