@@ -195,6 +195,33 @@ func QuantizeQ6RowInto(w []float32, data []byte) float32 {
 	}
 	scale := maxAbs / 31
 	inv := 1 / scale
+	if useDotQ8AVX2 && len(w) >= 8 {
+		n := (len(w) / 8) * 8
+		quantizeQ6RowAVX2(w[:n], data, inv)
+		// Handle tail
+		i := n
+		j := (n * 6) / 8
+		for ; i+7 < len(w); i, j = i+8, j+6 {
+			v0 := quantByte6(w[i] * inv)
+			v1 := quantByte6(w[i+1] * inv)
+			v2 := quantByte6(w[i+2] * inv)
+			v3 := quantByte6(w[i+3] * inv)
+			v4 := quantByte6(w[i+4] * inv)
+			v5 := quantByte6(w[i+5] * inv)
+			v6 := quantByte6(w[i+6] * inv)
+			v7 := quantByte6(w[i+7] * inv)
+			data[j] = v0 | (v1 << 6)
+			data[j+1] = (v1 >> 2) | (v2 << 4)
+			data[j+2] = (v2 >> 4) | (v3 << 2)
+			data[j+3] = v4 | (v5 << 6)
+			data[j+4] = (v5 >> 2) | (v6 << 4)
+			data[j+5] = (v6 >> 4) | (v7 << 2)
+		}
+		for ; i < len(w); i++ {
+			putQ6(data, i, quantByte6(w[i]*inv))
+		}
+		return scale
+	}
 	i := 0
 	j := 0
 	for ; i+7 < len(w); i, j = i+8, j+6 {
@@ -258,33 +285,72 @@ func QuantizeQ4RowInto(w []float32, data []byte) float32 {
 	}
 	scale := maxAbs / 7
 	inv := 1 / scale
+	if useDotQ4AVX2 && len(w) >= 8 {
+		quantizeQ4RowAVX2(w, data, inv)
+		return scale
+	}
 	i := 0
 	j := 0
 	for ; i+15 < len(w); i, j = i+16, j+8 {
-		data[j] = quantNibble4(w[i]*inv) | (quantNibble4(w[i+1]*inv) << 4)
-		data[j+1] = quantNibble4(w[i+2]*inv) | (quantNibble4(w[i+3]*inv) << 4)
-		data[j+2] = quantNibble4(w[i+4]*inv) | (quantNibble4(w[i+5]*inv) << 4)
-		data[j+3] = quantNibble4(w[i+6]*inv) | (quantNibble4(w[i+7]*inv) << 4)
-		data[j+4] = quantNibble4(w[i+8]*inv) | (quantNibble4(w[i+9]*inv) << 4)
-		data[j+5] = quantNibble4(w[i+10]*inv) | (quantNibble4(w[i+11]*inv) << 4)
-		data[j+6] = quantNibble4(w[i+12]*inv) | (quantNibble4(w[i+13]*inv) << 4)
-		data[j+7] = quantNibble4(w[i+14]*inv) | (quantNibble4(w[i+15]*inv) << 4)
+		v0 := q4Nib(w[i] * inv)
+		v1 := q4Nib(w[i+1] * inv)
+		v2 := q4Nib(w[i+2] * inv)
+		v3 := q4Nib(w[i+3] * inv)
+		v4 := q4Nib(w[i+4] * inv)
+		v5 := q4Nib(w[i+5] * inv)
+		v6 := q4Nib(w[i+6] * inv)
+		v7 := q4Nib(w[i+7] * inv)
+		v8 := q4Nib(w[i+8] * inv)
+		v9 := q4Nib(w[i+9] * inv)
+		v10 := q4Nib(w[i+10] * inv)
+		v11 := q4Nib(w[i+11] * inv)
+		v12 := q4Nib(w[i+12] * inv)
+		v13 := q4Nib(w[i+13] * inv)
+		v14 := q4Nib(w[i+14] * inv)
+		v15 := q4Nib(w[i+15] * inv)
+		data[j] = v0 | (v1 << 4)
+		data[j+1] = v2 | (v3 << 4)
+		data[j+2] = v4 | (v5 << 4)
+		data[j+3] = v6 | (v7 << 4)
+		data[j+4] = v8 | (v9 << 4)
+		data[j+5] = v10 | (v11 << 4)
+		data[j+6] = v12 | (v13 << 4)
+		data[j+7] = v14 | (v15 << 4)
 	}
 	for ; i+7 < len(w); i, j = i+8, j+4 {
-		data[j] = quantNibble4(w[i]*inv) | (quantNibble4(w[i+1]*inv) << 4)
-		data[j+1] = quantNibble4(w[i+2]*inv) | (quantNibble4(w[i+3]*inv) << 4)
-		data[j+2] = quantNibble4(w[i+4]*inv) | (quantNibble4(w[i+5]*inv) << 4)
-		data[j+3] = quantNibble4(w[i+6]*inv) | (quantNibble4(w[i+7]*inv) << 4)
+		v0 := q4Nib(w[i] * inv)
+		v1 := q4Nib(w[i+1] * inv)
+		v2 := q4Nib(w[i+2] * inv)
+		v3 := q4Nib(w[i+3] * inv)
+		v4 := q4Nib(w[i+4] * inv)
+		v5 := q4Nib(w[i+5] * inv)
+		v6 := q4Nib(w[i+6] * inv)
+		v7 := q4Nib(w[i+7] * inv)
+		data[j] = v0 | (v1 << 4)
+		data[j+1] = v2 | (v3 << 4)
+		data[j+2] = v4 | (v5 << 4)
+		data[j+3] = v6 | (v7 << 4)
 	}
 	for ; i+1 < len(w); i, j = i+2, j+1 {
-		lo := quantNibble4(w[i] * inv)
-		hi := quantNibble4(w[i+1] * inv)
+		lo := q4Nib(w[i] * inv)
+		hi := q4Nib(w[i+1] * inv)
 		data[j] = lo | (hi << 4)
 	}
 	if i < len(w) {
-		data[j] = quantNibble4(w[i] * inv)
+		data[j] = q4Nib(w[i] * inv)
 	}
 	return scale
+}
+
+// q4Nib is a branchless inline version of quantNibble4.
+func q4Nib(x float32) byte {
+	v := roundToInt(x)
+	if v > 7 {
+		v = 7
+	} else if v < -7 {
+		v = -7
+	}
+	return byte(v + 8)
 }
 
 func quantNibble4(x float32) byte {

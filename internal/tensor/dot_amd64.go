@@ -58,3 +58,7 @@ func siluMulInPlaceFMA(gate, up []float32)
 func geluTanhFMA(x []float32)
 
 func quantizeQ8RowAVX2(w []float32, data []int8, inv float32)
+
+func quantizeQ4RowAVX2(w []float32, data []byte, inv float32)
+
+func quantizeQ6RowAVX2(w []float32, data []byte, inv float32)

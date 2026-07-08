@@ -4642,3 +4642,215 @@ GLOBL q8Clamp127<>(SB), RODATA, $4
 
 DATA q8ClampNeg127<>+0(SB)/4, $0xC2FE0000
 GLOBL q8ClampNeg127<>(SB), RODATA, $4
+// quantizeQ4RowAVX2: quantizes 8 float32 to 4 packed bytes (8 nibbles).
+// Each value: w*inv, round, clamp [-7,7], +8 -> [0,15], pack 2 nibbles/byte.
+// Args: w_base+0(FP), w_len+8(FP), data_base+24(FP), inv+48(FP)
+TEXT ·quantizeQ4RowAVX2(SB), NOSPLIT, $0-56
+	MOVQ w_base+0(FP), SI
+	MOVQ w_len+8(FP), CX
+	MOVQ data_base+24(FP), DI
+	VBROADCASTSS inv+48(FP), Y1
+	VBROADCASTSS q4Clamp7<>(SB), Y4     // 7.0
+	VBROADCASTSS q4ClampNeg7<>(SB), Y5  // -7.0
+	VPCMPEQD Y6, Y6, Y6
+	VPSRLW $8, Y6, Y6                    // mask to clear high nibble of each byte
+
+	CMPQ CX, $8
+	JB q4qTail
+
+q4qLoop:
+	CMPQ CX, $8
+	JB q4qDone
+	VMOVUPS (SI), Y0
+	VMULPS Y1, Y0, Y0          // w * inv
+	VROUNDPS $8, Y0, Y0        // round to nearest
+	VMINPS Y4, Y0, Y0          // clamp max 7
+	VMAXPS Y5, Y0, Y0          // clamp min -7
+	VCVTPS2DQ Y0, Y0           // float32 -> int32
+	VPADDD q4Add8<>(SB), Y0, Y0 // +8 -> [0,15]
+	VPACKSSWB Y0, Y0, Y0       // int32 -> int8 (low 16 bytes = 8 values)
+	// Now X0 has 8 bytes, each [0,15]
+	// Pack pairs: byte[i] | byte[i+1]<<4
+	VPSLLW $4, X0, X2          // shift left by 4 (odd positions)
+	VPAND X6, X0, X0           // mask even positions to low nibble
+	VPOR X2, X0, X0            // combine
+	// Now we have 4 packed bytes in low half of X0
+	VMOVQ X0, AX               // get 8 bytes (we only need 4)
+	MOVL AX, (DI)              // store 4 bytes
+	ADDQ $32, SI
+	ADDQ $4, DI
+	SUBQ $8, CX
+	JMP q4qLoop
+
+q4qDone:
+	VZEROUPPER
+q4qTail:
+	CMPQ CX, $0
+	JE q4qRet
+	MOVSS (SI), X0
+	MULSS X1, X0
+	ROUNDSS $8, X0, X0
+	VMINSS X4, X0, X0
+	VMAXSS X5, X0, X0
+	VCVTPS2DQ X0, X0
+	// Add 8, clamp to [0,15], pack
+	MOVD X0, AX
+	ADDL $8, AX
+	CMPL AX, $15
+	JLE q4qTail2
+	MOVL $15, AX
+q4qTail2:
+	// Now AX has nibble value [0,15]
+	// If we have a pair, combine; else store single
+	CMPQ CX, $2
+	JB q4qSingle
+	MOVSS 4(SI), X0
+	MULSS X1, X0
+	ROUNDSS $8, X0, X0
+	VMINSS X4, X0, X0
+	VMAXSS X5, X0, X0
+	VCVTPS2DQ X0, X0
+	MOVD X0, BX
+	ADDL $8, BX
+	CMPL BX, $15
+	JLE q4qTail3
+	MOVL $15, BX
+q4qTail3:
+	SHLL $4, BX
+	ORL BX, AX
+	MOVB AX, (DI)
+	ADDQ $8, SI
+	ADDQ $2, DI
+	SUBQ $2, CX
+	JMP q4qTail
+q4qSingle:
+	MOVB AX, (DI)
+	ADDQ $4, SI
+	INCQ DI
+	DECQ CX
+	JMP q4qTail
+
+q4qRet:
+	VZEROUPPER
+	RET
+
+DATA q4Clamp7<>+0(SB)/4, $0x40E00000
+GLOBL q4Clamp7<>(SB), RODATA, $4
+
+DATA q4ClampNeg7<>+0(SB)/4, $0xC0E00000
+GLOBL q4ClampNeg7<>(SB), RODATA, $4
+
+DATA q4Add8<>+0(SB)/4, $0x00000008
+GLOBL q4Add8<>(SB), RODATA, $4
+// quantizeQ6RowAVX2: quantizes 8 float32 to 6 packed bytes (8 x 6-bit values).
+// Only processes groups of 8. Returns the number of values processed (always multiple of 8).
+// The Go caller handles the tail.
+// Args: w_base+0(FP), n_vals+8(FP), data_base+24(FP), inv+48(FP)
+TEXT ·quantizeQ6RowAVX2(SB), NOSPLIT, $0-56
+	MOVQ w_base+0(FP), SI
+	MOVQ n_vals+8(FP), CX
+	MOVQ data_base+24(FP), DI
+	VBROADCASTSS inv+48(FP), Y1
+	VBROADCASTSS q6Clamp31<>(SB), Y4
+	VBROADCASTSS q6ClampNeg31<>(SB), Y5
+
+	CMPQ CX, $8
+	JB q6qDone
+
+q6qLoop:
+	CMPQ CX, $8
+	JB q6qDone
+	VMOVUPS (SI), Y0
+	VMULPS Y1, Y0, Y0
+	VROUNDPS $8, Y0, Y0
+	VMINPS Y4, Y0, Y0
+	VMAXPS Y5, Y0, Y0
+	VCVTPS2DQ Y0, Y0
+	VPADDD q6Add32<>(SB), Y0, Y0
+	VPACKSSDW Y0, Y0, Y0
+	VPACKSSWB Y0, Y0, Y0
+	VMOVQ X0, R8
+	// R8 = b0 b1 b2 b3 b4 b5 b6 b7 (each [0,63])
+	// Pack into 6 bytes
+	MOVB R8, AL               // b0
+	MOVQ R8, BX
+	SHRQ $8, BX
+	MOVB BL, BL               // b1
+	// data[0] = b0 | (b1 << 6)
+	MOVB AL, DL
+	SHLB $6, BL
+	ORB BL, DL
+	MOVB DL, (DI)
+	// data[1] = (b1 >> 2) | (b2 << 4)
+	MOVQ R8, AX
+	SHRQ $8, AX
+	SHRB $2, AX              // b1 >> 2
+	MOVQ R8, BX
+	SHRQ $16, BX
+	MOVB BL, BL               // b2
+	MOVB BL, DL
+	SHLB $4, DL
+	ORB AL, DL
+	MOVB DL, 1(DI)
+	// data[2] = (b2 >> 4) | (b3 << 2)
+	MOVQ R8, AX
+	SHRQ $16, AX
+	SHRB $4, AX              // b2 >> 4
+	MOVQ R8, BX
+	SHRQ $24, BX
+	MOVB BL, BL               // b3
+	MOVB BL, DL
+	SHLB $2, DL
+	ORB AL, DL
+	MOVB DL, 2(DI)
+	// data[3] = b4 | (b5 << 6)
+	MOVQ R8, AX
+	SHRQ $32, AX
+	MOVB AL, AL               // b4
+	MOVQ R8, BX
+	SHRQ $40, BX
+	MOVB BL, BL               // b5
+	MOVB AL, DL
+	SHLB $6, BL
+	ORB BL, DL
+	MOVB DL, 3(DI)
+	// data[4] = (b5 >> 2) | (b6 << 4)
+	MOVQ R8, AX
+	SHRQ $40, AX
+	SHRB $2, AX              // b5 >> 2
+	MOVQ R8, BX
+	SHRQ $48, BX
+	MOVB BL, BL               // b6
+	MOVB BL, DL
+	SHLB $4, DL
+	ORB AL, DL
+	MOVB DL, 4(DI)
+	// data[5] = (b6 >> 4) | (b7 << 2)
+	MOVQ R8, AX
+	SHRQ $48, AX
+	SHRB $4, AX              // b6 >> 4
+	MOVQ R8, BX
+	SHRQ $56, BX
+	MOVB BL, BL               // b7
+	MOVB BL, DL
+	SHLB $2, DL
+	ORB AL, DL
+	MOVB DL, 5(DI)
+
+	ADDQ $32, SI
+	ADDQ $6, DI
+	SUBQ $8, CX
+	JMP q6qLoop
+
+q6qDone:
+	VZEROUPPER
+	RET
+
+DATA q6Clamp31<>+0(SB)/4, $0x41F80000
+GLOBL q6Clamp31<>(SB), RODATA, $4
+
+DATA q6ClampNeg31<>+0(SB)/4, $0xC1F80000
+GLOBL q6ClampNeg31<>(SB), RODATA, $4
+
+DATA q6Add32<>+0(SB)/4, $0x00000020
+GLOBL q6Add32<>(SB), RODATA, $4

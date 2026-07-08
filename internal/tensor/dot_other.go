@@ -317,3 +317,16 @@ func quantizeQ8RowAVX2(w []float32, data []int8, inv float32) {
 		data[i] = quantInt8(v * inv)
 	}
 }
+
+
+func quantizeQ4RowAVX2(w []float32, data []byte, inv float32) {
+	for i := 0; i+1 < len(w); i += 2 {
+		data[i/2] = quantNibble4(w[i]*inv) | (quantNibble4(w[i+1]*inv) << 4)
+	}
+	if len(w)%2 == 1 {
+		data[len(w)/2] = quantNibble4(w[len(w)-1] * inv)
+	}
+}
+
+
+func quantizeQ6RowAVX2(w []float32, data []byte, inv float32) {}
