@@ -4386,7 +4386,7 @@ siluMulDone:
 	RET
 
 // siluMulInPlaceFMA: FMA-accelerated SiLU(u)*v kernel.
-// Same polynomial as siluMulInPlaceAVX but fuses mul+add pairs via VFMADD231PS.
+// Broadcasts all constants before the loop and uses VFMADD231PS to fuse mul+add.
 TEXT ·siluMulInPlaceFMA(SB), NOSPLIT, $0-48
 	MOVQ gate_base+0(FP), SI
 	MOVQ gate_len+8(FP), CX
@@ -4394,6 +4394,13 @@ TEXT ·siluMulInPlaceFMA(SB), NOSPLIT, $0-48
 	CMPQ CX, $8
 	JB siluFmaTail
 	VBROADCASTSS geluOne<>(SB), Y3
+	VBROADCASTSS expLog2e<>(SB), Y12
+	VBROADCASTSS expC1<>(SB), Y13
+	VBROADCASTSS expC2<>(SB), Y14
+	VBROADCASTSS expC3<>(SB), Y15
+	VBROADCASTSS expC4<>(SB), Y10
+	VBROADCASTSS expC5<>(SB), Y11
+
 siluFmaLoop:
 	CMPQ CX, $8
 	JB siluFmaReduce
@@ -4401,26 +4408,23 @@ siluFmaLoop:
 	VMOVUPS (DI), Y1
 	VXORPS Y2, Y2, Y2
 	VSUBPS Y0, Y2, Y2
-	VMULPS expLog2e<>(SB), Y2, Y5
+	VMULPS Y12, Y2, Y5
 	VROUNDPS $8, Y5, Y6
 	VSUBPS Y6, Y5, Y7
-	VMULPS Y7, Y7, Y5              // Y5 = f^2
-	VMOVUPS expOne<>(SB), Y4       // Y4 = 1
-	VMOVUPS expC1<>(SB), Y9        // Y9 = c1
-	VFMADD231PS Y7, Y9, Y4          // Y4 = A = 1 + c1*f
-	VMOVUPS expC2<>(SB), Y2        // Y2 = c2
-	VMOVUPS expC3<>(SB), Y9        // Y9 = c3
-	VFMADD231PS Y7, Y9, Y2          // Y2 = B = c2 + c3*f
-	VMOVUPS expC4<>(SB), Y8        // Y8 = c4
-	VMOVUPS expC5<>(SB), Y9        // Y9 = c5
-	VFMADD231PS Y7, Y9, Y8          // Y8 = C = c4 + c5*f
-	VFMADD231PS Y5, Y8, Y2          // Y2 = B2 = B + C*f^2
-	VFMADD231PS Y5, Y2, Y4          // Y4 = poly = A + f^2*B2
+	VMULPS Y7, Y7, Y5
+	VMOVUPS Y3, Y8
+	VFMADD231PS Y7, Y13, Y8
+	VMOVUPS Y14, Y2
+	VFMADD231PS Y7, Y15, Y2
+	VMOVUPS Y10, Y4
+	VFMADD231PS Y7, Y11, Y4
+	VFMADD231PS Y5, Y4, Y2
+	VFMADD231PS Y5, Y2, Y8
 	VCVTPS2DQ Y6, Y6
 	VPADDD expInt127<>(SB), Y6, Y6
 	VPSLLD $23, Y6, Y6
-	VMULPS Y6, Y4, Y4
-	VADDPS Y3, Y4, Y5
+	VMULPS Y6, Y8, Y8
+	VADDPS Y3, Y8, Y5
 	VDIVPS Y5, Y0, Y5
 	VMULPS Y1, Y5, Y5
 	VMOVUPS Y5, (SI)
@@ -4474,6 +4478,8 @@ siluFmaTail:
 siluFmaDone:
 	RET
 // geluTanhFMA: FMA-accelerated GELU tanh approximation kernel.
+// Broadcasts all constants before the loop. Uses VFMADD231PS to fuse mul+add
+// in the Estrin-scheme polynomial evaluation, reducing instruction count vs AVX.
 TEXT ·geluTanhFMA(SB), NOSPLIT, $0-24
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX

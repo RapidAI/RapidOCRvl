@@ -1017,6 +1017,10 @@ func fastSiLU(x float32) float32 {
 }
 
 func SiLUMulInPlace(gate, up []float32) {
+	if useDotFMA && len(gate) >= 8 {
+		siluMulInPlaceFMA(gate, up)
+		return
+	}
 	if useDotF32AVX && len(gate) >= 8 {
 		siluMulInPlaceAVX(gate, up)
 		return
