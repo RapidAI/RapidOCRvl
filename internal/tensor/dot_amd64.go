@@ -56,6 +56,7 @@ func dotQ8FMA(a []int8, b []float32) float32
 func dotQ8PairFMA(a, b []int8, x []float32) (ret0, ret1 float32)
 func dotQ8TripletFMA(a, b, c []int8, x []float32) (ret0, ret1, ret2 float32)
 func dotQ4FMA(a []byte, b []float32, cols int) float32
+func dotQ4PairFMA(a, b []byte, x []float32, cols int) (ret0, ret1 float32)
 func siluMulInPlaceFMA(gate, up []float32)
 func geluTanhFMA(x []float32)
 func quantizeQ8RowAVX2(w []float32, data []int8, inv float32)

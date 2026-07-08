@@ -1437,6 +1437,9 @@ func dotQ4Scalar(a []byte, b []float32, cols int) float32 {
 }
 
 func dotQ4Pair(a, b []byte, x []float32, cols int) (float32, float32) {
+	if useDotFMA && useDotQ4AVX2 && cols >= 8 {
+		return dotQ4PairFMA(a, b, x, cols)
+	}
 	if useDotQ4AVX2 && cols >= 8 {
 		return dotQ4PairAVX2(a, b, x, cols)
 	}
