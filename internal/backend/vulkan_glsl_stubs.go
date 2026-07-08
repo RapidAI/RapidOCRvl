@@ -13,8 +13,8 @@ var (
 	vulkanFusedQKVMRoPEQ4GLSL               = vulkanFusedQKVMRoPEQ4GLSLImpl
 	vulkanFusedQKVMRoPEQ6GLSL               = vulkanFusedQKVMRoPEQ6GLSLImpl
 	vulkanFusedQKVMRoPEQ8GLSL               = vulkanFusedQKVMRoPEQ8GLSLImpl
-	vulkanMRoPEF32GLSL                      = ""
-	vulkanMRoPEPairF32GLSL                  = ""
+	vulkanMRoPEF32GLSL                      = vulkanMRoPEF32GLSLImpl
+	vulkanMRoPEPairF32GLSL                  = vulkanMRoPEPairF32GLSLImpl
 	vulkanTextAttentionOutAddRMSNormF32GLSL = ""
 )
 
@@ -401,4 +401,71 @@ void main() {
   for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
   float scale = inversesqrt(scratch[0] / float(n) + 1e-6);
   if (lid < n) { dstv[lid] = v; outv[lid] = v * scale * w[lid]; }
+}`
+const vulkanMRoPEF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer Cos { float cosT[]; };
+layout(set=0,binding=2) readonly buffer Sin { float sinT[]; };
+layout(set=0,binding=3) buffer O { float outv[]; };
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint dim = pc.cols;
+  uint hdimHalf = dim / 2u;
+  uint heads = pc.rows / dim;
+  uint pairs = heads * hdimHalf;
+  if (lid < pairs) {
+    uint h = lid / hdimHalf;
+    uint d = lid - h * hdimHalf;
+    uint i1 = h * dim + d;
+    uint i2 = i1 + hdimHalf;
+    float a = x[i1];
+    float b = x[i2];
+    float c = cosT[d];
+    float sn = sinT[d];
+    x[i1] = a * c - b * sn;
+    x[i2] = b * c + a * sn;
+  }
+}`
+const vulkanMRoPEPairF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) buffer Q { float q[]; };
+layout(set=0,binding=1) buffer K { float k[]; };
+layout(set=0,binding=2) readonly buffer Cos { float cosT[]; };
+layout(set=0,binding=3) readonly buffer Sin { float sinT[]; };
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint dim = pc.cols & 0xFFFFu;
+  uint kvHeads = pc.cols >> 16;
+  uint hdimHalf = dim / 2u;
+  uint qPairs = pc.rows * hdimHalf;
+  uint kPairs = kvHeads * hdimHalf;
+  if (lid < qPairs) {
+    uint h = lid / hdimHalf;
+    uint d = lid - h * hdimHalf;
+    uint i1 = h * dim + d;
+    uint i2 = i1 + hdimHalf;
+    float a = q[i1];
+    float b = q[i2];
+    float c = cosT[d];
+    float sn = sinT[d];
+    q[i1] = a * c - b * sn;
+    q[i2] = b * c + a * sn;
+  } else {
+    uint j = lid - qPairs;
+    if (j < kPairs) {
+      uint h = j / hdimHalf;
+      uint d = j - h * hdimHalf;
+      uint i1 = h * dim + d;
+      uint i2 = i1 + hdimHalf;
+      float a = k[i1];
+      float b = k[i2];
+      float c = cosT[d];
+      float sn = sinT[d];
+      k[i1] = a * c - b * sn;
+      k[i2] = b * c + a * sn;
+    }
+  }
 }`
