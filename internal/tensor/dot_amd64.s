@@ -3061,7 +3061,7 @@ q4TripletDone:
 
 	RET
 
-TEXT ·sumSquaresF32AVX(SB), NOSPLIT, $32-32
+TEXT ·sumSquaresF32AVX(SB), NOSPLIT, $32-28
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
 	VXORPS Y0, Y0, Y0
@@ -3266,7 +3266,7 @@ wsum2Done:
 	RET
 
 // weightedSum3AVX: dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i]
-TEXT ·weightedSum3AVX(SB), NOSPLIT, $0-104
+TEXT ·weightedSum3AVX(SB), NOSPLIT, $0-108
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x0_base+24(FP), DI
@@ -3370,7 +3370,7 @@ wsum3Done:
 	RET
 
 // weightedSum4AVX: dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-TEXT ·weightedSum4AVX(SB), NOSPLIT, $0-128
+TEXT ·weightedSum4AVX(SB), NOSPLIT, $0-136
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x0_base+24(FP), DI
@@ -3585,7 +3585,7 @@ wsumAdd2Done:
 	RET
 
 // weightedSumAdd4AVX: dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i]
-TEXT ·weightedSumAdd4AVX(SB), NOSPLIT, $0-128
+TEXT ·weightedSumAdd4AVX(SB), NOSPLIT, $0-136
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x0_base+24(FP), DI
@@ -3984,7 +3984,7 @@ GLOBL gelu2ckLog2e<>(SB), RODATA, $32
 
 // expF32VecAVX: x[i] = exp(x[i] - m), returns sum of all results
 // Args: x_base+0(FP), x_len+8(FP), m+24(FP), ret+32(FP)
-TEXT ·expF32VecAVX(SB), NOSPLIT, $0-40
+TEXT ·expF32VecAVX(SB), NOSPLIT, $0-36
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
 	VBROADCASTSS m+24(FP), Y15
@@ -4083,10 +4083,10 @@ expVecTailDone:
 
 // ropeAVX: applies multi-dimensional RoPE using precomputed cos/sin tables
 // func ropeAVX(x []float32, cosTable, sinTable []float32, heads, dim int)
-TEXT ·ropeAVX(SB), NOSPLIT, $0-80
+TEXT ·ropeAVX(SB), NOSPLIT, $0-88
 	MOVQ x_base+0(FP), SI
-	MOVQ cos_base+24(FP), DI
-	MOVQ sin_base+48(FP), R8
+	MOVQ cosTable_base+24(FP), DI
+	MOVQ sinTable_base+48(FP), R8
 	MOVQ heads+72(FP), AX     // number of heads
 	MOVQ dim+80(FP), BX       // dim per head
 	MOVQ BX, CX               // CX = dim
@@ -4171,8 +4171,8 @@ ropeInnerTail:
 ropeHeadAdvance:
 	VZEROUPPER
 	// Reset cos/sin pointers for next head (they restart from 0)
-	MOVQ cos_base+24(FP), DI
-	MOVQ sin_base+48(FP), R8
+	MOVQ cosTable_base+24(FP), DI
+	MOVQ sinTable_base+48(FP), R8
 	// Advance x pointer by dim*4 bytes to next head
 	MOVQ R11, SI              // restore base pointer for this head
 	ADDQ BX, SI               // SI += dim*4 (next head)
@@ -4590,7 +4590,7 @@ geluFmaDone:
 // quantizeQ8RowAVX2: quantizes float32 row to int8 using AVX2.
 // Processes 8 values per iteration: w[i]*inv, round, clamp [-127,127], pack to int8.
 // Args: w_base+0(FP), w_len+8(FP), data_base+24(FP), inv+48(FP)
-TEXT ·quantizeQ8RowAVX2(SB), NOSPLIT, $0-56
+TEXT ·quantizeQ8RowAVX2(SB), NOSPLIT, $0-52
 	MOVQ w_base+0(FP), SI
 	MOVQ w_len+8(FP), CX
 	MOVQ data_base+24(FP), DI
@@ -4651,7 +4651,7 @@ GLOBL q8ClampNeg127<>(SB), RODATA, $4
 // quantizeQ4RowAVX2: quantizes 8 float32 to 4 packed bytes (8 nibbles).
 // Each value: w*inv, round, clamp [-7,7], +8 -> [0,15], pack 2 nibbles/byte.
 // Args: w_base+0(FP), w_len+8(FP), data_base+24(FP), inv+48(FP)
-TEXT ·quantizeQ4RowAVX2(SB), NOSPLIT, $0-56
+TEXT ·quantizeQ4RowAVX2(SB), NOSPLIT, $0-52
 	MOVQ w_base+0(FP), SI
 	MOVQ w_len+8(FP), CX
 	MOVQ data_base+24(FP), DI
@@ -4751,10 +4751,10 @@ GLOBL q4Add8<>(SB), RODATA, $4
 // quantizeQ6RowAVX2: quantizes 8 float32 to 6 packed bytes (8 x 6-bit values).
 // Only processes groups of 8. Returns the number of values processed (always multiple of 8).
 // The Go caller handles the tail.
-// Args: w_base+0(FP), n_vals+8(FP), data_base+24(FP), inv+48(FP)
-TEXT ·quantizeQ6RowAVX2(SB), NOSPLIT, $0-56
+// Args: w_base+0(FP), w_len+8(FP), data_base+24(FP), inv+48(FP)
+TEXT ·quantizeQ6RowAVX2(SB), NOSPLIT, $0-52
 	MOVQ w_base+0(FP), SI
-	MOVQ n_vals+8(FP), CX
+	MOVQ w_len+8(FP), CX
 	MOVQ data_base+24(FP), DI
 	VBROADCASTSS inv+48(FP), Y1
 	VBROADCASTSS q6Clamp31<>(SB), Y4
@@ -4863,7 +4863,7 @@ GLOBL q6Add32<>(SB), RODATA, $4
 // expF32VecFMA: FMA-accelerated exp for softmax. Uses the same polynomial
 // as expF32VecAVX but fuses mul+add pairs via VFMADD231PS. Since constants
 // are pre-loaded to registers, FMA avoids the memory operand penalty.
-TEXT ·expF32VecFMA(SB), NOSPLIT, $0-40
+TEXT ·expF32VecFMA(SB), NOSPLIT, $0-36
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
 	VBROADCASTSS m+24(FP), Y15
@@ -5119,7 +5119,7 @@ wsum2fmaDone:
 	RET
 
 // weightedSum3FMA: dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] using FMA
-TEXT ·weightedSum3FMA(SB), NOSPLIT, $0-104
+TEXT ·weightedSum3FMA(SB), NOSPLIT, $0-108
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x0_base+24(FP), DI
@@ -5213,7 +5213,7 @@ wsum3fmaDone:
 	RET
 
 // weightedSum4FMA: dst[i] = a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] using FMA
-TEXT ·weightedSum4FMA(SB), NOSPLIT, $0-128
+TEXT ·weightedSum4FMA(SB), NOSPLIT, $0-136
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x0_base+24(FP), DI
@@ -5325,7 +5325,7 @@ wsum4fmaDone:
 	RET
 
 // weightedSumAdd4FMA: dst[i] += a0*x0[i] + a1*x1[i] + a2*x2[i] + a3*x3[i] using FMA
-TEXT ·weightedSumAdd4FMA(SB), NOSPLIT, $0-128
+TEXT ·weightedSumAdd4FMA(SB), NOSPLIT, $0-136
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x0_base+24(FP), DI
@@ -5778,7 +5778,7 @@ maxAbsV2Done:
 	RET
 // sumSquaresF32FMA: FMA version of sumSquaresF32AVX.
 // Y1 loaded from memory (no dep on accumulator), so FMA is safe.
-TEXT ·sumSquaresF32FMA(SB), NOSPLIT, $32-32
+TEXT ·sumSquaresF32FMA(SB), NOSPLIT, $32-28
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
 	VXORPS Y0, Y0, Y0
