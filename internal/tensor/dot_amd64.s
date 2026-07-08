@@ -4955,3 +4955,84 @@ expFmaTailLoop:
 expFmaTailDone:
 	MOVSS X8, ret+32(FP)
 	RET
+// addInPlaceSumSquaresFMA: FMA version. dst[i] += x[i]; sum += dst[i]^2.
+// Uses VFMADD231PS to fuse the square+accumulate.
+TEXT ·addInPlaceSumSquaresFMA(SB), NOSPLIT, $32-52
+	MOVQ dst_base+0(FP), SI
+	MOVQ dst_len+8(FP), CX
+	MOVQ x_base+24(FP), DI
+
+	VXORPS Y1, Y1, Y1
+	VXORPS Y3, Y3, Y3
+	VXORPS Y5, Y5, Y5
+	VXORPS Y7, Y7, Y7
+	CMPQ CX, $8
+	JB addSSfmaTail
+
+addSSfmaLoop32:
+	CMPQ CX, $32
+	JB addSSfmaLoop
+	VMOVUPS (SI), Y0
+	VADDPS (DI), Y0, Y0
+	VMOVUPS Y0, (SI)
+	VFMADD231PS Y0, Y0, Y1
+	VMOVUPS 32(SI), Y2
+	VADDPS 32(DI), Y2, Y2
+	VMOVUPS Y2, 32(SI)
+	VFMADD231PS Y2, Y2, Y3
+	VMOVUPS 64(SI), Y0
+	VADDPS 64(DI), Y0, Y0
+	VMOVUPS Y0, 64(SI)
+	VFMADD231PS Y0, Y0, Y5
+	VMOVUPS 96(SI), Y2
+	VADDPS 96(DI), Y2, Y2
+	VMOVUPS Y2, 96(SI)
+	VFMADD231PS Y2, Y2, Y7
+	ADDQ $128, SI
+	ADDQ $128, DI
+	SUBQ $32, CX
+	JMP addSSfmaLoop32
+
+addSSfmaLoop:
+	CMPQ CX, $8
+	JB addSSfmaReduce
+	VMOVUPS (SI), Y0
+	VADDPS (DI), Y0, Y0
+	VMOVUPS Y0, (SI)
+	VFMADD231PS Y0, Y0, Y1
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP addSSfmaLoop
+
+addSSfmaReduce:
+	VADDPS Y3, Y1, Y1
+	VADDPS Y5, Y1, Y1
+	VADDPS Y7, Y1, Y1
+	VEXTRACTF128 $1, Y1, X2
+	VADDPS X2, X1, X0
+	VHADDPS X0, X0, X0
+	VHADDPS X0, X0, X0
+	VZEROUPPER
+	JMP addSSfmaTailScalar
+
+addSSfmaTail:
+	VZEROUPPER
+	XORPS X0, X0
+
+addSSfmaTailScalar:
+	CMPQ CX, $0
+	JE addSSfmaDone
+	MOVSS (SI), X1
+	ADDSS (DI), X1
+	MOVSS X1, (SI)
+	MULSS X1, X1
+	ADDSS X1, X0
+	ADDQ $4, SI
+	ADDQ $4, DI
+	DECQ CX
+	JMP addSSfmaTailScalar
+
+addSSfmaDone:
+	MOVSS X0, ret+48(FP)
+	RET
