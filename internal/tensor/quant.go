@@ -48,6 +48,10 @@ func QuantizeQ8RowInto(w []float32, data []int8) float32 {
 	}
 	scale := maxAbs / 127
 	inv := 1 / scale
+	if useDotQ8AVX2 && len(w) >= 8 {
+		quantizeQ8RowAVX2(w, data, inv)
+		return scale
+	}
 	i := 0
 	for ; i+15 < len(w); i += 16 {
 		data[i] = quantInt8(w[i] * inv)

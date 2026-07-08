@@ -1,4 +1,4 @@
-﻿//go:build amd64
+//go:build amd64
 
 #include "textflag.h"
 
@@ -4581,3 +4581,64 @@ geluFmaTail:
 
 geluFmaDone:
 	RET
+// quantizeQ8RowAVX2: quantizes float32 row to int8 using AVX2.
+// Processes 8 values per iteration: w[i]*inv, round, clamp [-127,127], pack to int8.
+// Args: w_base+0(FP), w_len+8(FP), data_base+24(FP), inv+48(FP)
+TEXT ·quantizeQ8RowAVX2(SB), NOSPLIT, $0-56
+	MOVQ w_base+0(FP), SI
+	MOVQ w_len+8(FP), CX
+	MOVQ data_base+24(FP), DI
+	VBROADCASTSS inv+48(FP), Y1
+	VBROADCASTSS q8Clamp127<>(SB), Y4   // 127.0
+	VBROADCASTSS q8ClampNeg127<>(SB), Y5 // -127.0
+
+	CMPQ CX, $8
+	JB q8qTail
+
+q8qLoop:
+	CMPQ CX, $8
+	JB q8qDone
+	VMOVUPS (SI), Y0
+	VMULPS Y1, Y0, Y0          // w * inv
+	VROUNDPS $8, Y0, Y0        // round to nearest, ties to even
+	VMINPS Y4, Y0, Y0          // clamp max 127
+	VMAXPS Y5, Y0, Y0          // clamp min -127
+	VCVTPS2DQ Y0, Y0           // float32 -> int32
+	VPSLLDQ $0, Y0, Y0         // nop, keep pipeline
+	VPACKSSDW Y0, Y0, Y0       // int32 -> int16 (saturated)
+	VPACKSSWB Y0, Y0, Y0       // int16 -> int8 (saturated)
+	VMOVD X0, (DI)             // store 8 bytes
+	ADDQ $32, SI
+	ADDQ $8, DI
+	SUBQ $8, CX
+	JMP q8qLoop
+
+q8qDone:
+	VZEROUPPER
+q8qTail:
+	CMPQ CX, $0
+	JE q8qRet
+	MOVSS (SI), X0
+	MULSS X1, X0
+	ROUNDSS $8, X0, X0
+	VMINSS X4, X0, X0
+	VMAXSS X5, X0, X0
+	VCVTPS2DQ X0, X0
+	VPACKSSDW X0, X0, X0
+	VPACKSSWB X0, X0, X0
+	MOVD X0, AX
+	MOVB AX, (DI)
+	ADDQ $4, SI
+	INCQ DI
+	DECQ CX
+	JMP q8qTail
+
+q8qRet:
+	VZEROUPPER
+	RET
+
+DATA q8Clamp127<>+0(SB)/4, $0x42FE0000
+GLOBL q8Clamp127<>(SB), RODATA, $4
+
+DATA q8ClampNeg127<>+0(SB)/4, $0xC2FE0000
+GLOBL q8ClampNeg127<>(SB), RODATA, $4

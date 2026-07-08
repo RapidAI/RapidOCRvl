@@ -310,3 +310,10 @@ func dotQ8TripletFMA(a, b, c []int8, x []float32) (float32, float32, float32) { 
 
 func siluMulInPlaceFMA(gate, up []float32) { siluMulInPlaceAVX(gate, up) }
 func geluTanhFMA(x []float32) { geluTanhAVX(x) }
+
+
+func quantizeQ8RowAVX2(w []float32, data []int8, inv float32) {
+	for i, v := range w {
+		data[i] = quantInt8(v * inv)
+	}
+}
