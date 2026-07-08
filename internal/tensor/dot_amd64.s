@@ -5827,3 +5827,87 @@ sumSqFmaTailScalar:
 sumSqFmaDone:
 	MOVSS X0, ret+24(FP)
 	RET
+
+// addSumSquaresFMA: FMA version of addSumSquaresAVX (out variant).
+// Fuses VMULPS+VADDPS into VFMADD231PS for the square+accumulate.
+TEXT ·addSumSquaresFMA(SB), NOSPLIT,$32-76
+	MOVQ out_base+0(FP), SI
+	MOVQ out_len+8(FP), CX
+	MOVQ dst_base+24(FP), DI
+	MOVQ add_base+48(FP), R8
+	VXORPS Y1, Y1, Y1
+	VXORPS Y3, Y3, Y3
+	VXORPS Y5, Y5, Y5
+	VXORPS Y7, Y7, Y7
+	CMPQ CX,$8
+	JB addSSfmaOutTail
+
+addSSfmaOutLoop32:
+	CMPQ CX,$32
+	JB addSSfmaOutLoop
+	VMOVUPS (DI), Y0
+	VADDPS (R8), Y0, Y0
+	VMOVUPS Y0, (SI)
+	VFMADD231PS Y0, Y0, Y1
+	VMOVUPS 32(DI), Y2
+	VADDPS 32(R8), Y2, Y2
+	VMOVUPS Y2, 32(SI)
+	VFMADD231PS Y2, Y2, Y3
+	VMOVUPS 64(DI), Y0
+	VADDPS 64(R8), Y0, Y0
+	VMOVUPS Y0, 64(SI)
+	VFMADD231PS Y0, Y0, Y5
+	VMOVUPS 96(DI), Y2
+	VADDPS 96(R8), Y2, Y2
+	VMOVUPS Y2, 96(SI)
+	VFMADD231PS Y2, Y2, Y7
+	ADDQ$128, SI
+	ADDQ$128, DI
+	ADDQ$128, R8
+	SUBQ$32, CX
+	JMP addSSfmaOutLoop32
+
+addSSfmaOutLoop:
+	CMPQ CX,$8
+	JB addSSfmaOutReduce
+	VMOVUPS (DI), Y0
+	VADDPS (R8), Y0, Y0
+	VMOVUPS Y0, (SI)
+	VFMADD231PS Y0, Y0, Y1
+	ADDQ$32, SI
+	ADDQ$32, DI
+	ADDQ$32, R8
+	SUBQ$8, CX
+	JMP addSSfmaOutLoop
+
+addSSfmaOutReduce:
+	VADDPS Y3, Y1, Y1
+	VADDPS Y5, Y1, Y1
+	VADDPS Y7, Y1, Y1
+	VEXTRACTF128$1,Y1,X3
+	VADDPS X3, X1, X1
+	VHADDPS X1, X1, X1
+	VHADDPS X1, X1, X1
+	VZEROUPPER
+	JMP addSSfmaOutTailScalar
+
+addSSfmaOutTail:
+	VXORPS X1, X1, X1
+
+addSSfmaOutTailScalar:
+	CMPQ CX,$0
+	JE addSSfmaOutDone
+	MOVSS (DI), X0
+	ADDSS (R8), X0
+	MOVSS X0, (SI)
+	MULSS X0, X0
+	ADDSS X0, X1
+	ADDQ$4, SI
+	ADDQ$4, DI
+	ADDQ$4, R8
+	DECQ CX
+	JMP addSSfmaOutTailScalar
+
+addSSfmaOutDone:
+	MOVSS X1, ret+72(FP)
+	RET

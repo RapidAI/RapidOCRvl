@@ -26,6 +26,10 @@ func addSumSquaresAVX(out, dst, add []float32) float32 {
 	return addSumSquaresScalar(out, dst, add)
 }
 
+func addSumSquaresFMA(out, dst, add []float32) float32 {
+	return addSumSquaresScalar(out, dst, add)
+}
+
 func addScaledAVX(dst, x []float32, scale float32) {
 	addScaledScalar(dst, x, scale)
 }
