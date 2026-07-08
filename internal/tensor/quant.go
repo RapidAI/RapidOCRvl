@@ -1353,6 +1353,16 @@ func UnpackQ4Matrix(q *Q4Matrix) {
 		q.Unpacked = make([]int8, q.Rows*q.Cols)
 	}
 	packedCols := (q.Cols + 1) / 2
+	if shouldParallel(q.Rows*q.Cols, q.Rows) {
+		parallelFor(q.Rows, func(start, end int) {
+			for r := start; r < end; r++ {
+				row := q.Data[r*packedCols : (r+1)*packedCols]
+				out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
+				unpackQ4RowFast(row, out, q.Cols)
+			}
+		})
+		return
+	}
 	for r := 0; r < q.Rows; r++ {
 		row := q.Data[r*packedCols : (r+1)*packedCols]
 		out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
@@ -1605,6 +1615,16 @@ func UnpackQ6Matrix(q *Q6Matrix) {
 		q.Unpacked = make([]int8, q.Rows*q.Cols)
 	}
 	packedCols := PackedQ6Cols(q.Cols)
+	if shouldParallel(q.Rows*q.Cols, q.Rows) {
+		parallelFor(q.Rows, func(start, end int) {
+			for r := start; r < end; r++ {
+				row := q.Data[r*packedCols : (r+1)*packedCols]
+				out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
+				unpackQ6RowFast(row, out, q.Cols)
+			}
+		})
+		return
+	}
 	for r := 0; r < q.Rows; r++ {
 		row := q.Data[r*packedCols : (r+1)*packedCols]
 		out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
