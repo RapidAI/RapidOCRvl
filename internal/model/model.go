@@ -1858,6 +1858,9 @@ func generationCanReturnCandidatesOnly(opts GenerateOptions) bool {
 }
 
 func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, scratch *generationScratch) int {
+	if scratch != nil && opts.TopK > 0 && opts.TopK < len(logits) && cap(scratch.weights) < opts.TopK {
+		scratch.weights = make([]float32, opts.TopK)
+	}
 	if opts.Temperature <= 0 || opts.TopK == 1 {
 		return tensor.Argmax(logits)
 	}
@@ -1871,6 +1874,12 @@ func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, 
 	invTemp := float32(1 / opts.Temperature)
 	maxScore := maxScoreRaw * invTemp
 	if len(candidates) <= 4 {
+		// Populate the weight scratch even on the small path so callers that
+		// reuse generationScratch across samples see a stable backing array.
+		weights := makeSampleWeights(len(candidates), scratch)
+		for i, c := range candidates {
+			weights[i] = float32(math.Exp(float64(c.score*invTemp - maxScore)))
+		}
 		return sampleCandidateScoresSmall(candidates, invTemp, maxScore, rng)
 	}
 	weights := makeSampleWeights(len(candidates), scratch)
@@ -3376,6 +3385,8 @@ func (rt *Runtime) newGenerationScratch() *generationScratch {
 		layers:  rt.newLayerScratch(),
 		hidden:  make([]float32, c.HiddenSize),
 		norm:    make([]float32, c.HiddenSize),
+		logits:  make([]float32, c.VocabSize),
+		weights: make([]float32, c.VocabSize),
 		ropeCos: make([]float32, c.HeadDim/2),
 		ropeSin: make([]float32, c.HeadDim/2),
 	}
