@@ -785,13 +785,14 @@ func BenchmarkFusedSwiGLUF32(b *testing.B) {
 	downW := make([]float32, hidden*inter)
 	out := make([]float32, hidden)
 	tmpG := make([]float32, inter)
+	tmpU := make([]float32, inter)
 	fillBench(x)
 	fillBench(gateW)
 	fillBench(upW)
 	fillBench(downW)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FusedSwiGLUF32Scratch(out, x, gateW, upW, downW, inter, hidden, hidden, tmpG)
+		FusedSwiGLUF32ScratchWithU(out, x, gateW, upW, downW, inter, hidden, hidden, tmpG, tmpU)
 	}
 }
 

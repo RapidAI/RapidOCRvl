@@ -312,11 +312,14 @@ type VulkanModelShape struct {
 }
 
 type VulkanModelArtifacts struct {
-	Plans          []VulkanPlan         `json:"plans,omitempty"`
-	Summary        VulkanPlanSummary    `json:"summary"`
-	ExecutionGraph VulkanExecutionGraph `json:"execution_graph"`
-	PipelinePlan   []VulkanPipelinePlan `json:"pipeline_plan,omitempty"`
-	CommandPlan    VulkanCommandPlan    `json:"command_plan"`
+	Plans                []VulkanPlan         `json:"plans,omitempty"`
+	OptionalPlans        []VulkanPlan         `json:"optional_plans,omitempty"`
+	Summary              VulkanPlanSummary    `json:"summary"`
+	ExecutionGraph       VulkanExecutionGraph `json:"execution_graph"`
+	PipelinePlan         []VulkanPipelinePlan `json:"pipeline_plan,omitempty"`
+	OptionalPipelinePlan []VulkanPipelinePlan `json:"optional_pipeline_plan,omitempty"`
+	CommandPlan          VulkanCommandPlan    `json:"command_plan"`
+	OptionalCommand      VulkanCommandPlan    `json:"optional_command,omitempty"`
 }
 
 func DefaultVulkanCompute() VulkanCompute {

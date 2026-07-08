@@ -71,6 +71,11 @@ type VulkanDevice struct {
 	Driver     string `json:"driver,omitempty"`
 }
 
+type VulkanTokenScore struct {
+	Token int     `json:"token"`
+	Score float32 `json:"score"`
+}
+
 type Selection struct {
 	Requested string `json:"requested"`
 	Active    string `json:"active"`
