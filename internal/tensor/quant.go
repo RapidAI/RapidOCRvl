@@ -738,10 +738,8 @@ func matVecQ8SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q8M
 				defer putInt32Scratch(scratchA)
 				defer putInt32Scratch(scratchB)
 				dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &scratchA[0], &scratchB[0], batchSize, cols)
-				for r := 0; r < batchSize; r++ {
-					out[start+r] = float32(scratchA[r]-128*gRowSum[start+r]) * scaleX * gScale[start+r]
-					tmpU[start+r] = float32(scratchB[r]-128*uRowSum[start+r]) * scaleX * uScale[start+r]
-				}
+				finalizeDotQ8VNNI(&scratchA[0], &gRowSum[start], &gScale[start], &out[start], batchSize, scaleX)
+				finalizeDotQ8VNNI(&scratchB[0], &uRowSum[start], &uScale[start], &tmpU[start], batchSize, scaleX)
 				SiLUMulInPlace(out[start:end], tmpU[start:end])
 				return
 			}
@@ -1232,9 +1230,7 @@ func matVecQ8Serial(out, x []float32, q *Q8Matrix, start, end int) {
 			scratch := getInt32Scratch(nRows)
 			defer putInt32Scratch(scratch)
 			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				out[start+r] = float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
-			}
+			finalizeDotQ8VNNI(&scratch[0], &rowSum[start], &scale[start], &out[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1675,9 +1671,7 @@ func matVecQ6Serial(out, x []float32, q *Q6Matrix, start, end int) {
 			scratch := getInt32Scratch(nRows)
 			defer putInt32Scratch(scratch)
 			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				out[start+r] = float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
-			}
+			finalizeDotQ8VNNI(&scratch[0], &rowSum[start], &scale[start], &out[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1714,9 +1708,7 @@ func matVecQ4Serial(out, x []float32, q *Q4Matrix, start, end int) {
 			scratch := getInt32Scratch(nRows)
 			defer putInt32Scratch(scratch)
 			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				out[start+r] = float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
-			}
+			finalizeDotQ8VNNI(&scratch[0], &rowSum[start], &scale[start], &out[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
