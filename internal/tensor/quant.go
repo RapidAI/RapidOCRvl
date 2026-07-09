@@ -790,9 +790,26 @@ func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) 
 		xq := getVNNIScratch(gate.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		gData := gate.Unpacked
+		uData := up.Unpacked
+		gScale := gate.Scale
+		uScale := up.Scale
+		gRS := gate.RowSum
+		uRS := up.RowSum
+		cols := gate.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
+				g := float32(dotA-128*gRS[r]) * scaleX * gScale[r]
+				u := float32(dotB-128*uRS[r]) * scaleX * uScale[r]
+				out[r] = SiLU(g) * u
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * gate.Cols
-			g, u := dotQ8PairVNNI(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+			base := r * cols
+			g, u := dotQ8PairVNNI(gData[base:base+cols], uData[base:base+cols], xq, scaleX, gRS[r], uRS[r], gScale[r], uScale[r])
 			out[r] = SiLU(g) * u
 		}
 		return
@@ -919,9 +936,26 @@ func matVecQ6SwiGLUSerial(out, x []float32, gate, up *Q6Matrix, start, end int) 
 		xq := getVNNIScratch(gate.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		gData := gate.Unpacked
+		uData := up.Unpacked
+		gScale := gate.Scale
+		uScale := up.Scale
+		gRS := gate.RowSum
+		uRS := up.RowSum
+		cols := gate.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
+				g := float32(dotA-128*gRS[r]) * scaleX * gScale[r]
+				u := float32(dotB-128*uRS[r]) * scaleX * uScale[r]
+				out[r] = SiLU(g) * u
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * gate.Cols
-			g, u := dotQ8PairVNNI(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+			base := r * cols
+			g, u := dotQ8PairVNNI(gData[base:base+cols], uData[base:base+cols], xq, scaleX, gRS[r], uRS[r], gScale[r], uScale[r])
 			out[r] = SiLU(g) * u
 		}
 		return
