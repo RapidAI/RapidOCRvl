@@ -3702,11 +3702,11 @@ func (rt *Runtime) matVecOutAddRMSNormCPU(normOut, residual, headOut []float32, 
 		return true
 	}
 	if tl.q4.o != nil {
-		tensor.MatVecQ4AddRMSNormOutOnly(normOut, residual, headOut, tl.q4.o, normWeight, eps)
+		tensor.MatVecQ4AddRMSNorm(normOut, residual, headOut, tl.q4.o, normWeight, eps)
 		return true
 	}
 	if tl.q6.o != nil {
-		tensor.MatVecQ6AddRMSNormOutOnly(normOut, residual, headOut, tl.q6.o, normWeight, eps)
+		tensor.MatVecQ6AddRMSNorm(normOut, residual, headOut, tl.q6.o, normWeight, eps)
 		return true
 	}
 	if tl.w.o != nil {
@@ -5477,10 +5477,10 @@ func (rt *Runtime) mlpDownAddRMSNormCPU(normOut, residual, x []float32, tl *text
 			tensor.SwiGLUGateUpQ4Scratch(g, x, tl.q4.gate, tl.q4.up, uScratch)
 		}
 		if readResidual {
-			// Q4 in-place variant not implemented yet; use out-only + copy
-			return false
+			tensor.MatVecQ4AddRMSNorm(normOut, residual, g, tl.q4.down, normWeight, eps)
+		} else {
+			tensor.MatVecQ4AddRMSNormOutOnly(normOut, residual, g, tl.q4.down, normWeight, eps)
 		}
-		tensor.MatVecQ4AddRMSNormOutOnly(normOut, residual, g, tl.q4.down, normWeight, eps)
 		return true
 	}
 
@@ -5496,10 +5496,10 @@ func (rt *Runtime) mlpDownAddRMSNormCPU(normOut, residual, x []float32, tl *text
 			tensor.SwiGLUGateUpQ6Scratch(g, x, tl.q6.gate, tl.q6.up, uScratch)
 		}
 		if readResidual {
-			// Q6 in-place variant not implemented yet; use out-only + copy
-			return false
+			tensor.MatVecQ6AddRMSNorm(normOut, residual, g, tl.q6.down, normWeight, eps)
+		} else {
+			tensor.MatVecQ6AddRMSNormOutOnly(normOut, residual, g, tl.q6.down, normWeight, eps)
 		}
-		tensor.MatVecQ6AddRMSNormOutOnly(normOut, residual, g, tl.q6.down, normWeight, eps)
 		return true
 	}
 

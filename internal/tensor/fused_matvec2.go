@@ -533,6 +533,95 @@ func matVecQ8AddSumSquaresParallel(out, residual, x []float32, q *Q8Matrix) floa
 	return ss
 }
 
+// MatVecQ4AddRMSNorm fuses Q4 down-projection matvec with AddRMSNorm (in-place).
+// residual[i] += dot(down[row_i], x); normOut[i] = residual[i] * rsqrt(ss/n+eps) * weight[i]
+func MatVecQ4AddRMSNorm(normOut, residual, x []float32, down *Q4Matrix, normWeight []float32, eps float32) {
+	n := down.Rows
+	if n == 0 {
+		return
+	}
+	var ss float32
+	if shouldParallelQuantMatVec(n*down.Cols, n) {
+		ss = matVecQ4InPlaceAddSumSquaresParallel(normOut, residual, x, down)
+	} else {
+		ss = matVecQ4InPlaceAddSumSquaresSerial(normOut, residual, x, down, 0, n)
+	}
+	scale := fastRsqrtF32(ss/float32(n)+eps)
+	if useDotFMA && n >= 8 {
+		mulScaleFMA(normOut, normOut, normWeight, scale)
+		return
+	}
+	if useDotF32AVX && n >= 8 {
+		mulScaleAVX(normOut, normOut, normWeight, scale)
+		return
+	}
+	for i := 0; i < n; i++ {
+		normOut[i] = normOut[i] * scale * normWeight[i]
+	}
+}
+
+func matVecQ4InPlaceAddSumSquaresSerial(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
+	var ss float32
+	if q.Unpacked != nil {
+		for i := start; i < end; i++ {
+			base := i * q.Cols
+			v := residual[i] + dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
+			residual[i] = v
+			out[i] = v
+			ss += v * v
+		}
+		return ss
+	}
+	packedCols := (q.Cols + 1) / 2
+	for i := start; i < end; i++ {
+		base := i * packedCols
+		v := residual[i] + dotQ4(q.Data[base:base+packedCols], x, q.Cols)*q.Scale[i]
+		residual[i] = v
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ4InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q4Matrix) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ4InPlaceAddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
+	}
+	partials := make([]float32, workers)
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ4InPlaceAddSumSquaresSerial(out, residual, x, q, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ4InPlaceAddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
 // MatVecQ4AddRMSNormOutOnly fuses Q4 down-projection matvec with AddRMSNormOutOnly.
 func MatVecQ4AddRMSNormOutOnly(normOut, residual, x []float32, down *Q4Matrix, normWeight []float32, eps float32) {
 	n := down.Rows
@@ -611,6 +700,95 @@ func matVecQ4AddSumSquaresParallel(out, residual, x []float32, q *Q4Matrix) floa
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ4AddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+// MatVecQ6AddRMSNorm fuses Q6 down-projection matvec with AddRMSNorm (in-place).
+// residual[i] += dot(down[row_i], x); normOut[i] = residual[i] * rsqrt(ss/n+eps) * weight[i]
+func MatVecQ6AddRMSNorm(normOut, residual, x []float32, down *Q6Matrix, normWeight []float32, eps float32) {
+	n := down.Rows
+	if n == 0 {
+		return
+	}
+	var ss float32
+	if shouldParallelQuantMatVec(n*down.Cols, n) {
+		ss = matVecQ6InPlaceAddSumSquaresParallel(normOut, residual, x, down)
+	} else {
+		ss = matVecQ6InPlaceAddSumSquaresSerial(normOut, residual, x, down, 0, n)
+	}
+	scale := fastRsqrtF32(ss/float32(n)+eps)
+	if useDotFMA && n >= 8 {
+		mulScaleFMA(normOut, normOut, normWeight, scale)
+		return
+	}
+	if useDotF32AVX && n >= 8 {
+		mulScaleAVX(normOut, normOut, normWeight, scale)
+		return
+	}
+	for i := 0; i < n; i++ {
+		normOut[i] = normOut[i] * scale * normWeight[i]
+	}
+}
+
+func matVecQ6InPlaceAddSumSquaresSerial(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
+	var ss float32
+	if q.Unpacked != nil {
+		for i := start; i < end; i++ {
+			base := i * q.Cols
+			v := residual[i] + dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
+			residual[i] = v
+			out[i] = v
+			ss += v * v
+		}
+		return ss
+	}
+	packedCols := PackedQ6Cols(q.Cols)
+	for i := start; i < end; i++ {
+		base := i * packedCols
+		v := residual[i] + dotQ6(q.Data[base:base+packedCols], x, q.Cols)*q.Scale[i]
+		residual[i] = v
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ6InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q6Matrix) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ6InPlaceAddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
+	}
+	partials := make([]float32, workers)
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ6InPlaceAddSumSquaresSerial(out, residual, x, q, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ6InPlaceAddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
