@@ -442,6 +442,15 @@ func roundToInt(x float32) int {
 
 func MatVecQ8(out, x []float32, q *Q8Matrix) {
 	matVecQ8Rows(out, x, q, q.Rows)
+}
+
+// MatVecQ8Plain computes out = q * x using the non-VNNI path (int8 * float32 dot).
+// This matches the GPU shader's computation method.
+func MatVecQ8Plain(out, x []float32, q *Q8Matrix) {
+	for r := 0; r < q.Rows; r++ {
+		base := r * q.Cols
+		out[r] = dotQ8(q.Data[base:base+q.Cols], x) * q.Scale[r]
+	}
 }
 
 func matVecQ8Rows(out, x []float32, q *Q8Matrix, rows int) {

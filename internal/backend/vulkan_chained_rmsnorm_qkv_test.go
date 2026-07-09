@@ -110,7 +110,7 @@ func TestVulkanChainedRMSNormFusedQKVMRoPEF32(t *testing.T) {
 		t.Fatalf("VulkanChainedRMSNormFusedQKVMRoPEF32 failed: %v", err)
 	}
 
-	tol := float32(0.02) // GPU uses f32 dot, CPU VNNI uses quantized input
+	tol := float32(0.01) // GPU and CPU both use plain int8*float32 dot
 	for i := range outA {
 		if diff := float32(math.Abs(float64(outA[i] - outARef[i]))); diff > tol {
 			t.Errorf("outA[%d]: got %f want %f diff %f", i, outA[i], outARef[i], diff)
@@ -187,9 +187,9 @@ func TestVulkanChainedRMSNormFusedQKVMRoPEQ8(t *testing.T) {
 	outARef := make([]float32, rowsA)
 	outBRef := make([]float32, rowsB)
 	outCRef := make([]float32, rowsC)
-	tensor.MatVecQ8(outARef, normed, qa)
-	tensor.MatVecQ8(outBRef, normed, qb)
-	tensor.MatVecQ8(outCRef, normed, qc)
+	tensor.MatVecQ8Plain(outARef, normed, qa)
+	tensor.MatVecQ8Plain(outBRef, normed, qb)
+	tensor.MatVecQ8Plain(outCRef, normed, qc)
 
 	// Apply RoPE to q and k (v is not rotated)
 	for h := 0; h < rowsA/headDim; h++ {
@@ -219,7 +219,7 @@ func TestVulkanChainedRMSNormFusedQKVMRoPEQ8(t *testing.T) {
 		t.Fatalf("VulkanChainedRMSNormFusedQKVMRoPEQ8 failed: %v", err)
 	}
 
-	tol := float32(0.02) // GPU uses f32 dot, CPU VNNI uses quantized input
+	tol := float32(0.01) // GPU and CPU both use plain int8*float32 dot
 	for i := range outA {
 		if diff := float32(math.Abs(float64(outA[i] - outARef[i]))); diff > tol {
 			t.Errorf("outA[%d]: got %f want %f diff %f", i, outA[i], outARef[i], diff)

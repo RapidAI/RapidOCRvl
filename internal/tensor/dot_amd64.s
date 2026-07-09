@@ -5913,10 +5913,8 @@ q8qLoop:
 	VMINPS Y4, Y0, Y0          // clamp max 127
 	VMAXPS Y5, Y0, Y0          // clamp min -127
 	VCVTPS2DQ Y0, Y0           // float32 -> int32 (8 values in Y0)
-	VEXTRACTI128 $1, Y0, X1    // X1 = upper 4 int32
-	VPACKSSDW X1, X0, X0       // pack 8 int32 -> 8 int16 (saturated)
-	VPACKSSWB X0, X0, X0       // pack 8 int16 -> 8 int8 (duplicated)
-	VMOVQ X0, (DI)            // store 8 bytes (low 64 bits only)
+	VPMOVDB Y0, X0             // pack 8 int32 -> 8 uint8 (low 64 bits)
+	VMOVQ X0, (DI)            // store 8 bytes
 	ADDQ $32, SI
 	ADDQ $8, DI
 	SUBQ $8, CX
