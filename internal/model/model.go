@@ -200,6 +200,7 @@ const (
 	vulkanOpChainedQKVAttentionOutAddRMSNormF32
 	vulkanOpChainedQKVAttentionOutAddRMSNormQ8
 	vulkanOpChainedSwiGLUDownAddRMSNormQ8
+	vulkanOpLayerChainQ8
 )
 
 var vulkanOpNames = [...]string{
@@ -290,6 +291,7 @@ var vulkanOpNames = [...]string{
 	vulkanOpChainedQKVAttentionOutAddRMSNormF32: "chained_qkv_attention_out_norm_f32",
 	vulkanOpChainedQKVAttentionOutAddRMSNormQ8: "chained_qkv_attention_out_norm_q8",
 	vulkanOpChainedSwiGLUDownAddRMSNormQ8: "chained_swiglu_down_norm_q8",
+	vulkanOpLayerChainQ8:                       "layer_chain_q8",
 }
 
 type vulkanPlanCache struct {
@@ -3494,6 +3496,14 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 			rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
 			return generationForwardResult{}, nil
 		}
+		// Try fused attention+MLP layer chain (single submit, device-local intermediates)
+		if hasRoPE && !lastLayer && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpLayerChainQ8) {
+			nextNormWeight := rt.textLayers[li+1].w.ln1
+			if rt.vulkanLayerChainQ8(layers[li+1].norm[:c.HiddenSize], h, h, tl.w.ln1, &caches[li], tl, ropeCos, ropeSin, tl.w.ln2, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, nextNormWeight) {
+				// Unified chain handled attention + MLP + AddRMSNorm for next layer
+				continue
+			}
+		}
 		if li == 0 {
 			// Try chained RMSNorm+QKVMRoPE for F32 weights; falls back to separate calls
 			if hasRoPE && rt.attentionChainedQKV(sc, &caches[li], tl, h, tl.w.ln1, hasRoPE, ropeCos, ropeSin, c) {
@@ -4232,6 +4242,63 @@ func (rt *Runtime) vulkanChainedSwiGLUDownAddRMSNormQ8(normOut, residual, x []fl
 		return true
 	} else {
 		rt.disableVulkanOp(vulkanOpChainedSwiGLUDownAddRMSNormQ8, err)
+	}
+	return false
+}
+
+// vulkanLayerChainQ8 fuses the attention and MLP chains into a single submit
+// with device-local intermediates.  Returns true if the fused path was used.
+func (rt *Runtime) vulkanLayerChainQ8(normOut, residual, rawInput, ln1Weight []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, ln2Weight []float32, numHeads, kvHeads, headDim int, nextNormWeight []float32) bool {
+	if !rt.vulkanOpEnabled(vulkanOpLayerChainQ8) || tl == nil || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 || headDim%2 != 0 {
+		return false
+	}
+	c := rt.cfg
+	hidden := c.HiddenSize
+	qRows := numHeads * headDim
+	kvRows := kvHeads * headDim
+	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
+		return false
+	}
+	if len(normOut) < hidden || len(residual) < hidden || len(rawInput) < hidden || len(ln1Weight) < hidden || len(ln2Weight) < qRows || len(nextNormWeight) < hidden {
+		return false
+	}
+	if tl.q8.q == nil || tl.q8.k == nil || tl.q8.v == nil || tl.q8.o == nil || tl.q8.gate == nil || tl.q8.up == nil || tl.q8.down == nil {
+		return false
+	}
+	if !q8MatVecShapeOK(tl.q8.q, qRows, hidden) || !q8MatVecShapeOK(tl.q8.k, kvRows, hidden) || !q8MatVecShapeOK(tl.q8.v, kvRows, hidden) || !q8MatVecShapeOK(tl.q8.o, qRows, qRows) {
+		return false
+	}
+	if !fusedMRoPEShapeOK(make([]float32, qRows), make([]float32, kvRows), numHeads, kvHeads, headDim, cosTable, sinTable) {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	if !q8SwiGLUDownShapeOK(normOut, rawInput, tl.q8.gate, tl.q8.up, tl.q8.down, c.IntermediateSize, hidden, hidden) {
+		return false
+	}
+	if c.RMSNormEps != 1e-6 {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	newK := make([]float32, kvRows)
+	newV := make([]float32, kvRows)
+	zeroBias := rt.zeroBias(qRows)
+	if err := backend.VulkanLayerChainQ8Win(
+		normOut, residual, rawInput, ln1Weight,
+		tl.q8.q, tl.q8.k, tl.q8.v,
+		cosTable, sinTable,
+		tl.q8.o, zeroBias, ln2Weight,
+		kCache, vCache,
+		cache.epoch, cache.len, hidden, numHeads, kvHeads, headDim,
+		newK, newV,
+		tl.q8.gate, tl.q8.up, tl.q8.down,
+		nextNormWeight,
+	); err == nil {
+		cache.append(newK, newV)
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpLayerChainQ8, err)
 	}
 	return false
 }
