@@ -16,6 +16,10 @@ func AddRMSNormOutOnly(out, dst, add, weight []float32, eps float32) {
 		ss = addSumSquaresOutScalar(out, dst, add)
 	}
 	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
+	if useDotFMA && n >= 8 {
+		mulScaleFMA(out, out, weight, scale)
+		return
+	}
 	if useDotF32AVX && n >= 8 {
 		mulScaleAVX(out, out, weight, scale)
 		return

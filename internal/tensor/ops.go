@@ -827,6 +827,10 @@ func AddRMSNorm(out, dst, add, weight []float32, eps float32) {
 		ss = addInPlaceSumSquaresScalar(dst, add)
 	}
 	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
+	if useDotFMA && n >= 8 {
+		mulScaleFMA(out, dst, weight, scale)
+		return
+	}
 	if useDotF32AVX && n >= 8 {
 		mulScaleAVX(out, dst, weight, scale)
 		return
@@ -925,6 +929,10 @@ func RMSNorm(out, x, weight []float32, eps float32) {
 		ss = sumSquaresScalar(x)
 	}
 	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
+	if useDotFMA && n >= 8 {
+		mulScaleFMA(out, x, weight, scale)
+		return
+	}
 	if useDotF32AVX && n >= 8 {
 		mulScaleAVX(out, x, weight, scale)
 		return
@@ -1089,6 +1097,10 @@ func fastExpF32T(x float32) float32 {
 }
 
 func GELUTanhInPlace(x []float32) {
+	if useDotFMA && len(x) >= 8 {
+		geluTanhFMA(x)
+		return
+	}
 	if useDotF32AVX && len(x) >= 8 {
 		geluTanhAVX(x)
 		return
