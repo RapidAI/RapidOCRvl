@@ -2242,12 +2242,8 @@ func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scr
 	}
 	// Vectorized exp: weights[i] = exp(logits[i]*invTemp - maxScore)
 	sum := tensor.ExpScaledVec(weights, logits, invTemp, -maxScore)
-	// Build cumulative sum for sampling
-	var cs float32
-	for i := 0; i < len(logits); i++ {
-		cs += weights[i]
-		weights[i] = cs
-	}
+	// Build cumulative sum for sampling (parallel for large arrays)
+	tensor.CumulativeSum(weights, weights)
 	pick := float32(rng.Float64()) * sum
 	if idx := pickCumulativeFloat32(weights, pick); idx >= 0 {
 		return idx
@@ -2291,12 +2287,8 @@ func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *gen
 	}
 	// Vectorized exp: weights[i] = exp(logits[i] - maxScore)
 	sum := tensor.ExpScaledVec(weights, logits, 1, -maxScore)
-	// Build cumulative sum for sampling
-	var cs float32
-	for i := 0; i < len(logits); i++ {
-		cs += weights[i]
-		weights[i] = cs
-	}
+	// Build cumulative sum for sampling (parallel for large arrays)
+	tensor.CumulativeSum(weights, weights)
 	pick := float32(rng.Float64()) * sum
 	if idx := pickCumulativeFloat32(weights, pick); idx >= 0 {
 		return idx
