@@ -757,3 +757,138 @@ mrStore:
 mrDone:
 	VZEROUPPER
 	RET
+// dotQ8PairVNNICoreMultiRowZMM(a *int8, b *int8, xq *uint8, outA *int32, outB *int32, rows int, cols int)
+// Processes multiple rows of paired Q8 matrices (gate + up) sharing one xq.
+// Writes raw int32 dot products to outA[row] and outB[row].
+TEXT ·dotQ8PairVNNICoreMultiRowZMM(SB), NOSPLIT, $0-56
+	MOVQ a+0(FP), SI       // gate weight pointer
+	MOVQ b+8(FP), BX       // up weight pointer
+	MOVQ xq+16(FP), DI     // input quant (shared across all rows)
+	MOVQ outA+24(FP), DX   // output A (gate dots)
+	MOVQ outB+32(FP), R13  // output B (up dots)
+	MOVQ rows+40(FP), R9    // number of rows
+	MOVQ cols+48(FP), R10   // columns per row
+
+pmrLoop:
+	TESTQ R9, R9
+	JZ pmrDone
+
+	// Clear 8 accumulators: Z0-Z3 for A, Z4-Z7 for B
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+	VPXORD Z4, Z4, Z4
+	VPXORD Z5, Z5, Z5
+	VPXORD Z6, Z6, Z6
+	VPXORD Z7, Z7, Z7
+
+	MOVQ R10, R8           // remaining cols
+	MOVQ DI, R11           // save xq start
+
+pmrRowLoop:
+	CMPQ R8, $256
+	JB pmrTry128
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VPDPBUSD (BX), Z8, Z4
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VPDPBUSD 64(BX), Z9, Z5
+	VMOVDQU64 128(DI), Z10
+	VPDPBUSD 128(SI), Z10, Z2
+	VPDPBUSD 128(BX), Z10, Z6
+	VMOVDQU64 192(DI), Z11
+	VPDPBUSD 192(SI), Z11, Z3
+	VPDPBUSD 192(BX), Z11, Z7
+	ADDQ $256, SI
+	ADDQ $256, BX
+	ADDQ $256, DI
+	SUBQ $256, R8
+	JMP pmrRowLoop
+
+pmrTry128:
+	CMPQ R8, $128
+	JB pmrTry64
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VPDPBUSD (BX), Z8, Z4
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VPDPBUSD 64(BX), Z9, Z5
+	ADDQ $128, SI
+	ADDQ $128, BX
+	ADDQ $128, DI
+	SUBQ $128, R8
+	JMP pmrRowLoop
+
+pmrTry64:
+	CMPQ R8, $64
+	JB pmrReduce
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VPDPBUSD (BX), Z8, Z4
+	ADDQ $64, SI
+	ADDQ $64, BX
+	ADDQ $64, DI
+	SUBQ $64, R8
+	JMP pmrRowLoop
+
+pmrReduce:
+	// Reduce A: Z0-Z3 -> AX
+	VPADDD Z1, Z0, Z0
+	VPADDD Z3, Z2, Z2
+	VPADDD Z2, Z0, Z0
+	VEXTRACTI64X4 $1, Z0, Y1
+	VPADDD Y1, Y0, Y0
+	VEXTRACTI128 $1, Y0, X2
+	VPADDD X2, X0, X0
+	VPSHUFD $0x4E, X0, X1
+	VPADDD X1, X0, X0
+	VPSHUFD $0xB1, X0, X1
+	VPADDD X1, X0, X0
+	VMOVD X0, AX
+	// Reduce B: Z4-Z7 -> R12
+	VPADDD Z5, Z4, Z4
+	VPADDD Z7, Z6, Z6
+	VPADDD Z6, Z4, Z4
+	VEXTRACTI64X4 $1, Z4, Y5
+	VPADDD Y5, Y4, Y4
+	VEXTRACTI128 $1, Y4, X6
+	VPADDD X6, X4, X4
+	VPSHUFD $0x4E, X4, X5
+	VPADDD X5, X4, X4
+	VPSHUFD $0xB1, X4, X5
+	VPADDD X5, X4, X4
+	VMOVD X4, R12
+
+	// Handle tail
+pmrTail:
+	TESTQ R8, R8
+	JZ pmrStore
+	MOVBQSX (SI), R14
+	MOVBQSX (BX), R15
+	MOVBQZX (DI), CX
+	IMULL R14, CX
+	ADDL CX, AX
+	MOVBQZX (DI), CX
+	IMULL R15, CX
+	ADDL CX, R12
+	INCQ SI
+	INCQ BX
+	INCQ DI
+	DECQ R8
+	JMP pmrTail
+
+pmrStore:
+	MOVL AX, (DX)
+	MOVL R12, (R13)
+	ADDQ $4, DX
+	ADDQ $4, R13
+	MOVQ R11, DI          // reset xq pointer
+	DECQ R9
+	JMP pmrLoop
+
+pmrDone:
+	VZEROUPPER
+	RET

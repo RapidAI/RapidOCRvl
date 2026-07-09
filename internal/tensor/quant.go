@@ -732,11 +732,15 @@ func matVecQ8SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q8M
 		cols := gate.Cols
 		if batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
 			if useVNNI {
-				for r := start; r < end; r++ {
-					base := r * cols
-					dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
-					out[r] = float32(dotA-128*gRowSum[r]) * scaleX * gScale[r]
-					tmpU[r] = float32(dotB-128*uRowSum[r]) * scaleX * uScale[r]
+				// Multi-row asm: single call for all rows, eliminating per-row overhead
+				scratchA := getInt32Scratch(batchSize)
+				scratchB := getInt32Scratch(batchSize)
+				defer putInt32Scratch(scratchA)
+				defer putInt32Scratch(scratchB)
+				dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &scratchA[0], &scratchB[0], batchSize, cols)
+				for r := 0; r < batchSize; r++ {
+					out[start+r] = float32(scratchA[r]-128*gRowSum[start+r]) * scaleX * gScale[start+r]
+					tmpU[start+r] = float32(scratchB[r]-128*uRowSum[start+r]) * scaleX * uScale[start+r]
 				}
 				SiLUMulInPlace(out[start:end], tmpU[start:end])
 				return
