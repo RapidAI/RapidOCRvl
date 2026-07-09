@@ -5426,8 +5426,24 @@ func (rt *Runtime) mlpDownAddRMSNormCPU(normOut, residual, x []float32, tl *text
 		return true
 	}
 
-	// F32 path: not fused yet
-	return false
+	// F32 path
+	uScratch := sc.up
+	if cap(uScratch) >= intermediate {
+		uScratch = uScratch[:intermediate]
+	} else {
+		uScratch = nil
+	}
+	// Phase 1: gate+up SwiGLU -> intermediate
+	if !rt.swiGLUGateUpMaybeVulkan(g, x, tl.w.gate, tl.w.up, intermediate, c.HiddenSize, c.HiddenSize) {
+		tensor.FusedSwiGLUGateUpF32Scratch(g, uScratch, x, tl.w.gate, tl.w.up, intermediate, c.HiddenSize)
+	}
+	// Phase 2: fused down matvec + AddRMSNorm
+	if readResidual {
+		tensor.MatVecAddRMSNorm(normOut, residual, g, tl.w.down, c.HiddenSize, intermediate, normWeight, eps)
+	} else {
+		tensor.MatVecAddRMSNormOutOnly(normOut, residual, g, tl.w.down, c.HiddenSize, intermediate, normWeight, eps)
+	}
+	return true
 }
 
 func (rt *Runtime) swiGLUGateUpMaybeVulkan(out, x, gate, up []float32, rows, cols, outRows int) bool {

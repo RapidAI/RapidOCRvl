@@ -369,6 +369,20 @@ func FusedSwiGLUF32ScratchWithU(out, x, gate, up, down []float32, rows, cols, ou
 	MatVec(out, tmpG, down, outRows, rows)
 }
 
+// FusedSwiGLUGateUpF32Scratch computes SiLU(gate*x)*up*x into tmpG[:rows]
+// without the down matvec. tmpU is used for batched SiLU if available.
+func FusedSwiGLUGateUpF32Scratch(tmpG, tmpU, x, gate, up []float32, rows, cols int) {
+	tmpG = tmpG[:rows]
+	work := rows * cols * 2
+	if shouldParallel(work, rows) {
+		parallelForGateUp(rows, func(start, end int) {
+			fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up, start, end, cols)
+		})
+	} else {
+		fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up, 0, rows, cols)
+	}
+}
+
 func fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up []float32, start, end, cols int) {
 	batchSize := end - start
 	if useDotF32AVX && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
