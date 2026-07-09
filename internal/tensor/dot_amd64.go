@@ -9,7 +9,7 @@ var useDotQ8AVX2 = cpu.X86.HasAVX2
 var useDotQ4AVX2 = cpu.X86.HasAVX2
 var useDotQ6AVX2 = false // Q6 AVX2 is slower than Go scalar+LUT
 var useDotFMA = cpu.X86.HasFMA
-var useVNNI = false // VPDPBUSD unsupported by Go assembler
+var useVNNI = cpu.X86.HasAVX512VNNI // VPDPBUSD unsupported by Go assembler
 
 func addAVX(out, a, b []float32)
 func addInPlaceAVX(dst, x []float32)
@@ -101,6 +101,10 @@ func addInPlaceSumFMA(dst, x []float32) float32
 func sumF32FMA(x []float32) float32
 
 func maxAbsFloat32AVX2(x []float32) float32
+
+// Assembly helper declarations for VNNI kernels.
+func dotQ8VNNICore(a *int8, xq *uint8, n int) int32
+func rowSumQ8Asm(a *int8, n int) int32
 
 // VNNI-accelerated Q8 dot product using VPDPBUSD.
 // dotQ8VNNI scalar fallback (VNNI not available in assembly).
