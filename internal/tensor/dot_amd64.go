@@ -102,48 +102,85 @@ func sumF32FMA(x []float32) float32
 
 func maxAbsFloat32AVX2(x []float32) float32
 
+// Assembly helper declarations for VNNI kernels.
+func dotQ8VNNICore(a *int8, xq *uint8, n int) int32
+func dotQ8PairVNNICore(a, b *int8, xq *uint8, n int) (int32, int32)
+func dotQ8TripletVNNICore(a, b, c *int8, xq *uint8, n int) (int32, int32, int32)
+func rowSumQ8Asm(a *int8, n int) int32
+
 // VNNI-accelerated Q8 dot product using VPDPBUSD.
 // dotQ8VNNI scalar fallback (VNNI not available in assembly).
 func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) float32 {
-	var dot int32
 	n := len(a)
 	if len(xq) < n {
 		n = len(xq)
 	}
-	for i := 0; i < n; i++ {
-		dot += int32(a[i]) * (int32(xq[i]) - 128)
+	if n == 0 {
+		return float32(-128*rowSumW) * scaleX * scaleW
+	}
+	var dot int32
+	if useVNNI {
+		dot = dotQ8VNNICore(&a[0], &xq[0], n)
+	} else {
+		for i := 0; i < n; i++ {
+			dot += int32(a[i]) * (int32(xq[i]) - 128)
+		}
 	}
 	return float32(dot-128*rowSumW) * scaleX * scaleW
 }
 
 func dotQ8PairVNNI(a, b []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB int32, scaleWA, scaleWB float32) (float32, float32) {
-	var dotA, dotB int32
 	n := len(a)
 	if len(xq) < n {
 		n = len(xq)
 	}
-	for i := 0; i < n; i++ {
-		dotA += int32(a[i]) * (int32(xq[i]) - 128)
-		dotB += int32(b[i]) * (int32(xq[i]) - 128)
+	if n == 0 {
+		return float32(-128*rowSumWA) * scaleX * scaleWA, float32(-128*rowSumWB) * scaleX * scaleWB
+	}
+	var dotA, dotB int32
+	if useVNNI {
+		dotA, dotB = dotQ8PairVNNICore(&a[0], &b[0], &xq[0], n)
+	} else {
+		for i := 0; i < n; i++ {
+			dotA += int32(a[i]) * (int32(xq[i]) - 128)
+			dotB += int32(b[i]) * (int32(xq[i]) - 128)
+		}
 	}
 	return float32(dotA-128*rowSumWA) * scaleX * scaleWA, float32(dotB-128*rowSumWB) * scaleX * scaleWB
 }
 
 func dotQ8TripletVNNI(a, b, c []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB, rowSumWC int32, scaleWA, scaleWB, scaleWC float32) (float32, float32, float32) {
-	var dotA, dotB, dotC int32
 	n := len(a)
 	if len(xq) < n {
 		n = len(xq)
 	}
-	for i := 0; i < n; i++ {
-		dotA += int32(a[i]) * (int32(xq[i]) - 128)
-		dotB += int32(b[i]) * (int32(xq[i]) - 128)
-		dotC += int32(c[i]) * (int32(xq[i]) - 128)
+	if n == 0 {
+		return float32(-128*rowSumWA) * scaleX * scaleWA,
+			float32(-128*rowSumWB) * scaleX * scaleWB,
+			float32(-128*rowSumWC) * scaleX * scaleWC
 	}
-	return float32(dotA-128*rowSumWA) * scaleX * scaleWA, float32(dotB-128*rowSumWB) * scaleX * scaleWB, float32(dotC-128*rowSumWC) * scaleX * scaleWC
+	var dotA, dotB, dotC int32
+	if useVNNI {
+		dotA, dotB, dotC = dotQ8TripletVNNICore(&a[0], &b[0], &c[0], &xq[0], n)
+	} else {
+		for i := 0; i < n; i++ {
+			dotA += int32(a[i]) * (int32(xq[i]) - 128)
+			dotB += int32(b[i]) * (int32(xq[i]) - 128)
+			dotC += int32(c[i]) * (int32(xq[i]) - 128)
+		}
+	}
+	return float32(dotA-128*rowSumWA) * scaleX * scaleWA,
+		float32(dotB-128*rowSumWB) * scaleX * scaleWB,
+		float32(dotC-128*rowSumWC) * scaleX * scaleWC
 }
 
 func rowSumQ8AVX2(a []int8) int32 {
+	if len(a) == 0 {
+		return 0
+	}
+	if useVNNI {
+		return rowSumQ8Asm(&a[0], len(a))
+	}
 	var s int32
 	for _, v := range a {
 		s += int32(v)

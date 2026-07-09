@@ -3622,6 +3622,12 @@ func (rt *Runtime) attentionChainedQKV(sc *layerScratch, cache *kvCache, tl *tex
 	if !hasRoPE {
 		return false
 	}
+	// For Q8 weights with the full chain enabled, skip the RMSNorm+QKV chain.
+	// The full Q8 chain (QKV+attention+output+AddRMSNorm in one submit with
+	// device-local buffers) is handled by attentionWithNorm instead.
+	if tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8) {
+		return false
+	}
 	qRows := c.NumAttentionHeads * c.HeadDim
 	kvRows := c.NumKeyValueHeads * c.HeadDim
 	q := sc.q[:qRows]
