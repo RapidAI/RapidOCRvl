@@ -5464,93 +5464,81 @@ ropeFmaDone:
 TEXT ·geluTanhAVX(SB), NOSPLIT, $0-24
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
-
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB geluTanhTail
-
-	VBROADCASTSS geluC<>(SB), Y11
-	VBROADCASTSS geluK<>(SB), Y12
-	VBROADCASTSS geluHalf<>(SB), Y13
-	VBROADCASTSS geluTwo<>(SB), Y14
-	VBROADCASTSS geluOne<>(SB), Y15
-
+	VBROADCASTSS geluC<>(SB), Z11
+	VBROADCASTSS geluK<>(SB), Z12
+	VBROADCASTSS geluHalf<>(SB), Z13
+	VBROADCASTSS geluTwo<>(SB), Z14
+	VBROADCASTSS geluOne<>(SB), Z15
 geluTanhLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB geluTanhReduce
-
-	VMOVUPS (SI), Y0             // Y0 = x
-	VMULPS Y0, Y0, Y1            // Y1 = x^2
-	VMULPS Y0, Y1, Y2            // Y2 = x^3
-	VMULPS gelu2ckLog2e<>(SB), Y2, Y3 // Y3 = 2ckL2e * x^3
-	VMULPS gelu2cLog2e<>(SB), Y0, Y4   // Y4 = 2cL2e * x
-	VADDPS Y3, Y4, Y4            // Y4 = t = 2cL2e*x + 2ckL2e*x^3
-	VROUNDPS $8, Y4, Y5
-	VSUBPS Y5, Y4, Y6
-	VMULPS Y6, Y6, Y4              // Y4 = f^2
-	VMULPS expC1<>(SB), Y6, Y7     // Y7 = c1*f
-	VADDPS expOne<>(SB), Y7, Y7    // Y7 = A = 1 + c1*f
-	VMULPS expC3<>(SB), Y6, Y1     // Y1 = c3*f
-	VADDPS expC2<>(SB), Y1, Y1     // Y1 = B = c2 + c3*f
-	VMULPS expC5<>(SB), Y6, Y2     // Y2 = c5*f
-	VADDPS expC4<>(SB), Y2, Y2     // Y2 = C = c4 + c5*f
-	VMULPS Y4, Y2, Y2              // Y2 = C*f^2
-	VADDPS Y1, Y2, Y2              // Y2 = B2 = B + C*f^2
-	VMULPS Y4, Y2, Y4              // Y4 = f^2 * B2
-	VADDPS Y7, Y4, Y7              // Y7 = poly = A + f^2*B2
-	VCVTPS2DQ Y5, Y5
-	VPADDD expInt127<>(SB), Y5, Y5
-	VPSLLD $23, Y5, Y5
-	VMULPS Y5, Y7, Y8
-	VSUBPS Y15, Y8, Y9
-	VADDPS Y15, Y8, Y1
-	VDIVPS Y1, Y9, Y9
-	VADDPS Y15, Y9, Y9
-	VMULPS Y0, Y9, Y9
-	VMULPS Y13, Y9, Y9
-	VMOVUPS Y9, (SI)
-	ADDQ $32, SI
-	SUBQ $8, CX
+	VMOVUPS (SI), Z0             // Z0 = x
+	VMULPS Z0, Z0, Z1            // Z1 = x^2
+	VMULPS Z0, Z1, Z2            // Z2 = x^3
+	VMULPS gelu2ckLog2e<>(SB), Z2, Z3 // Z3 = 2ckL2e * x^3
+	VMULPS gelu2cLog2e<>(SB), Z0, Z4   // Z4 = 2cL2e * x
+	VADDPS Z3, Z4, Z4            // Z4 = t
+	VRNDSCALEPS $8, Z4, Z5
+	VSUBPS Z5, Z4, Z6
+	VMULPS Z6, Z6, Z4              // Z4 = f^2
+	VMULPS expC1<>(SB), Z6, Z7     // Z7 = c1*f
+	VADDPS expOne<>(SB), Z7, Z7    // Z7 = A = 1 + c1*f
+	VMULPS expC3<>(SB), Z6, Z1     // Z1 = c3*f
+	VADDPS expC2<>(SB), Z1, Z1     // Z1 = B = c2 + c3*f
+	VMULPS expC5<>(SB), Z6, Z2     // Z2 = c5*f
+	VADDPS expC4<>(SB), Z2, Z2     // Z2 = C = c4 + c5*f
+	VMULPS Z4, Z2, Z2              // Z2 = C*f^2
+	VADDPS Z1, Z2, Z2              // Z2 = B2 = B + C*f^2
+	VMULPS Z4, Z2, Z4              // Z4 = f^2 * B2
+	VADDPS Z7, Z4, Z7              // Z7 = poly
+	VCVTPS2DQ Z5, Z5
+	VPADDD expInt127<>(SB), Z5, Z5
+	VPSLLD $23, Z5, Z5
+	VMULPS Z5, Z7, Z8
+	VSUBPS Z15, Z8, Z9
+	VADDPS Z15, Z8, Z1
+	VDIVPS Z1, Z9, Z9
+	VADDPS Z15, Z9, Z9
+	VMULPS Z0, Z9, Z9
+	VMULPS Z13, Z9, Z9
+	VMOVUPS Z9, (SI)
+	ADDQ $64, SI
+	SUBQ $16, CX
 	JMP geluTanhLoop
-
 geluTanhReduce:
 	VZEROUPPER
-
 geluTanhTail:
 	CMPQ CX, $0
 	JE geluTanhDone
-	MOVSS (SI), X0            // X0 = x
-	MOVSS X0, X8            // X8 = x (saved for final result)
-	MOVSS X0, X1            // X1 = x (copy for x^2)
-	MULSS X0, X1         // X1 = x^2 = x*x
-	MULSS X0, X1         // X1 = x^3 = x^2 * x
-	MULSS gelu2ckLog2e<>(SB), X1 // X1 = 2ckL2e * x^3
-	MULSS gelu2cLog2e<>(SB), X0 // X0 = 2cL2e * x (reusing X0)
-	ADDSS X1, X0             // X0 = t = 2cL2e*x + 2ckL2e*x^3
-	ROUNDSS $8, X0, X2       // X2 = n = round(t)
-	SUBSS X2, X0             // X0 = f = t - n
-	// Estrin: poly = A + f2*(B + C*f2), A=1+c1*f, B=c2+c3*f, C=c4+c5*f
-	MOVSS X0, X3            // X3 = f (saved)
-	MULSS X0, X0            // X0 = f2
-	MOVSS X0, X4            // X4 = f2 (saved)
-	// A = 1 + c1*f (use X5, need f from X3 but MULSS overwrites)
-	MOVSS X3, X5            // X5 = f
-	MULSS expC1<>(SB), X5   // X5 = c1*f
-	ADDSS geluOne<>(SB), X5 // X5 = A = 1 + c1*f
-	// B = c2 + c3*f (use X6)
-	MOVSS X3, X6            // X6 = f
-	MULSS expC3<>(SB), X6   // X6 = c3*f
-	ADDSS expC2<>(SB), X6   // X6 = B = c2 + c3*f
-	// C = c4 + c5*f (use X7)
-	MOVSS X3, X7            // X7 = f
-	MULSS expC5<>(SB), X7   // X7 = c5*f
-	ADDSS expC4<>(SB), X7   // X7 = C = c4 + c5*f
-	// B2 = B + C*f2
-	MULSS X4, X7            // X7 = C*f2
-	ADDSS X6, X7            // X7 = B2 = B + C*f2
-	// poly = A + f2*B2
-	MULSS X4, X7            // X7 = f2*B2
-	ADDSS X5, X7            // X7 = poly = A + f2*B2
-	MOVSS X7, X1            // X1 = poly (for subsequent 2^n scaling)
+	MOVSS (SI), X0
+	MOVSS X0, X8
+	MOVSS X0, X1
+	MULSS X0, X1
+	MULSS X0, X1
+	MULSS gelu2ckLog2e<>(SB), X1
+	MULSS gelu2cLog2e<>(SB), X0
+	ADDSS X1, X0
+	ROUNDSS $8, X0, X2
+	SUBSS X2, X0
+	MOVSS X0, X3
+	MULSS X0, X0
+	MOVSS X0, X4
+	MOVSS X3, X5
+	MULSS expC1<>(SB), X5
+	ADDSS geluOne<>(SB), X5
+	MOVSS X3, X6
+	MULSS expC3<>(SB), X6
+	ADDSS expC2<>(SB), X6
+	MOVSS X3, X7
+	MULSS expC5<>(SB), X7
+	ADDSS expC4<>(SB), X7
+	MULSS X4, X7
+	ADDSS X6, X7
+	MULSS X4, X7
+	ADDSS X5, X7
+	MOVSS X7, X1
 	VCVTPS2DQ X2, X2
 	LEAQ expInt127<>(SB), R8
 	VPADDD (R8), X2, X2
@@ -5567,53 +5555,48 @@ geluTanhTail:
 	ADDQ $4, SI
 	DECQ CX
 	JMP geluTanhTail
-
 geluTanhDone:
 	RET
-
-// siluMulInPlaceAVX: gate[i] = SiLU(gate[i]) * up[i] = gate[i]/(1+exp(-gate[i])) * up[i]
-// Args: gate_base+0(FP), gate_len+8(FP), up_base+24(FP)
 TEXT ·siluMulInPlaceAVX(SB), NOSPLIT, $0-48
 	MOVQ gate_base+0(FP), SI
 	MOVQ gate_len+8(FP), CX
 	MOVQ up_base+24(FP), DI
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB siluMulTail
-	VBROADCASTSS geluOne<>(SB), Y3
+	VBROADCASTSS geluOne<>(SB), Z3
 siluMulLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB siluMulReduce
-	VMOVUPS (SI), Y0
-	VMOVUPS (DI), Y1
-	VXORPS Y2, Y2, Y2
-	VSUBPS Y0, Y2, Y2
-	VMULPS expLog2e<>(SB), Y2, Y5
-	VROUNDPS $8, Y5, Y6
-	VSUBPS Y6, Y5, Y7
-	VMULPS Y7, Y7, Y5              // Y5 = f^2
-	VMULPS expC1<>(SB), Y7, Y4     // Y4 = c1*f
-	VADDPS expOne<>(SB), Y4, Y4    // Y4 = A = 1 + c1*f
-	VMULPS expC3<>(SB), Y7, Y2     // Y2 = c3*f
-	VADDPS expC2<>(SB), Y2, Y2     // Y2 = B = c2 + c3*f
-	VMULPS expC5<>(SB), Y7, Y8     // Y8 = c5*f
-	VADDPS expC4<>(SB), Y8, Y8     // Y8 = C = c4 + c5*f
-	VMULPS Y5, Y8, Y8              // Y8 = C*f^2
-	VADDPS Y2, Y8, Y8              // Y8 = B2 = B + C*f^2
-	VMULPS Y5, Y8, Y5              // Y5 = f^2 * B2
-	VADDPS Y4, Y5, Y4              // Y4 = poly = A + f^2*B2
-	VCVTPS2DQ Y6, Y6
-	VPADDD expInt127<>(SB), Y6, Y6
-	VPSLLD $23, Y6, Y6
-	VMULPS Y6, Y4, Y4
-	VADDPS Y3, Y4, Y5
-	VDIVPS Y5, Y0, Y5
-	VMULPS Y1, Y5, Y5
-	VMOVUPS Y5, (SI)
-	ADDQ $32, SI
-	ADDQ $32, DI
-	SUBQ $8, CX
+	VMOVUPS (SI), Z0
+	VMOVUPS (DI), Z1
+	VXORPS Z2, Z2, Z2
+	VSUBPS Z0, Z2, Z2
+	VMULPS expLog2e<>(SB), Z2, Z5
+	VRNDSCALEPS $8, Z5, Z6
+	VSUBPS Z6, Z5, Z7
+	VMULPS Z7, Z7, Z5              // Z5 = f^2
+	VMULPS expC1<>(SB), Z7, Z4     // Z4 = c1*f
+	VADDPS expOne<>(SB), Z4, Z4    // Z4 = A = 1 + c1*f
+	VMULPS expC3<>(SB), Z7, Z2     // Z2 = c3*f
+	VADDPS expC2<>(SB), Z2, Z2     // Z2 = B = c2 + c3*f
+	VMULPS expC5<>(SB), Z7, Z8     // Z8 = c5*f
+	VADDPS expC4<>(SB), Z8, Z8     // Z8 = C = c4 + c5*f
+	VMULPS Z5, Z8, Z8              // Z8 = C*f^2
+	VADDPS Z2, Z8, Z8              // Z8 = B2 = B + C*f^2
+	VMULPS Z5, Z8, Z5              // Z5 = f^2 * B2
+	VADDPS Z4, Z5, Z4              // Z4 = poly = A + f^2*B2
+	VCVTPS2DQ Z6, Z6
+	VPADDD expInt127<>(SB), Z6, Z6
+	VPSLLD $23, Z6, Z6
+	VMULPS Z6, Z4, Z4
+	VADDPS Z3, Z4, Z5
+	VDIVPS Z5, Z0, Z5
+	VMULPS Z1, Z5, Z5
+	VMOVUPS Z5, (SI)
+	ADDQ $64, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
 	JMP siluMulLoop
-
 siluMulReduce:
 	VZEROUPPER
 siluMulTail:
@@ -5627,27 +5610,21 @@ siluMulTail:
 	MULSS expLog2e<>(SB), X3
 	ROUNDSS $8, X3, X4
 	SUBSS X4, X3
-	// Estrin: poly = A + f2*(B + C*f2)
-	MOVSS X3, X5            // X5 = f (saved)
-	MULSS X3, X3            // X3 = f2
-	// A = 1 + c1*f
-	MOVSS X5, X6            // X6 = f
-	MULSS expC1<>(SB), X6   // X6 = c1*f
-	ADDSS geluOne<>(SB), X6 // X6 = A = 1 + c1*f
-	// B = c2 + c3*f
-	MOVSS X5, X7            // X7 = f
-	MULSS expC3<>(SB), X7   // X7 = c3*f
-	ADDSS expC2<>(SB), X7   // X7 = B = c2 + c3*f
-	// C = c4 + c5*f (reuse X5 for f)
-	MULSS expC5<>(SB), X5   // X5 = c5*f
-	ADDSS expC4<>(SB), X5   // X5 = C = c4 + c5*f
-	// B2 = B + C*f2
-	MULSS X3, X5            // X5 = C*f2
-	ADDSS X7, X5            // X5 = B2 = B + C*f2
-	// poly = A + f2*B2
-	MULSS X3, X5            // X5 = f2*B2
-	ADDSS X6, X5            // X5 = poly = A + f2*B2
-	MOVSS X5, X3            // X3 = poly (for 2^n scaling)
+	MOVSS X3, X5
+	MULSS X3, X3
+	MOVSS X5, X6
+	MULSS expC1<>(SB), X6
+	ADDSS geluOne<>(SB), X6
+	MOVSS X5, X7
+	MULSS expC3<>(SB), X7
+	ADDSS expC2<>(SB), X7
+	MULSS expC5<>(SB), X5
+	ADDSS expC4<>(SB), X5
+	MULSS X3, X5
+	ADDSS X7, X5
+	MULSS X3, X5
+	ADDSS X6, X5
+	MOVSS X5, X3
 	VCVTPS2DQ X4, X4
 	LEAQ expInt127<>(SB), R8
 	VPADDD (R8), X4, X4
@@ -5663,9 +5640,6 @@ siluMulTail:
 	JMP siluMulTail
 siluMulDone:
 	RET
-
-// siluMulInPlaceFMA: FMA-accelerated SiLU(u)*v kernel.
-// Broadcasts all constants before the loop and uses VFMADD231PS to fuse mul+add.
 TEXT ·siluMulInPlaceFMA(SB), NOSPLIT, $0-48
 	MOVQ gate_base+0(FP), SI
 	MOVQ gate_len+8(FP), CX
