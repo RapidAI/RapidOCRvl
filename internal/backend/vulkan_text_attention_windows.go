@@ -559,6 +559,11 @@ type vulkanTextAttentionF32WinRunner struct {
 	readbackResidual vkHostBufferWin
 	readbackK      vkHostBufferWin
 	readbackV      vkHostBufferWin
+	// Device-local KV cache persistence (avoids re-uploading full cache)
+	devCacheEpoch    uint64
+	devCacheUploaded int
+	devCacheKVDim    int
+	devCacheMaxLen   int
 	commandRecorded        bool
 	commandKind            int
 	commandCacheLen        int

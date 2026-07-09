@@ -155,16 +155,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	qBytes := uint64(qRows) * 4
 	kvDimBytes := uint64(kvRows) * 4
 	fullCacheBytes := uint64(cacheLen+1) * kvDimBytes
-
-	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devK, fullCacheBytes); err != nil {
-		return fmt.Errorf("ensure device buffer k: %w", err)
-	}
-	devK := attRunner.devK
-
-	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devV, fullCacheBytes); err != nil {
-		return fmt.Errorf("ensure device buffer v: %w", err)
-	}
-	devV := attRunner.devV
+	var devK, devV vkDeviceBufferWin
 
 	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devOut, qBytes); err != nil {
 		return fmt.Errorf("ensure device buffer out: %w", err)
@@ -468,16 +459,58 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 		}
 	}
 
-	// Upload KV cache
-	cacheElems := cacheLen * kvRows
-	if cacheElems > 0 {
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devK, kCache[:cacheElems]); err != nil {
-			return fmt.Errorf("upload kCache: %w", err)
-		}
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devV, vCache[:cacheElems]); err != nil {
-			return fmt.Errorf("upload vCache: %w", err)
-		}
+	// Upload KV cache (incremental: skip if device cache is current)
+	maxCacheLen := cap(kCache) / kvRows
+	if cap(vCache)/kvRows > maxCacheLen {
+		maxCacheLen = cap(vCache) / kvRows
 	}
+	// Pre-allocate device KV cache to max capacity (avoids resize which destroys data)
+	fullMaxBytes := uint64(maxCacheLen) * kvDimBytes
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devK, fullMaxBytes); err != nil {
+		return fmt.Errorf("ensure device buffer k (max): %w", err)
+	}
+	devK = attRunner.devK
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devV, fullMaxBytes); err != nil {
+		return fmt.Errorf("ensure device buffer v (max): %w", err)
+	}
+	devV = attRunner.devV
+
+	// Determine if we need a full cache upload
+	cacheElems := cacheLen * kvRows
+	fullUpload := attRunner.devCacheEpoch != cacheEpoch ||
+		attRunner.devCacheKVDim != kvRows ||
+		attRunner.devCacheMaxLen < maxCacheLen ||
+		attRunner.devCacheUploaded > cacheLen ||
+		attRunner.devCacheUploaded == 0
+
+	if fullUpload {
+		// Full upload: device cache is stale or first use
+		if cacheElems > 0 {
+			if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devK, kCache[:cacheElems]); err != nil {
+				return fmt.Errorf("upload kCache (full): %w", err)
+			}
+			if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devV, vCache[:cacheElems]); err != nil {
+				return fmt.Errorf("upload vCache (full): %w", err)
+			}
+		}
+		attRunner.devCacheUploaded = cacheLen
+	} else if cacheLen > attRunner.devCacheUploaded {
+		// Incremental upload: only the new entries since last call
+		startElem := attRunner.devCacheUploaded * kvRows
+		newElems := (cacheLen - attRunner.devCacheUploaded) * kvRows
+		if newElems > 0 && startElem+newElems <= cacheElems {
+			if err := vk.uploadFloat32Offset(device, cmd, attRunner.memProps, stagingFloat, devK, kCache[startElem:startElem+newElems], uint64(startElem)*4); err != nil {
+				return fmt.Errorf("upload kCache (incremental): %w", err)
+			}
+			if err := vk.uploadFloat32Offset(device, cmd, attRunner.memProps, stagingFloat, devV, vCache[startElem:startElem+newElems], uint64(startElem)*4); err != nil {
+				return fmt.Errorf("upload vCache (incremental): %w", err)
+			}
+		}
+		attRunner.devCacheUploaded = cacheLen
+	}
+	attRunner.devCacheEpoch = cacheEpoch
+	attRunner.devCacheKVDim = kvRows
+	attRunner.devCacheMaxLen = maxCacheLen
 
 	// === Compute phase ===
 

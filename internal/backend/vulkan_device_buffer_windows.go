@@ -229,6 +229,51 @@ func (v *vulkanWin) uploadBytesToDevice(device, cmd uintptr, memProps vkPhysical
 func (v *vulkanWin) uploadFloat32ToDevice(device, cmd uintptr, memProps vkPhysicalDeviceMemoryProperties, hostBuf *vkHostBufferWin, deviceBuf vkDeviceBufferWin, data []float32) error {
 	return v.uploadBytesToDevice(device, cmd, memProps, hostBuf, deviceBuf, unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4))
 }
+// uploadBytesOffset copies byte data to a device-local buffer at a specific
+// dstOffset via a staging buffer, recorded into the given command buffer.
+func (v *vulkanWin) uploadBytesOffset(device, cmd uintptr, memProps vkPhysicalDeviceMemoryProperties, hostBuf *vkHostBufferWin, deviceBuf vkDeviceBufferWin, data []byte, dstOffset uint64) error {
+	byteLen := uint64(len(data))
+	if byteLen == 0 {
+		return nil
+	}
+	if hostBuf.buffer == 0 || hostBuf.size < byteLen {
+		if hostBuf.buffer != 0 {
+			v.destroyBuffer(device, *hostBuf)
+		}
+		next, err := v.newHostBuffer(device, memProps, byteLen)
+		if err != nil {
+			return err
+		}
+		*hostBuf = next
+	}
+	dst := unsafe.Slice((*byte)(hostBuf.mapped), int(hostBuf.size))
+	copy(dst[:len(data)], data)
+	hostBarrier := vkMemoryBarrier{
+		SType:         vkStructureTypeMemoryBarrier,
+		SrcAccessMask: 0,
+		DstAccessMask: vkAccessTransferReadBit,
+	}
+	v.callVoid(v.cmdPipelineBarrier, cmd,
+		vkPipelineStageHostBit, vkPipelineStageTransferBit,
+		0, 1, uintptr(unsafe.Pointer(&hostBarrier)), 0, 0, 0, 0)
+	region := vkBufferCopy{SrcOffset: 0, DstOffset: dstOffset, Size: byteLen}
+	v.callVoid(v.cmdCopyBuffer, cmd, hostBuf.buffer, deviceBuf.buffer, 1, uintptr(unsafe.Pointer(&region)))
+	devBarrier := vkMemoryBarrier{
+		SType:         vkStructureTypeMemoryBarrier,
+		SrcAccessMask: vkAccessTransferWriteBit,
+		DstAccessMask: vkAccessShaderReadBit | vkAccessShaderWriteBit,
+	}
+	v.callVoid(v.cmdPipelineBarrier, cmd,
+		vkPipelineStageTransferBit, vkPipelineStageComputeShaderBit,
+		0, 1, uintptr(unsafe.Pointer(&devBarrier)), 0, 0, 0, 0)
+	return nil
+}
+
+// uploadFloat32Offset copies float32 data to a device-local buffer at a specific
+// dstOffset (in bytes) via staging, recorded into the given command buffer.
+func (v *vulkanWin) uploadFloat32Offset(device, cmd uintptr, memProps vkPhysicalDeviceMemoryProperties, hostBuf *vkHostBufferWin, deviceBuf vkDeviceBufferWin, data []float32, dstOffset uint64) error {
+	return v.uploadBytesOffset(device, cmd, memProps, hostBuf, deviceBuf, unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4), dstOffset)
+}
 
 // readbackFromDevice copies data from a device-local buffer to a host-visible
 // buffer via vkCmdCopyBuffer recorded into the given command buffer.
