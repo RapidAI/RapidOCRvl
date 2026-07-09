@@ -23,10 +23,11 @@ func MatVecArgmaxQ8(x []float32, q *Q8Matrix) (int, float32) {
 		bestToken := 0
 		bestScore := float32(0)
 		if useVNNI {
+			scratch := getInt32Scratch(q.Rows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&data[0], &xq[0], &scratch[0], q.Rows, cols)
 			for r := 0; r < q.Rows; r++ {
-				base := r * cols
-				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-				score := float32(dot-128*rowSum[r]) * scaleX * scale[r]
+				score := float32(scratch[r]-128*rowSum[r]) * scaleX * scale[r]
 				if r == 0 || score > bestScore {
 					bestToken = r
 					bestScore = score
@@ -80,10 +81,11 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 			bestToken := 0
 			bestScore := float32(0)
 			if useVNNI {
+				scratch := getInt32Scratch(q.Rows)
+				defer putInt32Scratch(scratch)
+				dotQ8VNNICoreMultiRowZMM(&data[0], &xq[0], &scratch[0], q.Rows, cols)
 				for r := 0; r < q.Rows; r++ {
-					base := r * cols
-					dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-					score := float32(dot-128*rowSum[r]) * scaleX * scale[r]
+					score := float32(scratch[r]-128*rowSum[r]) * scaleX * scale[r]
 					if r == 0 || score > bestScore {
 						bestToken = r
 						bestScore = score
@@ -124,12 +126,14 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 				bestToken := start
 				bestScore := float32(0)
 				if useVNNI {
-					for r := start; r < end; r++ {
-						base := r * cols
-						dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-						score := float32(dot-128*rowSum[r]) * scaleX * scale[r]
-						if r == start || score > bestScore {
-							bestToken = r
+					nRows := end - start
+					scratch := getInt32Scratch(nRows)
+					defer putInt32Scratch(scratch)
+					dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
+					for r := 0; r < nRows; r++ {
+						score := float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
+						if r == 0 || score > bestScore {
+							bestToken = start + r
 							bestScore = score
 						}
 					}
