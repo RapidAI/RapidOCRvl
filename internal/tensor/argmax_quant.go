@@ -85,14 +85,7 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 				scratch := getInt32Scratch(q.Rows)
 				defer putInt32Scratch(scratch)
 				dotQ8VNNICoreMultiRowZMM(&data[0], &xq[0], &scratch[0], q.Rows, cols)
-				for r := 0; r < q.Rows; r++ {
-					score := float32(scratch[r]-128*rowSum[r]) * scaleX * scale[r]
-					if r == 0 || score > bestScore {
-						bestToken = r
-						bestScore = score
-					}
-				}
-				return bestToken, bestScore
+				return argmaxQ8VNNI(&scratch[0], &rowSum[0], &scale[0], q.Rows, scaleX)
 			}
 			for r := 0; r < q.Rows; r++ {
 				base := r * q.Cols
@@ -131,13 +124,9 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 					scratch := getInt32Scratch(nRows)
 					defer putInt32Scratch(scratch)
 					dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
-					for r := 0; r < nRows; r++ {
-						score := float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
-						if r == 0 || score > bestScore {
-							bestToken = start + r
-							bestScore = score
-						}
-					}
+					idx, val := argmaxQ8VNNI(&scratch[0], &rowSum[start], &scale[start], nRows, scaleX)
+					bestToken = start + idx
+					bestScore = val
 				} else {
 					for r := start; r < end; r++ {
 						base := r * q.Cols

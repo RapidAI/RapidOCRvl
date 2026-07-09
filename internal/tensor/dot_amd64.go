@@ -125,6 +125,11 @@ func finalizeDotQ8TripletVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, out
 
 //go:noescape
 func addBias3FMA(outA *float32, biasA *float32, outB *float32, biasB *float32, outC *float32, biasC *float32, n int)
+
+
+//go:noescape
+func argmaxQ8VNNI(dots *int32, rowSum *int32, scale *float32, n int, scaleX float32) (int, float32)
+
 //go:noescape
 func finalizeAddSumSquaresInPlaceVNNI(dots *int32, rowSum *int32, scale *float32, out *float32, residual *float32, n int, scaleX float32) float32
 

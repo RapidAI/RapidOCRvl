@@ -1568,3 +1568,174 @@ finTriTail:
 
 finTriRet:
 	RET
+
+// argmaxQ8VNNI(dots *int32, rowSum *int32, scale *float32, n int, scaleX float32) (int, float32)
+// Computes score[i] = float32(dots[i]-128*rowSum[i]) * scaleX * scale[i]
+// Returns (argmax_index, max_score).
+// Strategy: process 8 elements at a time. Track 8 candidate (value, index) pairs.
+// At the end, scalar-reduce the 8 candidates to find the overall best.
+TEXT ·argmaxQ8VNNI(SB), NOSPLIT, $0-48
+	MOVQ dots_base+0(FP), SI
+	MOVQ rowSum_base+8(FP), DI
+	MOVQ scale_base+16(FP), DX
+	MOVQ n+24(FP), R9
+	VBROADCASTSS scaleX+32(FP), Y1
+	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+	VXORPS Y3, Y3, Y3                  // best values = 0 (8 lanes)
+	VXORPS Y4, Y4, Y4                  // best indices = 0 (8 lanes, int32)
+	MOVQ $0, R10                       // global offset
+
+	CMPQ R9, $8
+	JB argmaxTail
+
+argmaxLoop:
+	CMPQ R9, $8
+	JB argmaxReduce
+	// Compute scores for 8 elements
+	VMOVDQU (SI), Y0
+	VMOVDQU (DI), Y5
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y5, Y5
+	VMULPS Y2, Y5, Y5        // 128 * rowSum
+	VSUBPS Y5, Y0, Y0        // dot - 128*rowSum
+	VMOVUPS (DX), Y6         // scale
+	VMULPS Y1, Y0, Y0        // * scaleX
+	VMULPS Y6, Y0, Y0        // Y0 = scores
+
+	// Build index vector: [R10, R10+1, ..., R10+7]
+	MOVQ R10, AX
+	MOVD AX, X3
+	VPBROADCASTD X3, Y7      // broadcast offset
+	VPADDD argmaxIdxVec<>(SB), Y7, Y7  // [offset+0, ..., offset+7]
+
+	// Where score > best: update best value and index
+	VCMPPS $1, Y0, Y3, Y8      // mask: score > best
+	VANDPS Y8, Y0, Y9      // new values where mask
+	VPANDN Y8, Y3, Y10     // old values where !mask
+	VORPS Y9, Y10, Y3      // best values updated
+	VANDPS Y8, Y7, Y9      // new indices where mask
+	VPANDN Y8, Y4, Y10     // old indices where !mask
+	VORPS Y9, Y10, Y4      // best indices updated
+
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $8, R10
+	SUBQ $8, R9
+	JMP argmaxLoop
+
+argmaxReduce:
+	// Y3 = 8 best values, Y4 = 8 best indices
+	// Scalar reduction: extract and compare
+	VMOVD X4, R8             // index[0]
+	MOVSS X3, X0             // value[0] as scalar
+	
+	VPSHUFD $0x55, X4, X5    // index[1]
+	VPSHUFD $0x55, X3, X1    // value[1]
+	UCOMISS X0, X1
+	JAE reduce2
+	MOVSS X1, X0
+	MOVQ R8, AX
+	MOVQ X5, R8
+	
+reduce2:
+	VPSHUFD $0xAA, X4, X5    // index[2]
+	VPSHUFD $0xAA, X3, X1    // value[2]
+	UCOMISS X0, X1
+	JAE reduce3
+	MOVSS X1, X0
+	MOVQ X5, R8
+	
+reduce3:
+	VPSHUFD $0xFF, X4, X5    // index[3]
+	VPSHUFD $0xFF, X3, X1    // value[3]
+	UCOMISS X0, X1
+	JAE reduce4
+	MOVSS X1, X0
+	MOVQ X5, R8
+	
+reduce4:
+	VEXTRACTI128 $1, Y4, X4  // upper half indices
+	VEXTRACTF128 $1, Y3, X3  // upper half values
+	MOVSS X3, X1             // value[4]
+	UCOMISS X0, X1
+	JAE reduce5
+	MOVSS X1, X0
+	MOVD X4, R8
+	
+reduce5:
+	VPSHUFD $0x55, X4, X5
+	VPSHUFD $0x55, X3, X1
+	UCOMISS X0, X1
+	JAE reduce6
+	MOVSS X1, X0
+	MOVQ X5, R8
+	
+reduce6:
+	VPSHUFD $0xAA, X4, X5
+	VPSHUFD $0xAA, X3, X1
+	UCOMISS X0, X1
+	JAE reduce7
+	MOVSS X1, X0
+	MOVQ X5, R8
+	
+reduce7:
+	VPSHUFD $0xFF, X4, X5
+	VPSHUFD $0xFF, X3, X1
+	UCOMISS X0, X1
+	JAE reduceDone
+	MOVSS X1, X0
+	MOVQ X5, R8
+	
+reduceDone:
+	MOVQ R8, ret_idx+40(FP)
+	MOVSS X0, ret_val+48(FP)
+	VZEROUPPER
+	RET
+
+argmaxTail:
+	CMPQ R9, $0
+	JE argmaxTailDone
+	// Scalar tail: compare each element against best X3[0]
+	MOVL (SI), AX
+	MOVL (DI), BP
+	IMULL $128, BP
+	SUBL BP, AX
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+32(FP), X0, X0
+	MOVSS (DX), X1
+	VMULSS X1, X0, X0        // X0 = score
+	MOVSS X3, X1             // X1 = best so far
+	UCOMISS X1, X0
+	JAE tailNext             // if score <= best, skip
+	MOVSS X0, X3             // update best value
+	// Update best index: need to store R10 as int32 into X4
+	MOVQ R10, AX
+	MOVD AX, X4              // X4 = index (broadcast to lane 0)
+	
+tailNext:
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	INCQ R10
+	DECQ R9
+	JMP argmaxTail
+
+argmaxTailDone:
+	MOVSS X3, X0
+	MOVD X4, AX
+	MOVQ AX, ret_idx+40(FP)
+	MOVSS X0, ret_val+48(FP)
+	VZEROUPPER
+	RET
+
+DATA argmaxIdxVec<>+0(SB)/4, $0x00000000
+DATA argmaxIdxVec<>+4(SB)/4, $0x00000001
+DATA argmaxIdxVec<>+8(SB)/4, $0x00000002
+DATA argmaxIdxVec<>+12(SB)/4, $0x00000003
+DATA argmaxIdxVec<>+16(SB)/4, $0x00000004
+DATA argmaxIdxVec<>+20(SB)/4, $0x00000005
+DATA argmaxIdxVec<>+24(SB)/4, $0x00000006
+DATA argmaxIdxVec<>+28(SB)/4, $0x00000007
+GLOBL argmaxIdxVec<>(SB), RODATA, $32
