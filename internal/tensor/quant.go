@@ -442,7 +442,8 @@ func roundToInt(x float32) int {
 
 func MatVecQ8(out, x []float32, q *Q8Matrix) {
 	matVecQ8Rows(out, x, q, q.Rows)
-}
+}
+
 
 // MatVecQ8Plain computes out = q * x using the non-VNNI path (int8 * float32 dot).
 // This matches the GPU shader's computation method.
@@ -1193,11 +1194,14 @@ func matVecQ8Serial(out, x []float32, q *Q8Matrix, start, end int) {
 		rowSum := q.RowSum
 		cols := q.Cols
 		if useVNNI {
-			// Inline the VNNI dot product to avoid per-row function call overhead
-			for r := start; r < end; r++ {
-				base := r * cols
-				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-				out[r] = float32(dot-128*rowSum[r]) * scaleX * scale[r]
+			nRows := end - start
+			// Use multi-row asm core: one asm call for all rows, eliminating
+			// per-row function call + VZEROUPPER overhead.
+			scratch := getInt32Scratch(nRows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				out[start+r] = float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
 			}
 			return
 		}
@@ -1893,6 +1897,26 @@ func getVNNIScratch(n int) []uint8 {
 func putVNNIScratch(buf []uint8) {
 	select {
 	case vnniScratchPool <- buf:
+	default:
+	}
+}
+
+var int32ScratchPool = make(chan []int32, 32)
+
+func getInt32Scratch(n int) []int32 {
+	select {
+	case buf := <-int32ScratchPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]int32, n)
+}
+
+func putInt32Scratch(buf []int32) {
+	select {
+	case int32ScratchPool <- buf:
 	default:
 	}
 }

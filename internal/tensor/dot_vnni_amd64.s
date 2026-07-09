@@ -624,3 +624,136 @@ zmmCoreTailLoop:
 zmmCoreTailDone:
 	MOVL AX, ret+24(FP)
 	RET
+// dotQ8VNNICoreMultiRowZMM(a *int8, xq *uint8, out *int32, rows int, cols int)
+// Processes multiple rows in a single asm call. For each row, computes
+// sum(a[row[i]] * xq[i]) using VPDPBUSD and writes raw int32 to out[row].
+// The caller applies the -128*rowSum offset and scale correction.
+TEXT ·dotQ8VNNICoreMultiRowZMM(SB), NOSPLIT, $0-40
+	MOVQ a+0(FP), SI       // weight pointer (advances per row)
+	MOVQ xq+8(FP), DI     // input quant pointer (same for all rows)
+	MOVQ out+16(FP), DX    // output int32 array
+	MOVQ rows+24(FP), R9   // number of rows
+	MOVQ cols+32(FP), R10  // columns per row
+
+mrLoop:
+	TESTQ R9, R9
+	JZ mrDone
+
+	// Clear 8 accumulators
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+	VPXORD Z4, Z4, Z4
+	VPXORD Z5, Z5, Z5
+	VPXORD Z6, Z6, Z6
+	VPXORD Z7, Z7, Z7
+
+	MOVQ R10, R8           // R8 = remaining cols for this row
+	MOVQ DI, R11           // save xq start for this row
+
+mrRowLoop:
+	CMPQ R8, $512
+	JB mrTry256
+	// Process 512 elements: 8 x 64
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VMOVDQU64 128(DI), Z10
+	VPDPBUSD 128(SI), Z10, Z2
+	VMOVDQU64 192(DI), Z11
+	VPDPBUSD 192(SI), Z11, Z3
+	VMOVDQU64 256(DI), Z12
+	VPDPBUSD 256(SI), Z12, Z4
+	VMOVDQU64 320(DI), Z13
+	VPDPBUSD 320(SI), Z13, Z5
+	VMOVDQU64 384(DI), Z14
+	VPDPBUSD 384(SI), Z14, Z6
+	VMOVDQU64 448(DI), Z15
+	VPDPBUSD 448(SI), Z15, Z7
+	ADDQ $512, SI
+	ADDQ $512, DI
+	SUBQ $512, R8
+	JMP mrRowLoop
+
+mrTry256:
+	CMPQ R8, $256
+	JB mrTry128
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VMOVDQU64 128(DI), Z10
+	VPDPBUSD 128(SI), Z10, Z2
+	VMOVDQU64 192(DI), Z11
+	VPDPBUSD 192(SI), Z11, Z3
+	ADDQ $256, SI
+	ADDQ $256, DI
+	SUBQ $256, R8
+	JMP mrRowLoop
+
+mrTry128:
+	CMPQ R8, $128
+	JB mrTry64
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	ADDQ $128, SI
+	ADDQ $128, DI
+	SUBQ $128, R8
+	JMP mrRowLoop
+
+mrTry64:
+	CMPQ R8, $64
+	JB mrReduce
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	ADDQ $64, SI
+	ADDQ $64, DI
+	SUBQ $64, R8
+	JMP mrRowLoop
+
+mrReduce:
+	// Reduce Z0-Z7 to a single int32 in AX
+	VPADDD Z1, Z0, Z0
+	VPADDD Z3, Z2, Z2
+	VPADDD Z5, Z4, Z4
+	VPADDD Z7, Z6, Z6
+	VPADDD Z2, Z0, Z0
+	VPADDD Z6, Z4, Z4
+	VPADDD Z4, Z0, Z0
+	VEXTRACTI64X4 $1, Z0, Y1
+	VPADDD Y1, Y0, Y0
+	VEXTRACTI128 $1, Y0, X2
+	VPADDD X2, X0, X0
+	VPSHUFD $0x4E, X0, X1
+	VPADDD X1, X0, X0
+	VPSHUFD $0xB1, X0, X1
+	VPADDD X1, X0, X0
+	VMOVD X0, AX
+
+	// Handle tail (cols not multiple of 512/256/128/64)
+mrTail:
+	TESTQ R8, R8
+	JZ mrStore
+	MOVBQSX (SI), R12
+	MOVBQZX (DI), R13
+	IMULL R12, R13
+	ADDL R13, AX
+	INCQ SI
+	INCQ DI
+	DECQ R8
+	JMP mrTail
+
+mrStore:
+	MOVL AX, (DX)
+	ADDQ $4, DX             // advance output pointer
+	MOVQ R11, DI            // reset xq pointer for next row
+	DECQ R9                 // one fewer row
+	JMP mrLoop
+
+mrDone:
+	VZEROUPPER
+	RET
