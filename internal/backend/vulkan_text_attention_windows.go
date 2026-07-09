@@ -552,6 +552,13 @@ type vulkanTextAttentionF32WinRunner struct {
 	devFinal    vkDeviceBufferWin
 	devResidual vkDeviceBufferWin
 	devNorm     vkDeviceBufferWin
+	// Persistent staging/readback host buffers (reused across calls)
+	stagingFloat   vkHostBufferWin
+	stagingBytes   vkHostBufferWin
+	readbackNorm   vkHostBufferWin
+	readbackResidual vkHostBufferWin
+	readbackK      vkHostBufferWin
+	readbackV      vkHostBufferWin
 	commandRecorded        bool
 	commandKind            int
 	commandCacheLen        int

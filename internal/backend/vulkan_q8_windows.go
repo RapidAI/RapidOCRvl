@@ -908,6 +908,13 @@ type vulkanFusedMatVec3Q8WinRunner struct {
 	devLn1W   vkDeviceBufferWin
 	devCos    vkDeviceBufferWin
 	devSin    vkDeviceBufferWin
+	// Persistent staging/readback host buffers (reused across calls)
+	stagingFloat   vkHostBufferWin
+	stagingBytes   vkHostBufferWin
+	readbackNorm   vkHostBufferWin
+	readbackResidual vkHostBufferWin
+	readbackK      vkHostBufferWin
+	readbackV      vkHostBufferWin
 	mu          sync.Mutex
 }
 
@@ -1646,6 +1653,11 @@ type vulkanSwiGLUDownQ8WinRunner struct {
 	devResidual vkDeviceBufferWin
 	devNorm    vkDeviceBufferWin
 	devX       vkDeviceBufferWin
+	// Persistent staging/readback host buffers (reused across calls)
+	stagingFloat   vkHostBufferWin
+	stagingBytes   vkHostBufferWin
+	readbackNorm   vkHostBufferWin
+	readbackResidual vkHostBufferWin
 	sharedDevice bool
 	mu          sync.Mutex
 }

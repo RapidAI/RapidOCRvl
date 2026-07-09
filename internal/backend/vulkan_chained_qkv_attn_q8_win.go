@@ -283,12 +283,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	if fullCacheBytes > maxFloat32Bytes {
 		maxFloat32Bytes = fullCacheBytes
 	}
-	var stagingFloat vkHostBufferWin
-	defer func() {
-		if stagingFloat.buffer != 0 {
-			vk.destroyBuffer(device, stagingFloat)
-		}
-	}()
+	stagingFloat := &qkvRunner.stagingFloat
 
 	maxByteBytes := aBytes
 	if bBytes > maxByteBytes {
@@ -300,38 +295,13 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	if wDataBytes > maxByteBytes {
 		maxByteBytes = wDataBytes
 	}
-	var stagingBytes vkHostBufferWin
-	defer func() {
-		if stagingBytes.buffer != 0 {
-			vk.destroyBuffer(device, stagingBytes)
-		}
-	}()
+	stagingBytes := &qkvRunner.stagingBytes
 
 	// Host-visible readback buffers
-	var readbackNorm vkHostBufferWin
-	defer func() {
-		if readbackNorm.buffer != 0 {
-			vk.destroyBuffer(device, readbackNorm)
-		}
-	}()
-	var readbackResidual vkHostBufferWin
-	defer func() {
-		if readbackResidual.buffer != 0 {
-			vk.destroyBuffer(device, readbackResidual)
-		}
-	}()
-	var readbackK vkHostBufferWin
-	defer func() {
-		if readbackK.buffer != 0 {
-			vk.destroyBuffer(device, readbackK)
-		}
-	}()
-	var readbackV vkHostBufferWin
-	defer func() {
-		if readbackV.buffer != 0 {
-			vk.destroyBuffer(device, readbackV)
-		}
-	}()
+	readbackNorm := &attRunner.readbackNorm
+	readbackResidual := &attRunner.readbackResidual
+	readbackK := &attRunner.readbackK
+	readbackV := &attRunner.readbackV
 
 	// --- Descriptor pools ---
 	poolSize1 := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: uint32(qkvRunner.descriptorCount)}
@@ -426,7 +396,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 
 	// === Upload phase ===
 	// Upload raw hidden vector (pre-RMSNorm input)
-	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devX, rawInput[:hidden]); err != nil {
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devX, rawInput[:hidden]); err != nil {
 		return fmt.Errorf("upload rawInput: %w", err)
 	}
 	// Upload ln1 weight for RMSNorm (cached)
@@ -435,65 +405,65 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 		return fmt.Errorf("cached device buffer ln1Weight: %w", err)
 	}
 	if ln1Upload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devLn1Weight, ln1Weight[:hidden]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devLn1Weight, ln1Weight[:hidden]); err != nil {
 			return fmt.Errorf("upload ln1Weight: %w", err)
 		}
 	}
 	if cosUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devCos, cosTable[:half]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devCos, cosTable[:half]); err != nil {
 			return fmt.Errorf("upload cos: %w", err)
 		}
 	}
 	if sinUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devSin, sinTable[:half]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devSin, sinTable[:half]); err != nil {
 			return fmt.Errorf("upload sin: %w", err)
 		}
 	}
-	if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devResidual, residual[:qRows]); err != nil {
+	if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devResidual, residual[:qRows]); err != nil {
 		return fmt.Errorf("upload residual: %w", err)
 	}
 	if normWeightUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devNormWeight, normWeight[:qRows]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devNormWeight, normWeight[:qRows]); err != nil {
 			return fmt.Errorf("upload normWeight: %w", err)
 		}
 	}
 	if aScaleUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devAScale, a.Scale[:qRows]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devAScale, a.Scale[:qRows]); err != nil {
 			return fmt.Errorf("upload aScale: %w", err)
 		}
 	}
 	if bScaleUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devBScale, b.Scale[:kvRows]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devBScale, b.Scale[:kvRows]); err != nil {
 			return fmt.Errorf("upload bScale: %w", err)
 		}
 	}
 	if cScaleUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devCScale, c.Scale[:kvRows]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devCScale, c.Scale[:kvRows]); err != nil {
 			return fmt.Errorf("upload cScale: %w", err)
 		}
 	}
 	if wScaleUpload {
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devWScale, w.Scale[:qRows]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devWScale, w.Scale[:qRows]); err != nil {
 			return fmt.Errorf("upload wScale: %w", err)
 		}
 	}
 	if aDataUpload {
-		if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, &stagingBytes, devAData, unsafe.Slice((*byte)(unsafe.Pointer(&a.Data[0])), aLen)); err != nil {
+		if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, stagingBytes, devAData, unsafe.Slice((*byte)(unsafe.Pointer(&a.Data[0])), aLen)); err != nil {
 			return fmt.Errorf("upload aData: %w", err)
 		}
 	}
 	if bDataUpload {
-		if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, &stagingBytes, devBData, unsafe.Slice((*byte)(unsafe.Pointer(&b.Data[0])), bLen)); err != nil {
+		if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, stagingBytes, devBData, unsafe.Slice((*byte)(unsafe.Pointer(&b.Data[0])), bLen)); err != nil {
 			return fmt.Errorf("upload bData: %w", err)
 		}
 	}
 	if cDataUpload {
-		if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, &stagingBytes, devCData, unsafe.Slice((*byte)(unsafe.Pointer(&c.Data[0])), cLen)); err != nil {
+		if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, stagingBytes, devCData, unsafe.Slice((*byte)(unsafe.Pointer(&c.Data[0])), cLen)); err != nil {
 			return fmt.Errorf("upload cData: %w", err)
 		}
 	}
 	if wDataUpload {
-		if err := vk.uploadBytesToDevice(device, cmd, attRunner.memProps, &stagingBytes, devWData, unsafe.Slice((*byte)(unsafe.Pointer(&w.Data[0])), wDataLen)); err != nil {
+		if err := vk.uploadBytesToDevice(device, cmd, attRunner.memProps, stagingBytes, devWData, unsafe.Slice((*byte)(unsafe.Pointer(&w.Data[0])), wDataLen)); err != nil {
 			return fmt.Errorf("upload wData: %w", err)
 		}
 	}
@@ -501,10 +471,10 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	// Upload KV cache
 	cacheElems := cacheLen * kvRows
 	if cacheElems > 0 {
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devK, kCache[:cacheElems]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devK, kCache[:cacheElems]); err != nil {
 			return fmt.Errorf("upload kCache: %w", err)
 		}
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devV, vCache[:cacheElems]); err != nil {
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devV, vCache[:cacheElems]); err != nil {
 			return fmt.Errorf("upload vCache: %w", err)
 		}
 	}
@@ -610,25 +580,25 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	vk.callVoid(vk.cmdDispatch, cmd, 1, 1, 1)
 
 	// === Readback phase ===
-	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackNorm, qBytes); err != nil {
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackNorm, qBytes); err != nil {
 		return fmt.Errorf("readback norm buffer: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devNorm, &readbackNorm, qBytes)
+	vk.readbackFromDevice(cmd, devNorm, readbackNorm, qBytes)
 
-	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackResidual, qBytes); err != nil {
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackResidual, qBytes); err != nil {
 		return fmt.Errorf("readback residual buffer: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devResidual, &readbackResidual, qBytes)
+	vk.readbackFromDevice(cmd, devResidual, readbackResidual, qBytes)
 
-	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackK, uint64(kvRows)*4); err != nil {
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackK, uint64(kvRows)*4); err != nil {
 		return fmt.Errorf("readback k buffer: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devOutB, &readbackK, uint64(kvRows)*4)
+	vk.readbackFromDevice(cmd, devOutB, readbackK, uint64(kvRows)*4)
 
-	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackV, uint64(kvRows)*4); err != nil {
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackV, uint64(kvRows)*4); err != nil {
 		return fmt.Errorf("readback v buffer: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devOutC, &readbackV, uint64(kvRows)*4)
+	vk.readbackFromDevice(cmd, devOutC, readbackV, uint64(kvRows)*4)
 
 	if res := vk.call(vk.endCommandBuffer, cmd); res != vkSuccess {
 		return fmt.Errorf("vkEndCommandBuffer chained q8: %d", int32(res))
@@ -649,14 +619,14 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 		return fmt.Errorf("vkWaitForFences chained q8: %d", int32(res))
 	}
 
-	if err := vk.readFloat32Into(device, readbackNorm, normOut[:qRows]); err != nil {
+	if err := vk.readFloat32Into(device, *readbackNorm, normOut[:qRows]); err != nil {
 		return err
 	}
-	if err := vk.readFloat32Into(device, readbackResidual, residual[:qRows]); err != nil {
+	if err := vk.readFloat32Into(device, *readbackResidual, residual[:qRows]); err != nil {
 		return err
 	}
-	if err := vk.readFloat32Into(device, readbackK, outK[:kvRows]); err != nil {
+	if err := vk.readFloat32Into(device, *readbackK, outK[:kvRows]); err != nil {
 		return err
 	}
-	return vk.readFloat32Into(device, readbackV, outV[:kvRows])
+	return vk.readFloat32Into(device, *readbackV, outV[:kvRows])
 }
