@@ -57,8 +57,11 @@ func dotF32PairFMA(a, b, x []float32) (ret0, ret1 float32)
 func dotF32TripletFMA(a, b, c, x []float32) (ret0, ret1, ret2 float32)
 func dotF32QuadFMA(a, b, c, d, x []float32) (ret0, ret1, ret2, ret3 float32)
 func dotQ8FMA(a []int8, b []float32) float32
-func dotQ8PairFMA(a, b []int8, x []float32) (ret0, ret1 float32)
-func dotQ8TripletFMA(a, b, c []int8, x []float32) (ret0, ret1, ret2 float32)
+// dotQ8PairFMA and dotQ8TripletFMA redirect to AVX2 versions.
+// The original FMA assembly had a bug (treated float32 x as int8),
+// so we use the correct AVX2 implementation instead.
+func dotQ8PairFMA(a, b []int8, x []float32) (float32, float32) { return dotQ8PairAVX2(a, b, x) }
+func dotQ8TripletFMA(a, b, c []int8, x []float32) (float32, float32, float32) { return dotQ8TripletAVX2(a, b, c, x) }
 func dotQ4FMA(a []byte, b []float32, cols int) float32
 func dotQ4PairFMA(a, b []byte, x []float32, cols int) (ret0, ret1 float32)
 func dotQ4TripletFMA(a, b, c []byte, x []float32, cols int) (ret0, ret1, ret2 float32)
