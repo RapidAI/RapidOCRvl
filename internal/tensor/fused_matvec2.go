@@ -421,23 +421,19 @@ func matVecQ8InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Mat
 	cols := q.Cols
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
+	scratch := getInt32Scratch(end - start)
+	defer putInt32Scratch(scratch)
+	// Process in chunks of 8 rows using multi-row asm
 	for ; i+7 < end; i += 8 {
-		b0 := i * cols
-		b1 := (i + 1) * cols
-		b2 := (i + 2) * cols
-		b3 := (i + 3) * cols
-		b4 := (i + 4) * cols
-		b5 := (i + 5) * cols
-		b6 := (i + 6) * cols
-		b7 := (i + 7) * cols
-		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
-		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
-		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
-		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
-		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
-		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
-		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
-		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		dotQ8VNNICoreMultiRowZMM(&data[i*cols], &xq[0], &scratch[0], 8, cols)
+		v0 := residual[i] + float32(scratch[0]-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(scratch[1]-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(scratch[2]-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(scratch[3]-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(scratch[4]-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(scratch[5]-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(scratch[6]-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(scratch[7]-128*rowSum[i+7])*scaleX*scale[i+7]
 		residual[i] = v0
 		residual[i+1] = v1
 		residual[i+2] = v2
@@ -465,7 +461,8 @@ func matVecQ8InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Mat
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
-		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		dot := dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)
+		v := residual[i] + float32(dot-128*rowSum[i])*scaleX*scale[i]
 		residual[i] = v
 		out[i] = v
 		ss += v * v
@@ -589,23 +586,18 @@ func matVecQ8AddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Matrix, st
 	cols := q.Cols
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
+	scratch := getInt32Scratch(end - start)
+	defer putInt32Scratch(scratch)
 	for ; i+7 < end; i += 8 {
-		b0 := i * cols
-		b1 := (i + 1) * cols
-		b2 := (i + 2) * cols
-		b3 := (i + 3) * cols
-		b4 := (i + 4) * cols
-		b5 := (i + 5) * cols
-		b6 := (i + 6) * cols
-		b7 := (i + 7) * cols
-		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
-		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
-		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
-		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
-		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
-		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
-		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
-		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		dotQ8VNNICoreMultiRowZMM(&data[i*cols], &xq[0], &scratch[0], 8, cols)
+		v0 := residual[i] + float32(scratch[0]-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(scratch[1]-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(scratch[2]-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(scratch[3]-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(scratch[4]-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(scratch[5]-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(scratch[6]-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(scratch[7]-128*rowSum[i+7])*scaleX*scale[i+7]
 		out[i] = v0
 		out[i+1] = v1
 		out[i+2] = v2
@@ -625,7 +617,8 @@ func matVecQ8AddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Matrix, st
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
-		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		dot := dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)
+		v := residual[i] + float32(dot-128*rowSum[i])*scaleX*scale[i]
 		out[i] = v
 		ss += v * v
 	}
@@ -827,23 +820,19 @@ func matVecQ4InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Mat
 	cols := q.Cols
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
+	scratch := getInt32Scratch(end - start)
+	defer putInt32Scratch(scratch)
+	// Process in chunks of 8 rows using multi-row asm
 	for ; i+7 < end; i += 8 {
-		b0 := i * cols
-		b1 := (i + 1) * cols
-		b2 := (i + 2) * cols
-		b3 := (i + 3) * cols
-		b4 := (i + 4) * cols
-		b5 := (i + 5) * cols
-		b6 := (i + 6) * cols
-		b7 := (i + 7) * cols
-		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
-		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
-		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
-		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
-		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
-		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
-		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
-		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		dotQ8VNNICoreMultiRowZMM(&data[i*cols], &xq[0], &scratch[0], 8, cols)
+		v0 := residual[i] + float32(scratch[0]-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(scratch[1]-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(scratch[2]-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(scratch[3]-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(scratch[4]-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(scratch[5]-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(scratch[6]-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(scratch[7]-128*rowSum[i+7])*scaleX*scale[i+7]
 		residual[i] = v0
 		residual[i+1] = v1
 		residual[i+2] = v2
@@ -871,7 +860,8 @@ func matVecQ4InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Mat
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
-		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		dot := dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)
+		v := residual[i] + float32(dot-128*rowSum[i])*scaleX*scale[i]
 		residual[i] = v
 		out[i] = v
 		ss += v * v
@@ -1055,23 +1045,18 @@ func matVecQ4AddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Matrix, st
 	cols := q.Cols
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
+	scratch := getInt32Scratch(end - start)
+	defer putInt32Scratch(scratch)
 	for ; i+7 < end; i += 8 {
-		b0 := i * cols
-		b1 := (i + 1) * cols
-		b2 := (i + 2) * cols
-		b3 := (i + 3) * cols
-		b4 := (i + 4) * cols
-		b5 := (i + 5) * cols
-		b6 := (i + 6) * cols
-		b7 := (i + 7) * cols
-		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
-		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
-		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
-		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
-		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
-		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
-		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
-		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		dotQ8VNNICoreMultiRowZMM(&data[i*cols], &xq[0], &scratch[0], 8, cols)
+		v0 := residual[i] + float32(scratch[0]-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(scratch[1]-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(scratch[2]-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(scratch[3]-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(scratch[4]-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(scratch[5]-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(scratch[6]-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(scratch[7]-128*rowSum[i+7])*scaleX*scale[i+7]
 		out[i] = v0
 		out[i+1] = v1
 		out[i+2] = v2
@@ -1091,7 +1076,8 @@ func matVecQ4AddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Matrix, st
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
-		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		dot := dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)
+		v := residual[i] + float32(dot-128*rowSum[i])*scaleX*scale[i]
 		out[i] = v
 		ss += v * v
 	}
@@ -1293,23 +1279,19 @@ func matVecQ6InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Mat
 	cols := q.Cols
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
+	scratch := getInt32Scratch(end - start)
+	defer putInt32Scratch(scratch)
+	// Process in chunks of 8 rows using multi-row asm
 	for ; i+7 < end; i += 8 {
-		b0 := i * cols
-		b1 := (i + 1) * cols
-		b2 := (i + 2) * cols
-		b3 := (i + 3) * cols
-		b4 := (i + 4) * cols
-		b5 := (i + 5) * cols
-		b6 := (i + 6) * cols
-		b7 := (i + 7) * cols
-		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
-		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
-		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
-		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
-		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
-		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
-		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
-		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		dotQ8VNNICoreMultiRowZMM(&data[i*cols], &xq[0], &scratch[0], 8, cols)
+		v0 := residual[i] + float32(scratch[0]-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(scratch[1]-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(scratch[2]-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(scratch[3]-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(scratch[4]-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(scratch[5]-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(scratch[6]-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(scratch[7]-128*rowSum[i+7])*scaleX*scale[i+7]
 		residual[i] = v0
 		residual[i+1] = v1
 		residual[i+2] = v2
@@ -1337,7 +1319,8 @@ func matVecQ6InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Mat
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
-		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		dot := dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)
+		v := residual[i] + float32(dot-128*rowSum[i])*scaleX*scale[i]
 		residual[i] = v
 		out[i] = v
 		ss += v * v
@@ -1521,23 +1504,18 @@ func matVecQ6AddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Matrix, st
 	cols := q.Cols
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
+	scratch := getInt32Scratch(end - start)
+	defer putInt32Scratch(scratch)
 	for ; i+7 < end; i += 8 {
-		b0 := i * cols
-		b1 := (i + 1) * cols
-		b2 := (i + 2) * cols
-		b3 := (i + 3) * cols
-		b4 := (i + 4) * cols
-		b5 := (i + 5) * cols
-		b6 := (i + 6) * cols
-		b7 := (i + 7) * cols
-		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
-		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
-		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
-		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
-		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
-		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
-		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
-		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		dotQ8VNNICoreMultiRowZMM(&data[i*cols], &xq[0], &scratch[0], 8, cols)
+		v0 := residual[i] + float32(scratch[0]-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(scratch[1]-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(scratch[2]-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(scratch[3]-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(scratch[4]-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(scratch[5]-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(scratch[6]-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(scratch[7]-128*rowSum[i+7])*scaleX*scale[i+7]
 		out[i] = v0
 		out[i+1] = v1
 		out[i+2] = v2
@@ -1557,7 +1535,8 @@ func matVecQ6AddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Matrix, st
 	}
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
-		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		dot := dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)
+		v := residual[i] + float32(dot-128*rowSum[i])*scaleX*scale[i]
 		out[i] = v
 		ss += v * v
 	}
