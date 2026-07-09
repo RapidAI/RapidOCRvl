@@ -2,10 +2,15 @@
 
 #include "textflag.h"
 
+// dotQ8VNNICore(a *int8, xq *uint8, n int) int32
+// Computes sum(a[i]*xq[i]) using VPDPBUSD.
+// VPDPBUSD: dst = src1(int8, from mem) * src2(uint8, from reg) + dst, per-lane int32 accumulate.
+// Each VPDPBUSD on YMM processes 32 int8 * 32 uint8 -> 4 int32 partial sums.
 TEXT ·dotQ8VNNICore(SB), NOSPLIT, $0-32
 	MOVQ a+0(FP), SI
 	MOVQ xq+8(FP), DI
 	MOVQ n+16(FP), CX
+
 	VPXORD Y0, Y0, Y0
 	VPXORD Y1, Y1, Y1
 	VPXORD Y2, Y2, Y2
@@ -14,11 +19,14 @@ TEXT ·dotQ8VNNICore(SB), NOSPLIT, $0-32
 	VPXORD Y5, Y5, Y5
 	VPXORD Y6, Y6, Y6
 	VPXORD Y7, Y7, Y7
-	CMPQ CX, $8
+
+	CMPQ CX, $32
 	JB vnniCoreTail
+
 vnniCoreLoop:
-	CMPQ CX, $64
-	JB vnniCoreLoop32
+	CMPQ CX, $256
+	JB vnniCoreLoop128
+	// Process 256 elements: 8 x 32 = 256, 8 independent accumulators
 	VMOVDQU (DI), Y8
 	VPDPBUSD (SI), Y8, Y0
 	VMOVDQU 32(DI), Y9
@@ -37,11 +45,12 @@ vnniCoreLoop:
 	VPDPBUSD 224(SI), Y15, Y7
 	ADDQ $256, SI
 	ADDQ $256, DI
-	SUBQ $64, CX
+	SUBQ $256, CX
 	JMP vnniCoreLoop
-vnniCoreLoop32:
-	CMPQ CX, $32
-	JB vnniCoreLoop16
+
+vnniCoreLoop128:
+	CMPQ CX, $128
+	JB vnniCoreLoop64
 	VMOVDQU (DI), Y8
 	VPDPBUSD (SI), Y8, Y0
 	VMOVDQU 32(DI), Y9
@@ -52,28 +61,31 @@ vnniCoreLoop32:
 	VPDPBUSD 96(SI), Y11, Y3
 	ADDQ $128, SI
 	ADDQ $128, DI
-	SUBQ $32, CX
+	SUBQ $128, CX
 	JMP vnniCoreLoop
-vnniCoreLoop16:
-	CMPQ CX, $16
-	JB vnniCoreLoop8
+
+vnniCoreLoop64:
+	CMPQ CX, $64
+	JB vnniCoreLoop32
 	VMOVDQU (DI), Y8
 	VPDPBUSD (SI), Y8, Y0
 	VMOVDQU 32(DI), Y9
 	VPDPBUSD 32(SI), Y9, Y1
 	ADDQ $64, SI
 	ADDQ $64, DI
-	SUBQ $16, CX
+	SUBQ $64, CX
 	JMP vnniCoreLoop
-vnniCoreLoop8:
-	CMPQ CX, $8
+
+vnniCoreLoop32:
+	CMPQ CX, $32
 	JB vnniCoreReduce
 	VMOVDQU (DI), Y8
 	VPDPBUSD (SI), Y8, Y0
 	ADDQ $32, SI
 	ADDQ $32, DI
-	SUBQ $8, CX
-	JMP vnniCoreLoop8
+	SUBQ $32, CX
+	JMP vnniCoreLoop32
+
 vnniCoreReduce:
 	VPADDD Y1, Y0, Y0
 	VPADDD Y3, Y2, Y2
@@ -92,6 +104,7 @@ vnniCoreReduce:
 	VZEROUPPER
 	MOVL AX, ret+24(FP)
 	RET
+
 vnniCoreTail:
 	XORL AX, AX
 vnniCoreTailLoop:
