@@ -36,7 +36,7 @@ func ensureHostBufferWin(vk *vulkanWin, device uintptr, memProps vkPhysicalDevic
 // memory.  This eliminates per-dispatch host round-trips that occur when
 // using host-visible buffers for intermediates.
 func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
-	normOut, residual, x []float32,
+	normOut, residual, rawInput, ln1Weight []float32,
 	a, b, c *tensor.Q8Matrix,
 	cosTable, sinTable []float32,
 	w *tensor.Q8Matrix, bias, normWeight []float32,
@@ -57,7 +57,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	if a.Rows != qRows || b.Rows != kvRows || c.Rows != kvRows {
 		return fmt.Errorf("chained q8 qkv shape mismatch: a=%dx%d qRows=%d b=%dx%d kvRows=%d", a.Rows, a.Cols, qRows, b.Rows, b.Cols, kvRows)
 	}
-	if len(x) < hidden || len(cosTable) < half || len(sinTable) < half ||
+	if len(rawInput) < hidden || len(ln1Weight) < hidden || len(cosTable) < half || len(sinTable) < half ||
 		len(normOut) < qRows || len(residual) < qRows ||
 		w == nil || w.Rows != qRows || w.Cols != qRows || len(b.Data) < qRows*qRows || len(w.Scale) < qRows || len(bias) < qRows || len(normWeight) < qRows ||
 		len(outK) < kvRows || len(outV) < kvRows {
@@ -72,11 +72,17 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	if err != nil {
 		return err
 	}
+	normRunner, err := getVulkanRMSNormF32RunnerWindows()
+	if err != nil {
+		return err
+	}
 
 	qkvRunner.mu.Lock()
 	defer qkvRunner.mu.Unlock()
 	attRunner.mu.Lock()
 	defer attRunner.mu.Unlock()
+	normRunner.mu.Lock()
+	defer normRunner.mu.Unlock()
 
 	vk := qkvRunner.vk
 	device := qkvRunner.device
@@ -440,8 +446,18 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	}
 
 	// === Upload phase ===
-	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devX, x[:hidden]); err != nil {
-		return fmt.Errorf("upload x: %w", err)
+	// Upload raw hidden vector (pre-RMSNorm input)
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devX, rawInput[:hidden]); err != nil {
+		return fmt.Errorf("upload rawInput: %w", err)
+	}
+	// Upload ln1 weight for RMSNorm
+	devLn1Weight, err := vk.newDeviceBuffer(device, qkvRunner.memProps, xBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer ln1Weight: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devLn1Weight)
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devLn1Weight, ln1Weight[:hidden]); err != nil {
+		return fmt.Errorf("upload ln1Weight: %w", err)
 	}
 	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devCos, cosTable[:half]); err != nil {
 		return fmt.Errorf("upload cos: %w", err)
@@ -492,6 +508,52 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	}
 
 	// === Compute phase ===
+
+	// Allocate descriptor set for RMSNorm (3 descriptors: x, weight, out)
+	rmsPoolSize := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: 3}
+	rmsDPCI := vkDescriptorPoolCreateInfo{
+		SType:         vkStructureTypeDescriptorPoolCreateInfo,
+		MaxSets:       1,
+		PoolSizeCount: 1,
+		PPoolSizes:    uintptr(unsafe.Pointer(&rmsPoolSize)),
+	}
+	var rmsPool uintptr
+	if res := vk.call(vk.createDescriptorPool, device, uintptr(unsafe.Pointer(&rmsDPCI)), 0, uintptr(unsafe.Pointer(&rmsPool))); res != vkSuccess {
+		return fmt.Errorf("vkCreateDescriptorPool rmsnorm: %d", int32(res))
+	}
+	defer vk.callVoid(vk.destroyDescriptorPool, device, rmsPool, 0)
+	var rmsDS uintptr
+	rmsDSAI := vkDescriptorSetAllocateInfo{
+		SType:              vkStructureTypeDescriptorSetAllocateInfo,
+		DescriptorPool:     rmsPool,
+		DescriptorSetCount: 1,
+		PSetLayouts:        uintptr(unsafe.Pointer(&normRunner.setLayout)),
+	}
+	if res := vk.call(vk.allocateDescriptorSets, device, uintptr(unsafe.Pointer(&rmsDSAI)), uintptr(unsafe.Pointer(&rmsDS))); res != vkSuccess {
+		return fmt.Errorf("vkAllocateDescriptorSets rmsnorm: %d", int32(res))
+	}
+	// RMSNorm descriptor set: [0]=x (rawInput), [1]=weight (ln1), [2]=out (devX)
+	rmsInfos := [3]vkDescriptorBufferInfo{
+		{Buffer: devX.buffer, Range: xBytes},
+		{Buffer: devLn1Weight.buffer, Range: xBytes},
+		{Buffer: devX.buffer, Range: xBytes},  // output overwrites input
+	}
+	var rmsDSCache [3]vulkanDescriptorBindingWin
+	updateVulkanDescriptorBuffersWin(vk, device, rmsDS, rmsDSCache[:], rmsInfos[:])
+
+	// Dispatch 0: RMSNorm (normalizes rawInput into devX)
+	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, normRunner.pipeline)
+	vk.callVoid(vk.cmdBindDescriptorSets, cmd, vkPipelineBindPointCompute, normRunner.pipelineLayout, 0, 1, uintptr(unsafe.Pointer(&rmsDS)), 0, 0)
+	var rmsPC [8]byte
+	binary.LittleEndian.PutUint32(rmsPC[0:4], uint32(hidden))
+	binary.LittleEndian.PutUint32(rmsPC[4:8], 1)
+	vk.callVoid(vk.cmdPushConstants, cmd, normRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(8), uintptr(unsafe.Pointer(&rmsPC[0])))
+	vk.callVoid(vk.cmdDispatch, cmd, 1, 1, 1)
+
+	// Barrier: RMSNorm output visible to QKV reads
+	vk.computeBarrier(cmd)
+
+	// Dispatch 1: Q8 QKV+MRoPE
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, qkvRunner.pipeline)
 	vk.callVoid(vk.cmdBindDescriptorSets, cmd, vkPipelineBindPointCompute, qkvRunner.pipelineLayout, 0, 1, uintptr(unsafe.Pointer(&qkvDS)), 0, 0)
 	packed := headDim | (kvHeads << 16)

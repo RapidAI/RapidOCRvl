@@ -3501,12 +3501,25 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 				}
 			} else {
-				rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
-				if lastLayer && !needLogits {
-					rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
-					return generationForwardResult{}, nil
+				// For Q8 weights, skip separate RMSNorm - the Q8 chain does it inline.
+				q8ChainActive := hasRoPE && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8)
+				if q8ChainActive {
+					// Q8 chain will do RMSNorm internally; pass raw hidden + ln1 weight
+					att, normDone := rt.attentionWithNorm(h, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln1, sc.norm)
+					if !normDone {
+						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+					}
+				} else {
+					rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+					if lastLayer && !needLogits {
+						rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
+						return generationForwardResult{}, nil
+					}
+					att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+					if !normDone {
+						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+					}
 				}
-				att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
 				if !normDone {
 					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 				}
@@ -3520,12 +3533,25 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 				}
 			} else {
-				rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
-				if lastLayer && !needLogits {
-					rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
-					return generationForwardResult{}, nil
+				// For Q8 weights, skip separate RMSNorm - the Q8 chain does it inline.
+				q8ChainActive := hasRoPE && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8)
+				if q8ChainActive {
+					// Q8 chain will do RMSNorm internally; pass raw hidden + ln1 weight
+					att, normDone := rt.attentionWithNorm(h, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln1, sc.norm)
+					if !normDone {
+						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+					}
+				} else {
+					rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+					if lastLayer && !needLogits {
+						rt.attentionCacheOnly(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin)
+						return generationForwardResult{}, nil
+					}
+					att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
+					if !normDone {
+						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
+					}
 				}
-				att, normDone := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
 				if !normDone {
 					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 				}
@@ -3863,9 +3889,10 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 		rt.vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
 		return nil, true
 	}
-	// Q8 path: fused Q8 QKV+MRoPE + attention + Q8 output proj + AddRMSNorm in one submit.
+	// Q8 path: RMSNorm + fused Q8 QKV+MRoPE + attention + Q8 output proj + AddRMSNorm in one submit.
+	// rawInput = h (pre-norm), ln1Weight = tl.w.ln1. Skips the separate rmsNormMaybeVulkan call.
 	if hasRoPE && tl.q8.q != nil &&
-		rt.vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, x, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		rt.vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, h, tl.w.ln1, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
 		return nil, true
 	}
 	qkvHasRoPE := false
@@ -4099,11 +4126,11 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x [
 	}
 	qRows := numHeads * headDim
 	kvRows := kvHeads * headDim
-	hidden := len(x)
+	hidden := len(rawInput)
 	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
 		return false
 	}
-	if len(normOut) < qRows || len(residual) < qRows || len(x) < hidden || len(normWeight) < qRows {
+	if len(normOut) < qRows || len(residual) < qRows || len(rawInput) < hidden || len(ln1Weight) < hidden || len(normWeight) < qRows {
 		return false
 	}
 	if !f32MatVecWeightsReady(tl.w.q, qRows, hidden) || !f32MatVecWeightsReady(tl.w.k, kvRows, hidden) || !f32MatVecWeightsReady(tl.w.v, kvRows, hidden) || !f32MatVecWeightsReady(tl.w.o, qRows, qRows) {
@@ -4139,7 +4166,7 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x [
 // vulkanChainedQKVAttentionOutAddRMSNormQ8 chains fused Q8 QKV+MRoPE with
 // attention+output+AddRMSNorm into a single command buffer for Q8-quantised
 // models.  The q/k/v stay in GPU memory between QKV and attention.
-func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, x []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, rawInput, ln1Weight []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, normWeight []float32, numHeads, kvHeads, headDim int) bool {
 	if !rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8) || tl == nil || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 || headDim%2 != 0 {
 		return false
 	}
@@ -4149,7 +4176,7 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, x
 	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
 		return false
 	}
-	if len(normOut) < qRows || len(residual) < qRows || len(x) < hidden || len(normWeight) < qRows {
+	if len(normOut) < qRows || len(residual) < qRows || len(rawInput) < hidden || len(ln1Weight) < hidden || len(normWeight) < qRows {
 		return false
 	}
 	if tl.q8.q == nil || tl.q8.k == nil || tl.q8.v == nil || tl.q8.o == nil {
@@ -4168,7 +4195,7 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, x
 	newK := make([]float32, kvRows)
 	newV := make([]float32, kvRows)
 	if err := backend.VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
-		normOut, residual, x,
+		normOut, residual, rawInput, ln1Weight,
 		tl.q8.q, tl.q8.k, tl.q8.v,
 		cosTable, sinTable,
 		tl.q8.o, rt.zeroBias(qRows), normWeight,

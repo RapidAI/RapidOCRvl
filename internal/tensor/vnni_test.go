@@ -38,11 +38,16 @@ func TestDotQ8VNNICorrectness(t *testing.T) {
 		q := QuantizeQ8Row(w, 1, n)
 		xq := make([]uint8, n)
 		scaleX := quantizeXForVNNI(x, xq)
+
+		// VNNI result: applies scaleX * scaleW internally
 		vnniResult := dotQ8VNNI(q.Data[:n], xq, scaleX, q.Scale[0], q.RowSum[0])
-		refResult := dotQ8(q.Data[:n], x)
+
+		// Reference: dotQ8 gives raw dot of q.Data*x (unscaled), must multiply by q.Scale
+		refResult := dotQ8(q.Data[:n], x) * q.Scale[0]
+
 		diff := math.Abs(float64(vnniResult - refResult))
-		relTol := math.Abs(float64(refResult)) * 0.02
-		if diff > math.Max(relTol, 0.5) {
+		relTol := math.Abs(float64(refResult)) * 0.05
+		if diff > math.Max(relTol, 0.01) {
 			t.Errorf("n=%d: VNNI=%f ref=%f diff=%f", n, vnniResult, refResult, diff)
 		}
 	}
