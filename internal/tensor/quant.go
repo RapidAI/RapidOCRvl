@@ -1314,9 +1314,22 @@ func matVecQ4PairSerial(outA, outB, x []float32, a, b *Q4Matrix, start, end int)
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData := a.Unpacked, b.Unpacked
+		aScale, bScale := a.Scale, b.Scale
+		aRS, bRS := a.RowSum, b.RowSum
+		cols := a.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB := dotQ8PairVNNICore(&aData[base], &bData[base], &xq[0], cols)
+				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
+				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
 			base := r * a.Cols
-			av, bv := dotQ8PairVNNI(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], a.Scale[r], b.Scale[r])
+			av, bv := dotQ8PairVNNI(aData[base:base+a.Cols], bData[base:base+b.Cols], xq, scaleX, aRS[r], bRS[r], aScale[r], bScale[r])
 			outA[r] = av
 			outB[r] = bv
 		}
@@ -1368,9 +1381,22 @@ func matVecQ6PairSerial(outA, outB, x []float32, a, b *Q6Matrix, start, end int)
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData := a.Unpacked, b.Unpacked
+		aScale, bScale := a.Scale, b.Scale
+		aRS, bRS := a.RowSum, b.RowSum
+		cols := a.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB := dotQ8PairVNNICore(&aData[base], &bData[base], &xq[0], cols)
+				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
+				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
 			base := r * a.Cols
-			av, bv := dotQ8PairVNNI(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], a.Scale[r], b.Scale[r])
+			av, bv := dotQ8PairVNNI(aData[base:base+a.Cols], bData[base:base+b.Cols], xq, scaleX, aRS[r], bRS[r], aScale[r], bScale[r])
 			outA[r] = av
 			outB[r] = bv
 		}
