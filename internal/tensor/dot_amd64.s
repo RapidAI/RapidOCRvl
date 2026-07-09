@@ -2954,6 +2954,8 @@ q4PairTailHighA:
 	MULSS X1, X2
 	ADDSS X2, X0
 q4PairTailB:
+	MOVQ R10, AX
+	SHRQ $1, AX
 	MOVBQZX (DI)(AX*1), R9
 	MOVQ R9, R11
 	ANDL $0x0F, R9
@@ -3271,6 +3273,8 @@ q4PairTailHighA:
 	MULSS X1, X2
 	ADDSS X2, X0
 q4PairTailB:
+	MOVQ R10, AX
+	SHRQ $1, AX
 	MOVBQZX (DI)(AX*1), R9
 	MOVQ R9, R11
 	ANDL $0x0F, R9
@@ -3731,6 +3735,8 @@ q4TripletTailHighA:
 	MULSS X1, X2
 	ADDSS X2, X0
 q4TripletTailB:
+	MOVQ R10, AX
+	SHRQ $1, AX
 	MOVBQZX (DI)(AX*1), R12
 	MOVQ R12, R13
 	ANDL $0x0F, R12
@@ -3749,6 +3755,8 @@ q4TripletTailHighB:
 	MULSS X1, X2
 	ADDSS X2, X4
 q4TripletTailC:
+	MOVQ R10, AX
+	SHRQ $1, AX
 	MOVBQZX (R8)(AX*1), R12
 	MOVQ R12, R13
 	ANDL $0x0F, R12
@@ -4169,6 +4177,8 @@ q4TripletTailHighA:
 	MULSS X1, X2
 	ADDSS X2, X0
 q4TripletTailB:
+	MOVQ R10, AX
+	SHRQ $1, AX
 	MOVBQZX (DI)(AX*1), R12
 	MOVQ R12, R13
 	ANDL $0x0F, R12
@@ -4187,6 +4197,8 @@ q4TripletTailHighB:
 	MULSS X1, X2
 	ADDSS X2, X4
 q4TripletTailC:
+	MOVQ R10, AX
+	SHRQ $1, AX
 	MOVBQZX (R8)(AX*1), R12
 	MOVQ R12, R13
 	ANDL $0x0F, R12
