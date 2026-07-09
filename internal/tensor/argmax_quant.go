@@ -12,6 +12,22 @@ func MatVecArgmaxQ8(x []float32, q *Q8Matrix) (int, float32) {
 	if shouldParallel(q.Rows*q.Cols, q.Rows) {
 		return matVecArgmaxQ8Parallel(x, q)
 	}
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		bestToken := 0
+		bestScore := float32(0)
+		for r := 0; r < q.Rows; r++ {
+			base := r * q.Cols
+			score := dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+			if r == 0 || score > bestScore {
+				bestToken = r
+				bestScore = score
+			}
+		}
+		return bestToken, bestScore
+	}
 	bestToken := 0
 	bestScore := float32(0)
 	for r := 0; r < q.Rows; r++ {
@@ -36,6 +52,60 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 	}
 	if workers > q.Rows {
 		workers = q.Rows
+	}
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := make([]uint8, q.Cols)
+		scaleX := quantizeXForVNNI(x, xq)
+		if workers <= 1 {
+			bestToken := 0
+			bestScore := float32(0)
+			for r := 0; r < q.Rows; r++ {
+				base := r * q.Cols
+				score := dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+				if r == 0 || score > bestScore {
+					bestToken = r
+					bestScore = score
+				}
+			}
+			return bestToken, bestScore
+		}
+		chunk := (q.Rows + workers - 1) / workers
+		var resultsArr [16]partial; results := resultsArr[:workers]
+		var wg sync.WaitGroup
+		for wi := 0; wi < workers; wi++ {
+			start := wi * chunk
+			end := start + chunk
+			if end > q.Rows {
+				end = q.Rows
+			}
+			if start >= end {
+				results[wi] = partial{0, 0}
+				continue
+			}
+			wg.Add(1)
+			go func(slot, start, end int) {
+				defer wg.Done()
+				bestToken := start
+				bestScore := float32(0)
+				for r := start; r < end; r++ {
+					base := r * q.Cols
+					score := dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+					if r == start || score > bestScore {
+						bestToken = r
+						bestScore = score
+					}
+				}
+				results[slot] = partial{bestToken, bestScore}
+			}(wi, start, end)
+		}
+		wg.Wait()
+		best := results[0]
+		for i := 1; i < workers; i++ {
+			if results[i].val > best.val {
+				best = results[i]
+			}
+		}
+		return best.idx, best.val
 	}
 	if workers <= 1 {
 		bestToken := 0
