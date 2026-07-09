@@ -1003,36 +1003,17 @@ func SiLU(x float32) float32 {
 // Uses the same 5th-degree polynomial as the AVX2 expF32VecAVX kernel,
 // ensuring bit-exact consistency between scalar and vectorized paths.
 func FastExpF32(x float32) float32 {
-	if x > 88.0 {
-		return float32(math.MaxFloat32)
-	}
-	if x < -88.0 {
-		return 0
-	}
-	// exp(x) = 2^(x * log2(e))
+
 	const log2e = float32(1.4426950408889634)
+	const magic = float32(12582912.0)
 	t := x * log2e
-	// Fast round-to-nearest-even using magic number (avoids math.RoundToEven call)
-	// For |t| < 2^22, adding 2^23+2^22 forces round-to-integer with ties-to-even.
-	const roundMagic = float32(0x1.0p23 + 0x1.0p22) // 12582912.0
-	n := int32((t + roundMagic) - roundMagic)
+	n := int32((t + magic) - magic)
 	f := t - float32(n)
-	// 2^f polynomial (Estrin scheme, degree 5)
-	// poly = c1 + c2*f + c3*f^2 + c4*f^3 + c5*f^4
-	//      = A + f^2 * (B + f^2 * c5)
-	// where A = c1 + c2*f, B = c3 + c4*f
-	const c1 = float32(0.6931471824645996)
-	const c2 = float32(0.24022650718688965)
-	const c3 = float32(0.05550410971045494)
-	const c4 = float32(0.009618128649890423)
-	const c5 = float32(0.0013352063251659274)
 	f2 := f * f
-	a := float32(1.0) + c1*f
-	b := c2 + c3*f
-	c := c4 + c5*f
-	poly := a + f2*(b+c*f2)
-	// Scale by 2^n
-	bits := math.Float32bits(poly) + uint32(n)<<23
+	poly := (float32(1.0) + float32(0.6931471824645996)*f) +
+		f2*(float32(0.24022650718688965)+float32(0.05550410971045494)*f+
+			f2*(float32(0.009618128649890423)+float32(0.0013352063251659274)*f))
+	bits := *(*uint32)(unsafe.Pointer(&poly)) + uint32(n)<<23
 	return *(*float32)(unsafe.Pointer(&bits))
 }
 
@@ -1077,26 +1058,14 @@ func GELUTanh(x float32) float32 {
 // fastExpF32T computes exp(x) where x is already scaled by log2(e).
 // i.e., x = original_input * log2e. This skips the log2e multiply.
 func fastExpF32T(x float32) float32 {
-	if x > 88.0*1.4426950 {
-		return float32(math.MaxFloat32)
-	}
-	if x < -88.0*1.4426950 {
-		return 0
-	}
-	const roundMagic = float32(0x1.0p23 + 0x1.0p22)
-	n := int32((x + roundMagic) - roundMagic)
+	const magic = float32(12582912.0)
+	n := int32((x + magic) - magic)
 	f := x - float32(n)
-	const c1 = float32(0.6931471824645996)
-	const c2 = float32(0.24022650718688965)
-	const c3 = float32(0.05550410971045494)
-	const c4 = float32(0.009618128649890423)
-	const c5 = float32(0.0013352063251659274)
 	f2 := f * f
-	a := float32(1.0) + c1*f
-	b := c2 + c3*f
-	c := c4 + c5*f
-	poly := a + f2*(b+c*f2)
-	bits := math.Float32bits(poly) + uint32(n)<<23
+	poly := (float32(1.0) + float32(0.6931471824645996)*f) +
+		f2*(float32(0.24022650718688965)+float32(0.05550410971045494)*f+
+			f2*(float32(0.009618128649890423)+float32(0.0013352063251659274)*f))
+	bits := *(*uint32)(unsafe.Pointer(&poly)) + uint32(n)<<23
 	return *(*float32)(unsafe.Pointer(&bits))
 }
 
