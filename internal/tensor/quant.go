@@ -1181,6 +1181,19 @@ func matVecQ8Pair(outA, outB, x []float32, a, b *Q8Matrix) {
 		MatVecQ8(outB, x, b)
 		return
 	}
+	if useVNNI && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
+			parallelForQuantPair(a.Rows, func(start, end int) {
+				matVecQ8PairSerialPreQuant(outA, outB, a, b, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ8PairSerialPreQuant(outA, outB, a, b, xq, scaleX, 0, a.Rows)
+		return
+	}
 	if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
 		parallelForQuantPair(a.Rows, func(start, end int) {
 			matVecQ8PairSerial(outA, outB, x, a, b, start, end)

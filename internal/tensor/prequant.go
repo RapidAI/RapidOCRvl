@@ -325,3 +325,20 @@ func matVecQ8SwiGLUSerialBatchedPreQuant(out, tmpU []float32, gate, up *Q8Matrix
 		&sB[0], &uRowSum[start], &uScale[start], &tmpG[0], nRows, scaleX)
 	SiLUMulInPlace(out[start:end], tmpG[:nRows])
 }
+
+
+// matVecQ8PairSerialPreQuant is the VNNI path of matVecQ8PairSerial with pre-quantized x.
+func matVecQ8PairSerialPreQuant(outA, outB []float32, a, b *Q8Matrix, xq []uint8, scaleX float32, start, end int) {
+	aData, bData := a.Data, b.Data
+	aScale, bScale := a.Scale, b.Scale
+	aRS, bRS := a.RowSum, b.RowSum
+	cols := a.Cols
+	nRows := end - start
+	sA := getInt32Scratch(nRows)
+	sB := getInt32Scratch(nRows)
+	defer putInt32Scratch(sA)
+	defer putInt32Scratch(sB)
+	dotQ8PairVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+	finalizeDotQ8PairVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+		&sB[0], &bRS[start], &bScale[start], &outB[start], nRows, scaleX)
+}
