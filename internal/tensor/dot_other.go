@@ -367,6 +367,8 @@ func maxF32AVX2(x []float32) float32 { return maxF32AVX(x) }
 
 func maxF32ZMM(x []float32) float32 { return maxF32AVX(x) }
 
+func argmaxF32ZMM(x []float32) (int, float32) { return argmaxF32AVX2(x) }
+
 func argmaxF32AVX2(x []float32) (int, float32) {
 	if len(x) == 0 {
 		return 0, 0

@@ -1306,7 +1306,10 @@ func Argmax(x []float32) int {
 	if n == 0 {
 		return 0
 	}
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 16 {
+		idx, _ := argmaxF32ZMM(x)
+		return idx
+	} else if useDotF32AVX && n >= 8 {
 		// Single-pass SIMD argmax: tracks both max value and index in one scan
 		idx, _ := argmaxF32AVX2(x)
 		return idx

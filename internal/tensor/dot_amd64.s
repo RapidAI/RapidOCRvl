@@ -7115,6 +7115,174 @@ argmaxF32IdxTailDone:
 	MOVQ R9, ret_idx+24(FP)
 	RET
 
+// argmaxF32ZMM: ZMM (512-bit) version of argmaxF32AVX2.
+// Phase 1: 16 elements/VMAXPS, 4 accumulators. Phase 2: 16 elements/VCMPPS into mask register.
+TEXT ·argmaxF32ZMM(SB), NOSPLIT, $0-40
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	LEAQ maxF32NegInf<>(SB), AX
+	VBROADCASTSS (AX), Z0
+	VORPS Z0, Z0, Z1
+	VORPS Z0, Z0, Z2
+	VORPS Z0, Z0, Z3
+	CMPQ CX, $16
+	JB argmaxZmmMaxTail
+
+argmaxZmmMaxLoop64:
+	CMPQ CX, $64
+	JB argmaxZmmMaxLoop
+	VMAXPS (SI), Z0, Z0
+	VMAXPS 64(SI), Z1, Z1
+	VMAXPS 128(SI), Z2, Z2
+	VMAXPS 192(SI), Z3, Z3
+	ADDQ $256, SI
+	SUBQ $64, CX
+	JMP argmaxZmmMaxLoop64
+
+argmaxZmmMaxLoop:
+	CMPQ CX, $16
+	JB argmaxZmmMaxReduce
+	VMAXPS (SI), Z0, Z0
+	ADDQ $64, SI
+	SUBQ $16, CX
+	JMP argmaxZmmMaxLoop
+
+argmaxZmmMaxReduce:
+	VMAXPS Z1, Z0, Z0
+	VMAXPS Z2, Z0, Z0
+	VMAXPS Z3, Z0, Z0
+	VEXTRACTF64X4 $1, Z0, Y1
+	VMAXPS Y0, Y1, Y1
+	VEXTRACTF128 $1, Y1, X2
+	VMAXPS X2, X1, X1
+	VSHUFPS $0x4E, X1, X1, X2
+	VMAXPS X2, X1, X1
+	VSHUFPS $0xB1, X1, X1, X2
+	VMAXPS X2, X1, X1
+	MOVSS X1, ret_val+32(FP)
+	VZEROUPPER
+	JMP argmaxZmmPhase2
+
+argmaxZmmMaxTail:
+	VZEROUPPER
+	LEAQ maxF32NegInf<>(SB), AX
+	VBROADCASTSS (AX), Y0
+	CMPQ CX, $8
+	JB argmaxZmmMaxTailScalar
+
+argmaxZmmMaxTailLoop:
+	CMPQ CX, $8
+	JB argmaxZmmMaxTailReduce
+	VMAXPS (SI), Y0, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP argmaxZmmMaxTailLoop
+
+argmaxZmmMaxTailReduce:
+	VEXTRACTF128 $1, Y0, X2
+	VMAXPS X2, X0, X0
+	VSHUFPS $0x4E, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VSHUFPS $0xB1, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VZEROUPPER
+	MOVSS X0, ret_val+32(FP)
+	JMP argmaxZmmPhase2Scalar
+
+argmaxZmmMaxTailScalar:
+	XORPS X0, X0
+	MOVSS maxF32NegInf<>(SB), X0
+
+argmaxZmmMaxTailScalarLoop:
+	CMPQ CX, $0
+	JE argmaxZmmMaxTailScalarDone
+	VMAXSS (SI), X0, X0
+	ADDQ $4, SI
+	DECQ CX
+	JMP argmaxZmmMaxTailScalarLoop
+
+argmaxZmmMaxTailScalarDone:
+	MOVSS X0, ret_val+32(FP)
+	JMP argmaxZmmPhase2Scalar
+
+argmaxZmmPhase2:
+	// Phase 2: find first index where x[i] == maxVal using ZMM VCMPPS -> mask register
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	XORQ R9, R9
+	VBROADCASTSS X1, Z2
+	CMPQ CX, $16
+	JB argmaxZmmPhase2YMM
+
+argmaxZmmIdxLoop:
+	CMPQ CX, $16
+	JB argmaxZmmPhase2YMM
+	VMOVUPS (SI), Z3
+	VCMPPS $0, Z3, Z2, K1
+	KMOVW K1, R8
+	TESTL R8, R8
+	JNE argmaxZmmIdxFound
+	ADDQ $64, SI
+	SUBQ $16, CX
+	ADDQ $16, R9
+	JMP argmaxZmmIdxLoop
+
+argmaxZmmIdxFound:
+	BSFQ R8, AX
+	ADDQ R9, AX
+	MOVQ AX, ret_idx+24(FP)
+	VZEROUPPER
+	RET
+
+argmaxZmmPhase2YMM:
+	// Fall back to YMM for remaining 8-element groups
+	VBROADCASTSS X1, Y2
+	CMPQ CX, $8
+	JB argmaxZmmPhase2Scalar
+
+argmaxZmmIdxLoopYMM:
+	CMPQ CX, $8
+	JB argmaxZmmPhase2Scalar
+	VMOVUPS (SI), Y3
+	VCMPPS $0, Y3, Y2, Y4
+	VMOVMSKPS Y4, R8
+	TESTL R8, R8
+	JNE argmaxZmmIdxFoundYMM
+	ADDQ $32, SI
+	SUBQ $8, CX
+	ADDQ $8, R9
+	JMP argmaxZmmIdxLoopYMM
+
+argmaxZmmIdxFoundYMM:
+	BSFL R8, AX
+	ADDQ R9, AX
+	MOVQ AX, ret_idx+24(FP)
+	VZEROUPPER
+	RET
+
+argmaxZmmPhase2Scalar:
+	VZEROUPPER
+
+argmaxZmmIdxTailLoop:
+	CMPQ CX, $0
+	JE argmaxZmmIdxNotFound
+	MOVSS (SI), X2
+	UCOMISS X1, X2
+	JE argmaxZmmIdxDone
+	ADDQ $4, SI
+	DECQ CX
+	ADDQ $1, R9
+	JMP argmaxZmmIdxTailLoop
+
+argmaxZmmIdxNotFound:
+	MOVQ R9, ret_idx+24(FP)
+	RET
+
+argmaxZmmIdxDone:
+	MOVQ R9, ret_idx+24(FP)
+	RET
+
+
 // maxAbsFloat32AVX2: improved max(abs(x)) with 4 independent accumulators
 DATA absMask<>+0(SB)/4, $0x7FFFFFFF
 GLOBL absMask<>(SB), RODATA, $4

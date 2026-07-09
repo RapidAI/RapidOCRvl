@@ -86,6 +86,8 @@ func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32)
 func maxF32AVX2(x []float32) float32
 func maxF32ZMM(x []float32) float32
 
+
+func argmaxF32ZMM(x []float32) (int, float32)
 // argmaxF32AVX2 returns (index, value) of the maximum element in x using a single-pass SIMD scan.
 func argmaxF32AVX2(x []float32) (int, float32)
 
