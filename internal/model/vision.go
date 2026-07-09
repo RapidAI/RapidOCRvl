@@ -23,6 +23,13 @@ type visionLayerWeights struct {
 	ow, ob     []float32
 	fc1w, fc1b []float32
 	fc2w, fc2b []float32
+	// Q8 quantized versions (nil until quantized at cache time)
+	qQ8       *tensor.Q8Matrix
+	kQ8       *tensor.Q8Matrix
+	vQ8       *tensor.Q8Matrix
+	oQ8       *tensor.Q8Matrix
+	fc1Q8     *tensor.Q8Matrix
+	fc2Q8     *tensor.Q8Matrix
 }
 
 type visionWeights struct {
@@ -335,7 +342,7 @@ func (rt *Runtime) releaseCachedVisionWeightMapEntries() {
 
 func (rt *Runtime) vlw(i int) visionLayerWeights {
 	p := "visual.vision_model.encoder.layers." + strconv.Itoa(i) + "."
-	return visionLayerWeights{
+	w := visionLayerWeights{
 		ln1w: rt.w[p+"layer_norm1.weight"], ln1b: rt.w[p+"layer_norm1.bias"],
 		ln2w: rt.w[p+"layer_norm2.weight"], ln2b: rt.w[p+"layer_norm2.bias"],
 		qw: rt.w[p+"self_attn.q_proj.weight"], qb: rt.w[p+"self_attn.q_proj.bias"],
@@ -345,6 +352,30 @@ func (rt *Runtime) vlw(i int) visionLayerWeights {
 		fc1w: rt.w[p+"mlp.fc1.weight"], fc1b: rt.w[p+"mlp.fc1.bias"],
 		fc2w: rt.w[p+"mlp.fc2.weight"], fc2b: rt.w[p+"mlp.fc2.bias"],
 	}
+	// Quantize layer weights to Q8 for 4x memory bandwidth reduction.
+	d := rt.cfg.VisionConfig.HiddenSize
+	inter := rt.cfg.VisionConfig.IntermediateSize
+	if d > 0 {
+		if len(w.qw) == d*d {
+			w.qQ8 = tensor.QuantizeQ8Row(w.qw, d, d)
+		}
+		if len(w.kw) == d*d {
+			w.kQ8 = tensor.QuantizeQ8Row(w.kw, d, d)
+		}
+		if len(w.vw) == d*d {
+			w.vQ8 = tensor.QuantizeQ8Row(w.vw, d, d)
+		}
+		if len(w.ow) == d*d {
+			w.oQ8 = tensor.QuantizeQ8Row(w.ow, d, d)
+		}
+		if inter > 0 && len(w.fc1w) == inter*d {
+			w.fc1Q8 = tensor.QuantizeQ8Row(w.fc1w, inter, d)
+		}
+		if inter > 0 && len(w.fc2w) == d*inter {
+			w.fc2Q8 = tensor.QuantizeQ8Row(w.fc2w, d, inter)
+		}
+	}
+	return w
 }
 
 func (rt *Runtime) visionEmbeddings(pp *vision.Preprocessed) [][]float32 {
@@ -447,9 +478,17 @@ func (rt *Runtime) visionLayer(x [][]float32, lw visionLayerWeights, next *visio
 	tensor.AddThenLayerNormRows(norm, x, att, lw.ln2w, lw.ln2b, eps)
 	mlp := scratch.mlp
 	hids := scratch.hids
-	tensor.MatRowsBias(hids, norm, lw.fc1w, lw.fc1b, rt.cfg.VisionConfig.IntermediateSize, d)
+	if lw.fc1Q8 != nil {
+		tensor.MatRowsQ8Bias(hids, norm, lw.fc1Q8, lw.fc1b)
+	} else {
+		tensor.MatRowsBias(hids, norm, lw.fc1w, lw.fc1b, rt.cfg.VisionConfig.IntermediateSize, d)
+	}
 	tensor.GELUTanhRowsInPlace(hids)
-	tensor.MatRowsBias(mlp, hids, lw.fc2w, lw.fc2b, d, rt.cfg.VisionConfig.IntermediateSize)
+	if lw.fc2Q8 != nil {
+		tensor.MatRowsQ8Bias(mlp, hids, lw.fc2Q8, lw.fc2b)
+	} else {
+		tensor.MatRowsBias(mlp, hids, lw.fc2w, lw.fc2b, d, rt.cfg.VisionConfig.IntermediateSize)
+	}
 	if next != nil {
 		tensor.AddThenLayerNormRows(norm, x, mlp, next.ln1w, next.ln1b, eps)
 	} else {
@@ -464,7 +503,11 @@ func (rt *Runtime) visionAttention(x [][]float32, lw visionLayerWeights, grid vi
 	heads := rt.cfg.VisionConfig.NumAttentionHeads
 	hd := d / heads
 	q, k, v := scratch.q, scratch.k, scratch.v
-	tensor.MatRowsBias3(q, k, v, x, lw.qw, lw.qb, lw.kw, lw.kb, lw.vw, lw.vb, d, d, d, d)
+	if lw.qQ8 != nil && lw.kQ8 != nil && lw.vQ8 != nil {
+		tensor.MatRowsQ8Bias3(q, k, v, x, lw.qQ8, lw.kQ8, lw.vQ8, lw.qb, lw.kb, lw.vb)
+	} else {
+		tensor.MatRowsBias3(q, k, v, x, lw.qw, lw.qb, lw.kw, lw.kb, lw.vw, lw.vb, d, d, d, d)
+	}
 	applyVisionRoPEPair(q, k, grid, heads, hd, rope)
 	headOut := scratch.headOut
 	scale := invSqrt(hd)
@@ -479,7 +522,11 @@ func (rt *Runtime) visionAttention(x [][]float32, lw visionLayerWeights, grid vi
 		}
 	}
 	out := scratch.attOut
-	tensor.MatRowsBias(out, headOut, lw.ow, lw.ob, d, d)
+	if lw.oQ8 != nil {
+		tensor.MatRowsQ8Bias(out, headOut, lw.oQ8, lw.ob)
+	} else {
+		tensor.MatRowsBias(out, headOut, lw.ow, lw.ob, d, d)
+	}
 	return out
 }
 

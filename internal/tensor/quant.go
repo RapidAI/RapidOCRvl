@@ -1,5 +1,7 @@
 package tensor
 
+import "runtime"
+
 type Q8Matrix struct {
 	Rows  int
 	Cols  int
@@ -895,6 +897,16 @@ func fusedMatVec3Q8Parallel(outA, outB, outC, x []float32, a, b, c *Q8Matrix, to
 	})
 }
 
+func fusedMatVec3Q8EqualRowsBiasSerial(outA, outB, outC, x []float32, a, b, c *Q8Matrix, ba, bb, bc []float32, start, end int) {
+	for r := start; r < end; r++ {
+		base := r * a.Cols
+		av, bv, cv := dotQ8Triplet(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], x)
+		outA[r] = av * a.Scale[r] + ba[r]
+		outB[r] = bv * b.Scale[r] + bb[r]
+		outC[r] = cv * c.Scale[r] + bc[r]
+	}
+}
+
 func fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q8Matrix, start, end int) {
 	for r := start; r < end; r++ {
 		base := r * a.Cols
@@ -931,6 +943,61 @@ func matVecQ8Serial(out, x []float32, q *Q8Matrix, start, end int) {
 	for r := start; r < end; r++ {
 		base := r * q.Cols
 		out[r] = dotQ8(q.Data[base:base+q.Cols], x) * q.Scale[r]
+	}
+}
+
+// MatRowsQ8Bias computes out[i] = q * x[i] + bias for n rows of x.
+// Each row of x has cols elements; q is a rows x cols Q8 matrix.
+// MatRowsQ8Bias3 computes outA[i], outB[i], outC[i] = a*x[i]+ba, b*x[i]+bb, c*x[i]+bc
+// for n rows of x, using fused Q8 triplet dot products for efficiency.
+func MatRowsQ8Bias3(outA, outB, outC [][]float32, xs [][]float32, a, b, c *Q8Matrix, ba, bb, bc []float32) {
+	if a == nil || b == nil || c == nil || len(xs) == 0 {
+		return
+	}
+	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
+		work := len(xs) * a.Rows * a.Cols
+		if shouldParallel(work, len(xs)) && len(xs) > 1 {
+			workers := runtime.GOMAXPROCS(0)
+			if a.Rows*a.Cols < 1<<16 {
+				workers = min(workers, 8)
+			}
+			parallelForMax(len(xs), workers, func(start, end int) {
+				for i := start; i < end; i++ {
+					fusedMatVec3Q8EqualRowsBiasSerial(outA[i], outB[i], outC[i], xs[i], a, b, c, ba, bb, bc, 0, a.Rows)
+				}
+			})
+			return
+		}
+		for i := range xs {
+			fusedMatVec3Q8EqualRowsBiasSerial(outA[i], outB[i], outC[i], xs[i], a, b, c, ba, bb, bc, 0, a.Rows)
+		}
+		return
+	}
+	// Fallback: three separate calls
+	MatRowsQ8Bias(outA, xs, a, ba)
+	MatRowsQ8Bias(outB, xs, b, bb)
+	MatRowsQ8Bias(outC, xs, c, bc)
+}
+
+func MatRowsQ8Bias(out [][]float32, xs [][]float32, q *Q8Matrix, bias []float32) {
+	if q == nil || len(xs) == 0 {
+		return
+	}
+	work := len(xs) * q.Rows * q.Cols
+	if shouldParallel(work, len(xs)) && len(xs) > 1 {
+		workers := runtime.GOMAXPROCS(0)
+		if q.Rows*q.Cols < 1<<16 {
+			workers = min(workers, 8)
+		}
+		parallelForMax(len(xs), workers, func(start, end int) {
+			for i := start; i < end; i++ {
+				matVecQ8BiasSerial(out[i], xs[i], q, bias, 0, q.Rows)
+			}
+		})
+		return
+	}
+	for i := range xs {
+		matVecQ8BiasSerial(out[i], xs[i], q, bias, 0, q.Rows)
 	}
 }
 

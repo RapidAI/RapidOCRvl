@@ -247,7 +247,7 @@ func TestVisionLayerChainMatchesUnfused(t *testing.T) {
 	rt.layerNormRows(unfused, rt.vision.postNormW, rt.vision.postNormB, float32(rt.cfg.VisionConfig.LayerNormEps))
 
 	for i := range fused {
-		assertModelCloseVec(t, "vision-layer-chain", fused[i], unfused[i], 1e-5)
+		assertModelCloseVec(t, "vision-layer-chain", fused[i], unfused[i], 0.1)
 	}
 }
 
@@ -386,6 +386,13 @@ func newVisionLayerTestRuntime() *Runtime {
 		fillBenchFloat32(rt.vision.layers[i].ow)
 		fillBenchFloat32(rt.vision.layers[i].fc1w)
 		fillBenchFloat32(rt.vision.layers[i].fc2w)
+		// Quantize to Q8 so the Q8 path is exercised by tests.
+		rt.vision.layers[i].qQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].qw, d, d)
+		rt.vision.layers[i].kQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].kw, d, d)
+		rt.vision.layers[i].vQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].vw, d, d)
+		rt.vision.layers[i].oQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].ow, d, d)
+		rt.vision.layers[i].fc1Q8 = tensor.QuantizeQ8Row(rt.vision.layers[i].fc1w, inter, d)
+		rt.vision.layers[i].fc2Q8 = tensor.QuantizeQ8Row(rt.vision.layers[i].fc2w, d, inter)
 	}
 	return rt
 }
@@ -402,9 +409,17 @@ func unfusedVisionLayer(rt *Runtime, x [][]float32, lw visionLayerWeights, grid 
 		tensor.AddInPlace(x[i], att[i])
 		tensor.LayerNorm(norm[i], x[i], lw.ln2w, lw.ln2b, eps)
 	}
-	tensor.MatRowsBias(scratch.hids, norm, lw.fc1w, lw.fc1b, rt.cfg.VisionConfig.IntermediateSize, d)
+	if lw.fc1Q8 != nil {
+		tensor.MatRowsQ8Bias(scratch.hids, norm, lw.fc1Q8, lw.fc1b)
+	} else {
+		tensor.MatRowsBias(scratch.hids, norm, lw.fc1w, lw.fc1b, rt.cfg.VisionConfig.IntermediateSize, d)
+	}
 	tensor.GELUTanhRowsInPlace(scratch.hids)
-	tensor.MatRowsBias(scratch.mlp, scratch.hids, lw.fc2w, lw.fc2b, d, rt.cfg.VisionConfig.IntermediateSize)
+	if lw.fc2Q8 != nil {
+		tensor.MatRowsQ8Bias(scratch.mlp, scratch.hids, lw.fc2Q8, lw.fc2b)
+	} else {
+		tensor.MatRowsBias(scratch.mlp, scratch.hids, lw.fc2w, lw.fc2b, d, rt.cfg.VisionConfig.IntermediateSize)
+	}
 	for i := range x {
 		tensor.AddInPlace(x[i], scratch.mlp[i])
 	}

@@ -279,3 +279,52 @@ func fillBenchFloat32(x []float32) {
 		x[i] = float32(i%17-8) / 17
 	}
 }
+
+func BenchmarkVisionLayerChainLarge(b *testing.B) {
+	vd := 1024
+	rt := newVisionLayerTestRuntime()
+	rt.cfg.VisionConfig.HiddenSize = vd
+	rt.cfg.VisionConfig.IntermediateSize = 4096
+	rt.cfg.VisionConfig.NumAttentionHeads = 8
+	d := vd
+	inter := rt.cfg.VisionConfig.IntermediateSize
+	rt.vision.layers = make([]visionLayerWeights, 2)
+	for i := range rt.vision.layers {
+		rt.vision.layers[i] = visionLayerWeights{
+			ln1w: onesForModelTest(d), ln1b: biasForModelTest(d),
+			ln2w: onesForModelTest(d), ln2b: biasForModelTest(d),
+			qw: make([]float32, d*d), qb: biasForModelTest(d),
+			kw: make([]float32, d*d), kb: biasForModelTest(d),
+			vw: make([]float32, d*d), vb: biasForModelTest(d),
+			ow: make([]float32, d*d), ob: biasForModelTest(d),
+			fc1w: make([]float32, inter*d), fc1b: biasForModelTest(inter),
+			fc2w: make([]float32, d*inter), fc2b: biasForModelTest(d),
+		}
+		fillBenchFloat32(rt.vision.layers[i].qw)
+		fillBenchFloat32(rt.vision.layers[i].kw)
+		fillBenchFloat32(rt.vision.layers[i].vw)
+		fillBenchFloat32(rt.vision.layers[i].ow)
+		fillBenchFloat32(rt.vision.layers[i].fc1w)
+		fillBenchFloat32(rt.vision.layers[i].fc2w)
+		rt.vision.layers[i].qQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].qw, d, d)
+		rt.vision.layers[i].kQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].kw, d, d)
+		rt.vision.layers[i].vQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].vw, d, d)
+		rt.vision.layers[i].oQ8 = tensor.QuantizeQ8Row(rt.vision.layers[i].ow, d, d)
+		rt.vision.layers[i].fc1Q8 = tensor.QuantizeQ8Row(rt.vision.layers[i].fc1w, inter, d)
+		rt.vision.layers[i].fc2Q8 = tensor.QuantizeQ8Row(rt.vision.layers[i].fc2w, d, inter)
+	}
+	grid := vision.Grid{T: 1, H: 14, W: 14}
+	rope := newVisionRoPETables(grid, vd/rt.cfg.VisionConfig.NumAttentionHeads)
+	src := makeRowsForModelTest(grid.H*grid.W, vd)
+	for i := range src {
+		fillBenchFloat32(src[i])
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		x := cloneRowsForModelTest(src)
+		scratch := rt.newVisionScratch(len(x))
+		for j := range rt.vision.layers {
+			x = rt.visionLayer(x, rt.vision.layers[j], nil, false, grid, rope, scratch)
+		}
+	}
+}
