@@ -998,6 +998,29 @@ func fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q8Mat
 func fusedMatVec3Q8Serial(outA, outB, outC, x []float32, a, b, c *Q8Matrix, start, end int) {
 	splitB := a.Rows + b.Rows
 	aEnd := min(end, a.Rows)
+	if useVNNI && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < aEnd; r++ {
+			base := r * a.Cols
+			outA[r] = dotQ8VNNI(a.Data[base:base+a.Cols], xq, scaleX, a.Scale[r], a.RowSum[r])
+		}
+		bStart := max(start, a.Rows)
+		bEnd := min(end, splitB)
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * b.Cols
+			outB[br] = dotQ8VNNI(b.Data[base:base+b.Cols], xq, scaleX, b.Scale[br], b.RowSum[br])
+		}
+		cStart := max(start, splitB)
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * c.Cols
+			outC[cr] = dotQ8VNNI(c.Data[base:base+c.Cols], xq, scaleX, c.Scale[cr], c.RowSum[cr])
+		}
+		return
+	}
 	for r := start; r < aEnd; r++ {
 		base := r * a.Cols
 		outA[r] = dotQ8(a.Data[base:base+a.Cols], x) * a.Scale[r]
@@ -1268,6 +1291,29 @@ func fusedMatVec3Q6Serial(outA, outB, outC, x []float32, a, b, c *Q6Matrix, star
 	allUnpacked := a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil
 	splitB := a.Rows + b.Rows
 	aEnd := min(end, a.Rows)
+	if useVNNI && allUnpacked && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < aEnd; r++ {
+			base := r * a.Cols
+			outA[r] = dotQ8VNNI(a.Unpacked[base:base+a.Cols], xq, scaleX, a.Scale[r], a.RowSum[r])
+		}
+		bStart := max(start, a.Rows)
+		bEnd := min(end, splitB)
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * b.Cols
+			outB[br] = dotQ8VNNI(b.Unpacked[base:base+b.Cols], xq, scaleX, b.Scale[br], b.RowSum[br])
+		}
+		cStart := max(start, splitB)
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * c.Cols
+			outC[cr] = dotQ8VNNI(c.Unpacked[base:base+c.Cols], xq, scaleX, c.Scale[cr], c.RowSum[cr])
+		}
+		return
+	}
 	if allUnpacked {
 		for r := start; r < aEnd; r++ {
 			base := r * a.Cols
@@ -1407,6 +1453,29 @@ func fusedMatVec3Q4Serial(outA, outB, outC, x []float32, a, b, c *Q4Matrix, star
 	allUnpacked := a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil
 	splitB := a.Rows + b.Rows
 	aEnd := min(end, a.Rows)
+	if useVNNI && allUnpacked && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < aEnd; r++ {
+			base := r * a.Cols
+			outA[r] = dotQ8VNNI(a.Unpacked[base:base+a.Cols], xq, scaleX, a.Scale[r], a.RowSum[r])
+		}
+		bStart := max(start, a.Rows)
+		bEnd := min(end, splitB)
+		for r := bStart; r < bEnd; r++ {
+			br := r - a.Rows
+			base := br * b.Cols
+			outB[br] = dotQ8VNNI(b.Unpacked[base:base+b.Cols], xq, scaleX, b.Scale[br], b.RowSum[br])
+		}
+		cStart := max(start, splitB)
+		for r := cStart; r < end; r++ {
+			cr := r - splitB
+			base := cr * c.Cols
+			outC[cr] = dotQ8VNNI(c.Unpacked[base:base+c.Cols], xq, scaleX, c.Scale[cr], c.RowSum[cr])
+		}
+		return
+	}
 	if allUnpacked {
 		for r := start; r < aEnd; r++ {
 			base := r * a.Cols
