@@ -5402,7 +5402,6 @@ TEXT ·ropeFMA(SB), NOSPLIT, $0-88
 	MOVQ BX, CX
 	SHRQ $1, CX
 	IMULQ $4, BX
-
 ropeFmaHeadLoop:
 	TESTQ AX, AX
 	JZ ropeFmaDone
@@ -5410,35 +5409,29 @@ ropeFmaHeadLoop:
 	MOVQ SI, R11
 	LEAQ (SI)(CX*4), R10
 	MOVQ CX, R9
-
 ropeFmaInnerLoop:
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB ropeFmaInnerTail
-	VMOVUPS (DI), Y0          // cos
-	VMOVUPS (R8), Y1          // sin
-	VMOVUPS (SI), Y2          // a
-	VMOVUPS (R10), Y3         // b
-	// new_a = a*cos - b*sin
-	VMULPS Y0, Y2, Y4         // Y4 = a*cos
-	VMULPS Y1, Y3, Y5         // Y5 = b*sin
-	VSUBPS Y5, Y4, Y4         // Y4 = a*cos - b*sin
-	// new_b = b*cos + a*sin (VFMADD: Y6 = b*cos + a*sin)
-	VMULPS Y0, Y3, Y6         // Y6 = b*cos
-	VFMADD231PS Y1, Y2, Y6    // Y6 = b*cos + a*sin
-	VMOVUPS Y4, (SI)
-	VMOVUPS Y6, (R10)
-	ADDQ $32, SI
-	ADDQ $32, R10
-	ADDQ $32, DI
-	ADDQ $32, R8
-	SUBQ $8, R9
+	VMOVUPS (DI), Z0          // cos
+	VMOVUPS (R8), Z1          // sin
+	VMOVUPS (SI), Z2          // a
+	VMOVUPS (R10), Z3         // b
+	VMULPS Z0, Z2, Z4         // Z4 = a*cos
+	VMULPS Z1, Z3, Z5         // Z5 = b*sin
+	VSUBPS Z5, Z4, Z4         // Z4 = a*cos - b*sin
+	VMULPS Z0, Z3, Z6         // Z6 = b*cos
+	VFMADD231PS Z1, Z2, Z6    // Z6 = b*cos + a*sin
+	VMOVUPS Z4, (SI)
+	VMOVUPS Z6, (R10)
+	ADDQ $64, SI
+	ADDQ $64, R10
+	ADDQ $64, DI
+	ADDQ $64, R8
+	SUBQ $16, R9
 	JMP ropeFmaInnerLoop
-
-
 ropeFmaInnerTail:
 	CMPQ R9, $0
 	JE ropeFmaHeadAdvance
-
 	MOVSS (R8), X1
 	MOVSS (SI), X2
 	MOVSS (R10), X3
@@ -5459,7 +5452,6 @@ ropeFmaInnerTail:
 	ADDQ $4, R8
 	DECQ R9
 	JMP ropeFmaInnerTail
-
 ropeFmaHeadAdvance:
 	VZEROUPPER
 	MOVQ cosTable_base+24(FP), DI
@@ -5467,11 +5459,8 @@ ropeFmaHeadAdvance:
 	MOVQ R11, SI
 	ADDQ BX, SI
 	JMP ropeFmaHeadLoop
-
 ropeFmaDone:
 	RET
-
-
 TEXT ·geluTanhAVX(SB), NOSPLIT, $0-24
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
