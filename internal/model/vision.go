@@ -68,6 +68,7 @@ type visionScratch struct {
 	mlp     [][]float32
 	hids    [][]float32
 	scores  []float32
+	scoreBufs [][]float32
 }
 
 func (rt *Runtime) EncodeImage(path string) ([][]float32, error) {
@@ -174,6 +175,7 @@ func (rt *Runtime) newVisionScratch(tokens int) *visionScratch {
 		mlp:     nextHiddenRows(),
 		hids:    makeRows(tokens, inter),
 		scores:  make([]float32, tokens),
+		scoreBufs: make([][]float32, runtime.GOMAXPROCS(0)),
 	}
 }
 
@@ -511,14 +513,58 @@ func (rt *Runtime) visionAttention(x [][]float32, lw visionLayerWeights, grid vi
 	applyVisionRoPEPair(q, k, grid, heads, hd, rope)
 	headOut := scratch.headOut
 	scale := invSqrt(hd)
-	scores := scratch.scores[:n]
-	for h := 0; h < heads; h++ {
-		for i := 0; i < n; i++ {
-			qi := q[i][h*hd : (h+1)*hd]
-			visionAttentionScores(scores, qi, k, h*hd, hd, scale)
-			tensor.SoftmaxInPlace(scores)
-			dst := headOut[i][h*hd : (h+1)*hd]
-			weightedValueSum(dst, v, h*hd, hd, scores)
+	// Ensure per-worker score buffers are allocated.
+	for i := range scratch.scoreBufs {
+		if cap(scratch.scoreBufs[i]) < n {
+			scratch.scoreBufs[i] = make([]float32, n)
+		} else {
+			scratch.scoreBufs[i] = scratch.scoreBufs[i][:n]
+		}
+	}
+	// Parallelize attention across heads when there is enough work.
+	if heads >= 2 && n >= 8 && runtime.GOMAXPROCS(0) > 1 {
+		var wg sync.WaitGroup
+		workers := min(heads, runtime.GOMAXPROCS(0))
+		for w := 1; w < workers; w++ {
+			startH := w * heads / workers
+			endH := (w + 1) * heads / workers
+			wg.Add(1)
+			go func(sh, eh int, scores []float32) {
+				defer wg.Done()
+				for h := sh; h < eh; h++ {
+					for i := 0; i < n; i++ {
+						qi := q[i][h*hd : (h+1)*hd]
+						visionAttentionScores(scores, qi, k, h*hd, hd, scale)
+						tensor.SoftmaxInPlace(scores)
+						dst := headOut[i][h*hd : (h+1)*hd]
+						weightedValueSum(dst, v, h*hd, hd, scores)
+					}
+				}
+			}(startH, endH, scratch.scoreBufs[w])
+		}
+		// Main worker handles its share.
+		endH0 := heads / workers
+		scores := scratch.scoreBufs[0]
+		for h := 0; h < endH0; h++ {
+			for i := 0; i < n; i++ {
+				qi := q[i][h*hd : (h+1)*hd]
+				visionAttentionScores(scores, qi, k, h*hd, hd, scale)
+				tensor.SoftmaxInPlace(scores)
+				dst := headOut[i][h*hd : (h+1)*hd]
+				weightedValueSum(dst, v, h*hd, hd, scores)
+			}
+		}
+		wg.Wait()
+	} else {
+		scores := scratch.scores[:n]
+		for h := 0; h < heads; h++ {
+			for i := 0; i < n; i++ {
+				qi := q[i][h*hd : (h+1)*hd]
+				visionAttentionScores(scores, qi, k, h*hd, hd, scale)
+				tensor.SoftmaxInPlace(scores)
+				dst := headOut[i][h*hd : (h+1)*hd]
+				weightedValueSum(dst, v, h*hd, hd, scores)
+			}
 		}
 	}
 	out := scratch.attOut
