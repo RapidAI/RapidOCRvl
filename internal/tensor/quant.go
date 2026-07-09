@@ -640,6 +640,25 @@ func FusedSwiGLUQ6Scratch(out, x []float32, gate, up, down *Q6Matrix, tmpG []flo
 	MatVecQ6(out, tmpG, down)
 }
 
+// SwiGLUGateUpQ8Scratch computes the SwiGLU gate+up projection without the down matvec.
+// Result is written to out[:gate.Rows]. tmpU is used for batched SiLU.
+func SwiGLUGateUpQ8Scratch(out, x []float32, gate, up *Q8Matrix, tmpU []float32) {
+	out, tmpU = swiGLUQuantScratch(out, gate.Rows, up.Rows)
+	matVecQ8SwiGLUScratch(out, x, gate, up, tmpU)
+}
+
+// SwiGLUGateUpQ4Scratch computes the SwiGLU gate+up projection without the down matvec.
+func SwiGLUGateUpQ4Scratch(out, x []float32, gate, up *Q4Matrix, tmpU []float32) {
+	out, tmpU = swiGLUQuantScratch(out, gate.Rows, up.Rows)
+	matVecQ4SwiGLUScratch(out, x, gate, up, tmpU)
+}
+
+// SwiGLUGateUpQ6Scratch computes the SwiGLU gate+up projection without the down matvec.
+func SwiGLUGateUpQ6Scratch(out, x []float32, gate, up *Q6Matrix, tmpU []float32) {
+	out, tmpU = swiGLUQuantScratch(out, gate.Rows, up.Rows)
+	matVecQ6SwiGLUScratch(out, x, gate, up, tmpU)
+}
+
 func swiGLUQuantScratch(tmp []float32, gateRows, upRows int) ([]float32, []float32) {
 	gateTmp := tmp[:gateRows]
 	upScratchRows := min(gateRows, upRows)

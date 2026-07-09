@@ -3582,14 +3582,18 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 		if !lastLayer {
 			nextNorm := layers[li+1].norm[:c.HiddenSize]
 			if !rt.mlpAddRMSNormMaybeVulkan(sc.norm, tl, sc, h, rt.textLayers[li+1].w.ln1, nextNorm, float32(c.RMSNormEps), true) {
-				mlp := rt.mlp(sc.norm, tl, sc)
-				rt.addRMSNormMaybeVulkan(nextNorm, h, mlp, rt.textLayers[li+1].w.ln1, float32(c.RMSNormEps))
+				if !rt.mlpDownAddRMSNormCPU(nextNorm, h, sc.norm, tl, sc, rt.textLayers[li+1].w.ln1, true) {
+					mlp := rt.mlp(sc.norm, tl, sc)
+					rt.addRMSNormMaybeVulkan(nextNorm, h, mlp, rt.textLayers[li+1].w.ln1, float32(c.RMSNormEps))
+				}
 			}
 		} else {
 			finalNorm := scratch.norm[:c.HiddenSize]
 			if !rt.mlpAddRMSNormMaybeVulkan(sc.norm, tl, sc, h, rt.finalNorm, finalNorm, float32(c.RMSNormEps), false) {
-				mlp := rt.mlp(sc.norm, tl, sc)
-				rt.addRMSNormOutOnlyMaybeVulkan(finalNorm, h, mlp, rt.finalNorm, float32(c.RMSNormEps))
+				if !rt.mlpDownAddRMSNormCPU(finalNorm, h, sc.norm, tl, sc, rt.finalNorm, false) {
+					mlp := rt.mlp(sc.norm, tl, sc)
+					rt.addRMSNormOutOnlyMaybeVulkan(finalNorm, h, mlp, rt.finalNorm, float32(c.RMSNormEps))
+				}
 			}
 		}
 	}
@@ -5349,6 +5353,81 @@ func (rt *Runtime) mlp(x []float32, tl *textLayer, sc *layerScratch) []float32 {
 	}
 	tensor.FusedSwiGLUF32ScratchWithU(out, x, tl.w.gate, tl.w.up, tl.w.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize, g, uScratch)
 	return out
+}
+
+// mlpDownAddRMSNormCPU fuses the MLP down-projection matvec with AddRMSNorm on CPU.
+// This saves one full pass over the hidden-size output vector.
+// Returns true if the fused path was used, false if caller should use separate calls.
+func (rt *Runtime) mlpDownAddRMSNormCPU(normOut, residual, x []float32, tl *textLayer, sc *layerScratch, normWeight []float32, readResidual bool) bool {
+	c := rt.cfg
+	if len(normOut) < c.HiddenSize || len(residual) < c.HiddenSize || len(x) < c.HiddenSize {
+		return false
+	}
+	intermediate := c.IntermediateSize
+	g := sc.gate[:intermediate]
+	eps := float32(c.RMSNormEps)
+
+	// Q8 path
+	if tl.q8.gate != nil && tl.q8.up != nil && tl.q8.down != nil {
+		// Phase 1: gate+up SwiGLU -> intermediate
+		if !rt.swiGLUGateUpQ8MaybeVulkan(g, x, tl.q8.gate, tl.q8.up, tl.q8.down) {
+			uScratch := sc.up
+			if cap(uScratch) >= intermediate {
+				uScratch = uScratch[:intermediate]
+			} else {
+				uScratch = nil
+			}
+			tensor.SwiGLUGateUpQ8Scratch(g, x, tl.q8.gate, tl.q8.up, uScratch)
+		}
+		// Phase 2: fused down matvec + AddRMSNorm
+		if readResidual {
+			tensor.MatVecQ8AddRMSNorm(normOut, residual, g, tl.q8.down, normWeight, eps)
+		} else {
+			tensor.MatVecQ8AddRMSNormOutOnly(normOut, residual, g, tl.q8.down, normWeight, eps)
+		}
+		return true
+	}
+
+	// Q4 path
+	if tl.q4.gate != nil && tl.q4.up != nil && tl.q4.down != nil {
+		if !rt.swiGLUGateUpQ4MaybeVulkan(g, x, tl.q4.gate, tl.q4.up, tl.q4.down) {
+			uScratch := sc.up
+			if cap(uScratch) >= intermediate {
+				uScratch = uScratch[:intermediate]
+			} else {
+				uScratch = nil
+			}
+			tensor.SwiGLUGateUpQ4Scratch(g, x, tl.q4.gate, tl.q4.up, uScratch)
+		}
+		if readResidual {
+			// Q4 in-place variant not implemented yet; use out-only + copy
+			return false
+		}
+		tensor.MatVecQ4AddRMSNormOutOnly(normOut, residual, g, tl.q4.down, normWeight, eps)
+		return true
+	}
+
+	// Q6 path
+	if tl.q6.gate != nil && tl.q6.up != nil && tl.q6.down != nil {
+		if !rt.swiGLUGateUpQ6MaybeVulkan(g, x, tl.q6.gate, tl.q6.up, tl.q6.down) {
+			uScratch := sc.up
+			if cap(uScratch) >= intermediate {
+				uScratch = uScratch[:intermediate]
+			} else {
+				uScratch = nil
+			}
+			tensor.SwiGLUGateUpQ6Scratch(g, x, tl.q6.gate, tl.q6.up, uScratch)
+		}
+		if readResidual {
+			// Q6 in-place variant not implemented yet; use out-only + copy
+			return false
+		}
+		tensor.MatVecQ6AddRMSNormOutOnly(normOut, residual, g, tl.q6.down, normWeight, eps)
+		return true
+	}
+
+	// F32 path: not fused yet
+	return false
 }
 
 func (rt *Runtime) swiGLUGateUpMaybeVulkan(out, x, gate, up []float32, rows, cols, outRows int) bool {
