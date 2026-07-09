@@ -16,6 +16,7 @@ type Q4Matrix struct {
 	Data     []byte
 	Unpacked []int8
 	Scale    []float32
+	RowSum   []int32 // per-row sum of int8 weights, for VNNI offset correction
 }
 
 type Q6Matrix struct {
@@ -161,6 +162,7 @@ func QuantizeQ4Row(w []float32, rows, cols int) *Q4Matrix {
 		Data:     make([]byte, rows*((cols+1)/2)),
 		Unpacked: make([]int8, rows*cols),
 		Scale:    make([]float32, rows),
+		RowSum:   make([]int32, rows),
 	}
 	if shouldParallelQuantizeRows(rows*cols, rows) {
 		parallelForQuantizeRows(rows, func(start, end int) {
@@ -744,6 +746,17 @@ func matVecQ4SwiGLUScratch(out, x []float32, gate, up *Q4Matrix, tmpU []float32)
 }
 
 func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) {
+	if useVNNI && gate.Unpacked != nil && up.Unpacked != nil && gate.Cols >= 32 && gate.RowSum != nil && up.RowSum != nil {
+		xq := getVNNIScratch(gate.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * gate.Cols
+			g, u := dotQ8PairVNNI(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+			out[r] = SiLU(g) * u
+		}
+		return
+	}
 	if gate.Unpacked != nil && up.Unpacked != nil {
 		for r := start; r < end; r++ {
 			base := r * gate.Cols
@@ -1055,6 +1068,18 @@ func matVecQ4Pair(outA, outB, x []float32, a, b *Q4Matrix) {
 }
 
 func matVecQ4PairSerial(outA, outB, x []float32, a, b *Q4Matrix, start, end int) {
+	if useVNNI && a.Unpacked != nil && b.Unpacked != nil && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv := dotQ8PairVNNI(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], a.Scale[r], b.Scale[r])
+			outA[r] = av
+			outB[r] = bv
+		}
+		return
+	}
 	if a.Unpacked != nil && b.Unpacked != nil {
 		for r := start; r < end; r++ {
 			base := r * a.Cols
@@ -1219,6 +1244,16 @@ func matVecQ6Serial(out, x []float32, q *Q6Matrix, start, end int) {
 }
 
 func matVecQ4Serial(out, x []float32, q *Q4Matrix, start, end int) {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * q.Cols
+			out[r] = dotQ8VNNI(q.Unpacked[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+		}
+		return
+	}
 	if q.Unpacked != nil {
 		for r := start; r < end; r++ {
 			base := r * q.Cols
@@ -1240,6 +1275,19 @@ func fusedMatVec3Q4Parallel(outA, outB, outC, x []float32, a, b, c *Q4Matrix, to
 }
 
 func fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q4Matrix, start, end int) {
+	if useVNNI && a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv, cv := dotQ8TripletVNNI(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], c.Unpacked[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			outA[r] = av
+			outB[r] = bv
+			outC[r] = cv
+		}
+		return
+	}
 	if a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil {
 		for r := start; r < end; r++ {
 			base := r * a.Cols
@@ -1531,6 +1579,9 @@ func UnpackQ4Matrix(q *Q4Matrix) {
 	if q.Unpacked == nil {
 		q.Unpacked = make([]int8, q.Rows*q.Cols)
 	}
+	if q.RowSum == nil {
+		q.RowSum = make([]int32, q.Rows)
+	}
 	packedCols := (q.Cols + 1) / 2
 	if shouldParallel(q.Rows*q.Cols, q.Rows) {
 		parallelFor(q.Rows, func(start, end int) {
@@ -1538,6 +1589,9 @@ func UnpackQ4Matrix(q *Q4Matrix) {
 				row := q.Data[r*packedCols : (r+1)*packedCols]
 				out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
 				unpackQ4RowFast(row, out, q.Cols)
+				if useVNNI {
+					q.RowSum[r] = rowSumQ8(out)
+				}
 			}
 		})
 		return
@@ -1546,6 +1600,9 @@ func UnpackQ4Matrix(q *Q4Matrix) {
 		row := q.Data[r*packedCols : (r+1)*packedCols]
 		out := q.Unpacked[r*q.Cols : (r+1)*q.Cols]
 		unpackQ4RowFast(row, out, q.Cols)
+		if useVNNI {
+			q.RowSum[r] = rowSumQ8(out)
+		}
 	}
 }
 
