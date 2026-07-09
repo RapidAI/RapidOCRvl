@@ -1457,17 +1457,22 @@ mulScaleFmaRet:
 	RET
 
 // affineNormFMA: out[i] = (x[i]-mean)*scale*weight[i] + bias[i].
-// Uses VSUBPS, VMULPS, VMULPS, VADDPS (same as AVX; FMA can fuse last mul+add
-// via VFMADD213PS but requires pre-loading bias into a register, which doesn't
-// help when bias is streamed from memory).
+// Fuses the subtract+multiply into a single VFMADD132PS by pre-computing
+// neg_mean_scale = -(mean*scale). The last mul+add is fused via VFMADD231PS
+// with bias streamed from memory. This reduces the critical path from
+// VSUBPS+VMULPS+VFMADD231PS (3 instr) to VFMADD132PS+VFMADD231PS (2 instr).
 TEXT ·affineNormFMA(SB), NOSPLIT, $0-104
 	MOVQ out_base+0(FP), SI
 	MOVQ out_len+8(FP), CX
 	MOVQ x_base+24(FP), DI
 	MOVQ weight_base+48(FP), R8
 	MOVQ bias_base+72(FP), R9
-	VBROADCASTSS mean+96(FP), Y2
 	VBROADCASTSS scale+100(FP), Y3
+	VXORPS X1, X1, X1
+	MOVSS mean+96(FP), X2
+	MULSS X3, X2
+	VSUBSS X2, X1, X1
+	VBROADCASTSS X1, Y2
 	CMPQ CX, $8
 	JB affineNormFmaTail
 
@@ -1475,26 +1480,22 @@ affineNormFmaLoop32:
 	CMPQ CX, $32
 	JB affineNormFmaLoop
 	VMOVUPS (DI), Y0
-	VSUBPS Y2, Y0, Y0
-	VMULPS Y3, Y0, Y0
+	VFMADD132PS Y3, Y2, Y0
 	VMOVUPS (R9), Y10
 	VFMADD231PS (R8), Y0, Y10
 	VMOVUPS Y10, (SI)
 	VMOVUPS 32(DI), Y4
-	VSUBPS Y2, Y4, Y4
-	VMULPS Y3, Y4, Y4
+	VFMADD132PS Y3, Y2, Y4
 	VMOVUPS 32(R9), Y10
 	VFMADD231PS 32(R8), Y4, Y10
 	VMOVUPS Y10, 32(SI)
 	VMOVUPS 64(DI), Y0
-	VSUBPS Y2, Y0, Y0
-	VMULPS Y3, Y0, Y0
+	VFMADD132PS Y3, Y2, Y0
 	VMOVUPS 64(R9), Y10
 	VFMADD231PS 64(R8), Y0, Y10
 	VMOVUPS Y10, 64(SI)
 	VMOVUPS 96(DI), Y4
-	VSUBPS Y2, Y4, Y4
-	VMULPS Y3, Y4, Y4
+	VFMADD132PS Y3, Y2, Y4
 	VMOVUPS 96(R9), Y10
 	VFMADD231PS 96(R8), Y4, Y10
 	VMOVUPS Y10, 96(SI)
@@ -1509,8 +1510,7 @@ affineNormFmaLoop:
 	CMPQ CX, $8
 	JB affineNormFmaDone
 	VMOVUPS (DI), Y0
-	VSUBPS Y2, Y0, Y0
-	VMULPS Y3, Y0, Y0
+	VFMADD132PS Y3, Y2, Y0
 	VMOVUPS (R9), Y10
 	VFMADD231PS (R8), Y0, Y10
 	VMOVUPS Y10, (SI)
@@ -1528,8 +1528,7 @@ affineNormFmaTail:
 	CMPQ CX, $0
 	JE affineNormFmaRet
 	MOVSS (DI), X0
-	SUBSS mean+96(FP), X0
-	MULSS scale+100(FP), X0
+	VFMADD132SS X3, X1, X0
 	MULSS (R8), X0
 	ADDSS (R9), X0
 	MOVSS X0, (SI)
@@ -1543,7 +1542,6 @@ affineNormFmaTail:
 affineNormFmaRet:
 	RET
 
-// sumSquaresCenteredFMA: sum((x[i]-mean)^2) using FMA.
 TEXT ·sumSquaresCenteredFMA(SB), NOSPLIT, $32-36
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
