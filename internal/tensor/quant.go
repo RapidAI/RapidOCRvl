@@ -1614,10 +1614,12 @@ func matVecQ6Serial(out, x []float32, q *Q6Matrix, start, end int) {
 		rowSum := q.RowSum
 		cols := q.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-				out[r] = float32(dot-128*rowSum[r]) * scaleX * scale[r]
+			nRows := end - start
+			scratch := getInt32Scratch(nRows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				out[start+r] = float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
 			}
 			return
 		}
@@ -1651,10 +1653,12 @@ func matVecQ4Serial(out, x []float32, q *Q4Matrix, start, end int) {
 		rowSum := q.RowSum
 		cols := q.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-				out[r] = float32(dot-128*rowSum[r]) * scaleX * scale[r]
+			nRows := end - start
+			scratch := getInt32Scratch(nRows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				out[start+r] = float32(scratch[r]-128*rowSum[start+r]) * scaleX * scale[start+r]
 			}
 			return
 		}
