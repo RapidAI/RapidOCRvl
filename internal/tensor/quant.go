@@ -3,10 +3,11 @@ package tensor
 import "runtime"
 
 type Q8Matrix struct {
-	Rows  int
-	Cols  int
-	Data  []int8
-	Scale []float32
+	Rows   int
+	Cols   int
+	Data   []int8
+	Scale  []float32
+	RowSum []int32 // sum of int8 weights per row, for VNNI offset correction
 }
 
 type Q4Matrix struct {
@@ -27,10 +28,11 @@ type Q6Matrix struct {
 
 func QuantizeQ8Row(w []float32, rows, cols int) *Q8Matrix {
 	q := &Q8Matrix{
-		Rows:  rows,
-		Cols:  cols,
-		Data:  make([]int8, rows*cols),
-		Scale: make([]float32, rows),
+		Rows:   rows,
+		Cols:   cols,
+		Data:   make([]int8, rows*cols),
+		Scale:  make([]float32, rows),
+		RowSum: make([]int32, rows),
 	}
 	if shouldParallelQuantizeRows(rows*cols, rows) {
 		parallelForQuantizeRows(rows, func(start, end int) {
@@ -146,6 +148,9 @@ func quantizeQ8Rows(w []float32, q *Q8Matrix, start, end int) {
 	for r := start; r < end; r++ {
 		base := r * q.Cols
 		q.Scale[r] = QuantizeQ8RowInto(w[base:base+q.Cols], q.Data[base:base+q.Cols])
+		if useVNNI {
+			q.RowSum[r] = rowSumQ8(q.Data[base:base+q.Cols])
+		}
 	}
 }
 
@@ -940,6 +945,16 @@ func fusedMatVec3Q8Serial(outA, outB, outC, x []float32, a, b, c *Q8Matrix, star
 }
 
 func matVecQ8Serial(out, x []float32, q *Q8Matrix, start, end int) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * q.Cols
+			out[r] = dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+		}
+		return
+	}
 	for r := start; r < end; r++ {
 		base := r * q.Cols
 		out[r] = dotQ8(q.Data[base:base+q.Cols], x) * q.Scale[r]
@@ -1008,6 +1023,16 @@ func MatVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, en
 }
 
 func matVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, end int) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * q.Cols
+			out[r] = dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r]) + bias[r]
+		}
+		return
+	}
 	for r := start; r < end; r++ {
 		base := r * q.Cols
 		out[r] = dotQ8(q.Data[base:base+q.Cols], x)*q.Scale[r] + bias[r]
@@ -1292,6 +1317,68 @@ func dotQ8(a []int8, b []float32) float32 {
 		return dotQ8AVX2(a, b)
 	}
 	return dotQ8Scalar(a, b)
+}
+
+// rowSumQ8 computes the sum of int8 values in a row as int32.
+func rowSumQ8(a []int8) int32 {
+	if useVNNI && len(a) >= 8 {
+		return rowSumQ8AVX2(a)
+	}
+	var s int32
+	for _, v := range a {
+		s += int32(v)
+	}
+	return s
+}
+
+// quantizeXForVNNI quantizes a float32 vector x into uint8 with offset 128.
+// Returns (xq, scaleX) where scaleX = maxAbs(x)/127.
+// The caller must provide xq with at least len(x) capacity.
+func quantizeXForVNNI(x []float32, xq []uint8) float32 {
+	if useVNNI && len(x) >= 8 {
+		return quantizeXForVNNIAVX2(x, xq)
+	}
+	maxAbs := maxAbsFloat32(x)
+	if maxAbs == 0 {
+		for i := range xq[:len(x)] {
+			xq[i] = 128
+		}
+		return 1
+	}
+	scale := maxAbs / 127
+	inv := 1 / scale
+	for i, v := range x {
+		q := int(v*inv + 128)
+		if q < 0 {
+			q = 0
+		} else if q > 255 {
+			q = 255
+		}
+		xq[i] = byte(q)
+	}
+	return scale
+}
+
+// vnniScratchBuf returns a reusable uint8 buffer for x quantization.
+// Uses a sync.Pool-like approach with a package-level buffer.
+var vnniScratchPool = make(chan []uint8, 32)
+
+func getVNNIScratch(n int) []uint8 {
+	select {
+	case buf := <-vnniScratchPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]uint8, n)
+}
+
+func putVNNIScratch(buf []uint8) {
+	select {
+	case vnniScratchPool <- buf:
+	default:
+	}
 }
 
 func dotQ8Scalar(a []int8, b []float32) float32 {

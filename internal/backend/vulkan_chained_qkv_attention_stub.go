@@ -23,7 +23,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	normOut, residual, x []float32,
 	a, b, c *tensor.Q8Matrix,
 	cosTable, sinTable []float32,
-	w, bias, normWeight []float32,
+	w *tensor.Q8Matrix, bias, normWeight []float32,
 	kCache, vCache []float32,
 	cacheEpoch uint64, cacheLen, hidden, numHeads, kvHeads, headDim int,
 	outK, outV []float32,

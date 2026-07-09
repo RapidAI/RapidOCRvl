@@ -9,6 +9,7 @@ var useDotQ8AVX2 = cpu.X86.HasAVX2
 var useDotQ4AVX2 = cpu.X86.HasAVX2
 var useDotQ6AVX2 = false // Q6 AVX2 is slower than Go scalar+LUT
 var useDotFMA = cpu.X86.HasFMA
+var useVNNI = cpu.X86.HasAVXVNNI
 
 func addAVX(out, a, b []float32)
 func addInPlaceAVX(dst, x []float32)
@@ -100,3 +101,74 @@ func addInPlaceSumFMA(dst, x []float32) float32
 func sumF32FMA(x []float32) float32
 
 func maxAbsFloat32AVX2(x []float32) float32
+
+// VNNI-accelerated Q8 dot product using VPDPBUSD.
+// dotQ8VNNI scalar fallback (VNNI not available in assembly).
+func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) float32 {
+	var dot int32
+	n := len(a)
+	if len(xq) < n {
+		n = len(xq)
+	}
+	for i := 0; i < n; i++ {
+		dot += int32(a[i]) * (int32(xq[i]) - 128)
+	}
+	return float32(dot-128*rowSumW) * scaleX * scaleW
+}
+
+func dotQ8PairVNNI(a, b []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB int32, scaleWA, scaleWB float32) (float32, float32) {
+	var dotA, dotB int32
+	n := len(a)
+	if len(xq) < n {
+		n = len(xq)
+	}
+	for i := 0; i < n; i++ {
+		dotA += int32(a[i]) * (int32(xq[i]) - 128)
+		dotB += int32(b[i]) * (int32(xq[i]) - 128)
+	}
+	return float32(dotA-128*rowSumWA) * scaleX * scaleWA, float32(dotB-128*rowSumWB) * scaleX * scaleWB
+}
+
+func dotQ8TripletVNNI(a, b, c []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB, rowSumWC int32, scaleWA, scaleWB, scaleWC float32) (float32, float32, float32) {
+	var dotA, dotB, dotC int32
+	n := len(a)
+	if len(xq) < n {
+		n = len(xq)
+	}
+	for i := 0; i < n; i++ {
+		dotA += int32(a[i]) * (int32(xq[i]) - 128)
+		dotB += int32(b[i]) * (int32(xq[i]) - 128)
+		dotC += int32(c[i]) * (int32(xq[i]) - 128)
+	}
+	return float32(dotA-128*rowSumWA) * scaleX * scaleWA, float32(dotB-128*rowSumWB) * scaleX * scaleWB, float32(dotC-128*rowSumWC) * scaleX * scaleWC
+}
+
+func rowSumQ8AVX2(a []int8) int32 {
+	var s int32
+	for _, v := range a {
+		s += int32(v)
+	}
+	return s
+}
+
+func quantizeXForVNNIAVX2(x []float32, xq []uint8) float32 {
+	maxAbs := maxAbsFloat32(x)
+	if maxAbs == 0 {
+		for i := range xq {
+			xq[i] = 128
+		}
+		return 1
+	}
+	scale := maxAbs / 127
+	inv := 1 / scale
+	for i, v := range x {
+		q := int(v*inv) + 128
+		if q < 0 {
+			q = 0
+		} else if q > 255 {
+			q = 255
+		}
+		xq[i] = uint8(q)
+	}
+	return scale
+}

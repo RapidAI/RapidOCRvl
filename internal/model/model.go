@@ -198,6 +198,7 @@ const (
 	vulkanOpChainedRMSNormQKVMRoPEF32
 	vulkanOpChainedRMSNormQKVMRoPEQ8
 	vulkanOpChainedQKVAttentionOutAddRMSNormF32
+	vulkanOpChainedQKVAttentionOutAddRMSNormQ8
 )
 
 var vulkanOpNames = [...]string{
@@ -286,6 +287,7 @@ var vulkanOpNames = [...]string{
 	vulkanOpChainedRMSNormQKVMRoPEF32:           "chained_rmsnorm_qkv_mrope_f32",
 	vulkanOpChainedRMSNormQKVMRoPEQ8:            "chained_rmsnorm_qkv_mrope_q8",
 	vulkanOpChainedQKVAttentionOutAddRMSNormF32: "chained_qkv_attention_out_norm_f32",
+	vulkanOpChainedQKVAttentionOutAddRMSNormQ8: "chained_qkv_attention_out_norm_q8",
 }
 
 type vulkanPlanCache struct {
@@ -4117,6 +4119,55 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x [
 		return true
 	} else {
 		rt.disableVulkanOp(vulkanOpChainedQKVAttentionOutAddRMSNormF32, err)
+	}
+	return false
+}
+
+
+// vulkanChainedQKVAttentionOutAddRMSNormQ8 chains fused Q8 QKV+MRoPE with
+// attention+output+AddRMSNorm into a single command buffer for Q8-quantised
+// models.  The q/k/v stay in GPU memory between QKV and attention.
+func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, x []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8) || tl == nil || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 || headDim%2 != 0 {
+		return false
+	}
+	qRows := numHeads * headDim
+	kvRows := kvHeads * headDim
+	hidden := len(x)
+	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(x) < hidden || len(normWeight) < qRows {
+		return false
+	}
+	if tl.q8.q == nil || tl.q8.k == nil || tl.q8.v == nil || tl.q8.o == nil {
+		return false
+	}
+	if !q8MatVecShapeOK(tl.q8.q, qRows, hidden) || !q8MatVecShapeOK(tl.q8.k, kvRows, hidden) || !q8MatVecShapeOK(tl.q8.v, kvRows, hidden) || !q8MatVecShapeOK(tl.q8.o, qRows, qRows) {
+		return false
+	}
+	if !fusedMRoPEShapeOK(make([]float32, qRows), make([]float32, kvRows), numHeads, kvHeads, headDim, cosTable, sinTable) {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	newK := make([]float32, kvRows)
+	newV := make([]float32, kvRows)
+	if err := backend.VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
+		normOut, residual, x,
+		tl.q8.q, tl.q8.k, tl.q8.v,
+		cosTable, sinTable,
+		tl.q8.o, rt.zeroBias(qRows), normWeight,
+		kCache, vCache,
+		cache.epoch, cache.len, hidden, numHeads, kvHeads, headDim,
+		newK, newV,
+	); err == nil {
+		cache.append(newK, newV)
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedQKVAttentionOutAddRMSNormQ8, err)
 	}
 	return false
 }

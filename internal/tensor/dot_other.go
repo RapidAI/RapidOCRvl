@@ -5,6 +5,7 @@ package tensor
 const useDotF32AVX = false
 const useDotQ8AVX2 = false
 const useDotQ4AVX2 = false
+const useVNNI = false
 
 func addAVX(out, a, b []float32) {
 	addScalar(out, a, b)
@@ -407,3 +408,57 @@ func affineNormFMA(out, x, weight, bias []float32, mean, scale float32) {
 func sumSquaresCenteredFMA(x []float32, mean float32) float32 { return sumSquaresCenteredAVX(x, mean) }
 func addInPlaceSumFMA(dst, x []float32) float32 { return addInPlaceSumAVX(dst, x) }
 func sumF32FMA(x []float32) float32 { return sumF32AVX(x) }
+
+
+func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) float32 {
+	return 0
+}
+
+func dotQ8PairVNNI(a, b []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB int32, scaleWA, scaleWB float32) (float32, float32) {
+	return 0, 0
+}
+
+func dotQ8TripletVNNI(a, b, c []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB, rowSumWC int32, scaleWA, scaleWB, scaleWC float32) (float32, float32, float32) {
+	return 0, 0, 0
+}
+
+func rowSumQ8AVX2(a []int8) int32 {
+	var s int32
+	for _, v := range a {
+		s += int32(v)
+	}
+	return s
+}
+
+func quantizeXForVNNIAVX2(x []float32, xq []uint8) float32 {
+	maxAbs := maxAbsFloat32Scalar(x)
+	if maxAbs == 0 {
+		for i := range xq {
+			xq[i] = 128
+		}
+		return 1
+	}
+	scale := maxAbs / 127
+	inv := 1 / scale
+	for i, v := range x {
+		q := int(v*inv + 128)
+		if q < 0 {
+			q = 0
+		} else if q > 255 {
+			q = 255
+		}
+		xq[i] = byte(q)
+	}
+	return scale
+}
+
+func rowSumQ8(a []int8) int32 {
+	if useDotQ8AVX2 {
+		return rowSumQ8AVX2(a)
+	}
+	var s int32
+	for _, v := range a {
+		s += int32(v)
+	}
+	return s
+}

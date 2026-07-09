@@ -2085,15 +2085,23 @@ const vulkanMatVecQ8GLSL = `#version 450
 layout(local_size_x = 256) in;
 layout(push_constant) uniform Push { uint rows; uint cols; } pc;
 layout(set=0,binding=0) readonly buffer X { float x[]; };
-layout(set=0,binding=1) readonly buffer W { int w[]; };
+layout(set=0,binding=1) readonly buffer W { uint packed[]; };
 layout(set=0,binding=2) readonly buffer S { float scale[]; };
 layout(set=0,binding=3) writeonly buffer O { float outv[]; };
 shared float scratch[256];
+float q8(uint idx) {
+  uint word = packed[idx >> 2];
+  uint shift = (idx & 3u) * 8u;
+  int v = int((word >> shift) & 0xFFu);
+  if (v >= 128) v -= 256;
+  return float(v);
+}
 void main() {
   uint row = gl_WorkGroupID.x;
   uint lid = gl_LocalInvocationID.x;
+  uint base = row * pc.cols;
   float sum = 0.0;
-  for (uint c = lid; c < pc.cols; c += 256) sum += float(w[row * pc.cols + c]) * x[c];
+  for (uint c = lid; c < pc.cols; c += 256) sum += q8(base + c) * x[c];
   scratch[lid] = sum;
   barrier();
   for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
@@ -2109,15 +2117,18 @@ layout(set=0,binding=2) readonly buffer S { float scale[]; };
 layout(set=0,binding=3) writeonly buffer O { float outv[]; };
 shared float scratch[256];
 float q6(uint bit) {
-  uint word = packed[bit >> 5];
+  uint widx = bit >> 5;
   uint shift = bit & 31u;
-  uint v = (word >> shift) & 63u;
+  uint word0 = packed[widx];
+  uint v = (word0 >> shift) & 63u;
+  if (shift > 26u) { v = ((word0 >> shift) | (packed[widx + 1u] << (32u - shift))) & 63u; }
   return float(int(v) - 32);
 }
 void main() {
   uint row = gl_WorkGroupID.x;
   uint lid = gl_LocalInvocationID.x;
-  uint rowBits = row * pc.cols * 6u;
+  uint packedCols = (pc.cols * 6u + 7u) / 8u;
+  uint rowBits = row * packedCols * 8u;
   float sum = 0.0;
   for (uint c = lid; c < pc.cols; c += 256) sum += q6(rowBits + c * 6u) * x[c];
   scratch[lid] = sum;
@@ -2143,7 +2154,8 @@ float q4(uint idx) {
 void main() {
   uint row = gl_WorkGroupID.x;
   uint lid = gl_LocalInvocationID.x;
-  uint rowBase = row * pc.cols;
+  uint packedCols = (pc.cols + 1u) / 2u;
+  uint rowBase = row * packedCols * 2u;
   float sum = 0.0;
   for (uint c = lid; c < pc.cols; c += 256) sum += q4(rowBase + c) * x[c];
   scratch[lid] = sum;
@@ -2152,11 +2164,165 @@ void main() {
   if (lid == 0) outv[row] = scratch[0] * scale[row];
 }`
 
-const vulkanFusedQKVF32GLSL = vulkanMatVecF32GLSL
-const vulkanFusedQKVQ8GLSL = vulkanMatVecQ8GLSL
-const vulkanFusedQKVQ6GLSL = vulkanMatVecQ6GLSL
-const vulkanFusedQKVQ4GLSL = vulkanMatVecQ4GLSL
-const vulkanFusedSwiGLUF32GLSL = vulkanMatVecF32GLSL
-const vulkanFusedSwiGLUQ8GLSL = vulkanMatVecQ8GLSL
-const vulkanFusedSwiGLUQ6GLSL = vulkanMatVecQ6GLSL
-const vulkanFusedSwiGLUQ4GLSL = vulkanMatVecQ4GLSL
+const vulkanFusedQKVF32GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rowsA; uint rowsB; uint rowsC; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer WA { float wa[]; };
+layout(set=0,binding=2) readonly buffer WB { float wb[]; };
+layout(set=0,binding=3) readonly buffer WC { float wc[]; };
+layout(set=0,binding=4) writeonly buffer OA { float outA[]; };
+layout(set=0,binding=5) writeonly buffer OB { float outB[]; };
+layout(set=0,binding=6) writeonly buffer OC { float outC[]; };
+shared float scratch[256];
+void main() {
+  uint g = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; float sum = 0.0;
+  if (g < pc.rowsA) { uint base = g * pc.cols; for (uint c = lid; c < pc.cols; c += 256) sum += wa[base + c] * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outA[g] = scratch[0]; }
+  else if (g < pc.rowsA + pc.rowsB) { uint r = g - pc.rowsA; uint base = r * pc.cols; for (uint c = lid; c < pc.cols; c += 256) sum += wb[base + c] * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outB[r] = scratch[0]; }
+  else { uint r = g - pc.rowsA - pc.rowsB; uint base = r * pc.cols; for (uint c = lid; c < pc.cols; c += 256) sum += wc[base + c] * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outC[r] = scratch[0]; }
+}`
+const vulkanFusedQKVQ8GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rowsA; uint rowsB; uint rowsC; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DA { uint da[]; };
+layout(set=0,binding=2) readonly buffer DB { uint db[]; };
+layout(set=0,binding=3) readonly buffer DC { uint dc[]; };
+layout(set=0,binding=4) readonly buffer SA { float sa[]; };
+layout(set=0,binding=5) readonly buffer SB { float sb[]; };
+layout(set=0,binding=6) readonly buffer SC { float sc[]; };
+layout(set=0,binding=7) writeonly buffer OA { float outA[]; };
+layout(set=0,binding=8) writeonly buffer OB { float outB[]; };
+layout(set=0,binding=9) writeonly buffer OC { float outC[]; };
+shared float scratch[256];
+float q8a(uint idx) { uint word = da[idx >> 2]; uint shift = (idx & 3u) * 8u; int v = int((word >> shift) & 0xFFu); if (v >= 128) v -= 256; return float(v); }
+float q8b(uint idx) { uint word = db[idx >> 2]; uint shift = (idx & 3u) * 8u; int v = int((word >> shift) & 0xFFu); if (v >= 128) v -= 256; return float(v); }
+float q8c(uint idx) { uint word = dc[idx >> 2]; uint shift = (idx & 3u) * 8u; int v = int((word >> shift) & 0xFFu); if (v >= 128) v -= 256; return float(v); }
+void main() {
+  uint g = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; float sum = 0.0;
+  if (g < pc.rowsA) { uint base = g * pc.cols; for (uint c = lid; c < pc.cols; c += 256) sum += q8a(base + c) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outA[g] = scratch[0] * sa[g]; }
+  else if (g < pc.rowsA + pc.rowsB) { uint r = g - pc.rowsA; uint base = r * pc.cols; for (uint c = lid; c < pc.cols; c += 256) sum += q8b(base + c) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outB[r] = scratch[0] * sb[r]; }
+  else { uint r = g - pc.rowsA - pc.rowsB; uint base = r * pc.cols; for (uint c = lid; c < pc.cols; c += 256) sum += q8c(base + c) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outC[r] = scratch[0] * sc[r]; }
+}`
+const vulkanFusedQKVQ6GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rowsA; uint rowsB; uint rowsC; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DA { uint da[]; };
+layout(set=0,binding=2) readonly buffer DB { uint db[]; };
+layout(set=0,binding=3) readonly buffer DC { uint dc[]; };
+layout(set=0,binding=4) readonly buffer SA { float sa[]; };
+layout(set=0,binding=5) readonly buffer SB { float sb[]; };
+layout(set=0,binding=6) readonly buffer SC { float sc[]; };
+layout(set=0,binding=7) writeonly buffer OA { float outA[]; };
+layout(set=0,binding=8) writeonly buffer OB { float outB[]; };
+layout(set=0,binding=9) writeonly buffer OC { float outC[]; };
+shared float scratch[256];
+float q6a(uint bit) { uint widx = bit >> 5; uint shift = bit & 31u; uint w0 = da[widx]; uint v = (w0 >> shift) & 63u; if (shift > 26u) v = ((w0 >> shift) | (da[widx+1u] << (32u-shift))) & 63u; return float(int(v)-32); }
+float q6b(uint bit) { uint widx = bit >> 5; uint shift = bit & 31u; uint w0 = db[widx]; uint v = (w0 >> shift) & 63u; if (shift > 26u) v = ((w0 >> shift) | (db[widx+1u] << (32u-shift))) & 63u; return float(int(v)-32); }
+float q6c(uint bit) { uint widx = bit >> 5; uint shift = bit & 31u; uint w0 = dc[widx]; uint v = (w0 >> shift) & 63u; if (shift > 26u) v = ((w0 >> shift) | (dc[widx+1u] << (32u-shift))) & 63u; return float(int(v)-32); }
+void main() {
+  uint g = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; uint packedCols = (pc.cols * 6u + 7u) / 8u; float sum = 0.0;
+  if (g < pc.rowsA) { uint rowBits = g * packedCols * 8u; for (uint c = lid; c < pc.cols; c += 256) sum += q6a(rowBits + c * 6u) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outA[g] = scratch[0] * sa[g]; }
+  else if (g < pc.rowsA + pc.rowsB) { uint r = g - pc.rowsA; uint rowBits = r * packedCols * 8u; for (uint c = lid; c < pc.cols; c += 256) sum += q6b(rowBits + c * 6u) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outB[r] = scratch[0] * sb[r]; }
+  else { uint r = g - pc.rowsA - pc.rowsB; uint rowBits = r * packedCols * 8u; for (uint c = lid; c < pc.cols; c += 256) sum += q6c(rowBits + c * 6u) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outC[r] = scratch[0] * sc[r]; }
+}`
+const vulkanFusedQKVQ4GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rowsA; uint rowsB; uint rowsC; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DA { uint da[]; };
+layout(set=0,binding=2) readonly buffer DB { uint db[]; };
+layout(set=0,binding=3) readonly buffer DC { uint dc[]; };
+layout(set=0,binding=4) readonly buffer SA { float sa[]; };
+layout(set=0,binding=5) readonly buffer SB { float sb[]; };
+layout(set=0,binding=6) readonly buffer SC { float sc[]; };
+layout(set=0,binding=7) writeonly buffer OA { float outA[]; };
+layout(set=0,binding=8) writeonly buffer OB { float outB[]; };
+layout(set=0,binding=9) writeonly buffer OC { float outC[]; };
+shared float scratch[256];
+float q4a(uint idx) { uint word = da[idx >> 3]; uint shift = (idx & 7u) * 4u; uint v = (word >> shift) & 15u; return float(int(v) - 8); }
+float q4b(uint idx) { uint word = db[idx >> 3]; uint shift = (idx & 7u) * 4u; uint v = (word >> shift) & 15u; return float(int(v) - 8); }
+float q4c(uint idx) { uint word = dc[idx >> 3]; uint shift = (idx & 7u) * 4u; uint v = (word >> shift) & 15u; return float(int(v) - 8); }
+void main() {
+  uint g = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; uint packedCols = (pc.cols + 1u) / 2u; float sum = 0.0;
+  if (g < pc.rowsA) { uint rowBase = g * packedCols * 2u; for (uint c = lid; c < pc.cols; c += 256) sum += q4a(rowBase + c) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outA[g] = scratch[0] * sa[g]; }
+  else if (g < pc.rowsA + pc.rowsB) { uint r = g - pc.rowsA; uint rowBase = r * packedCols * 2u; for (uint c = lid; c < pc.cols; c += 256) sum += q4b(rowBase + c) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outB[r] = scratch[0] * sb[r]; }
+  else { uint r = g - pc.rowsA - pc.rowsB; uint rowBase = r * packedCols * 2u; for (uint c = lid; c < pc.cols; c += 256) sum += q4c(rowBase + c) * x[c]; scratch[lid] = sum; barrier(); for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); } if (lid == 0) outC[r] = scratch[0] * sc[r]; }
+}`
+const vulkanFusedSwiGLUF32GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer G { float gate[]; };
+layout(set=0,binding=2) readonly buffer U { float up[]; };
+layout(set=0,binding=3) writeonly buffer O { float outv[]; };
+shared float sg[256]; shared float su[256];
+void main() {
+  uint row = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; uint base = row * pc.cols;
+  float g = 0.0, u = 0.0;
+  for (uint c = lid; c < pc.cols; c += 256) { g += gate[base + c] * x[c]; u += up[base + c] * x[c]; }
+  sg[lid] = g; su[lid] = u; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) { sg[lid] += sg[lid + stride]; su[lid] += su[lid + stride]; } barrier(); }
+  if (lid == 0) { float gv = sg[0]; float silu = gv / (1.0 + exp(-gv)); outv[row] = silu * su[0]; }
+}`
+const vulkanFusedSwiGLUQ8GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DG { uint dg[]; };
+layout(set=0,binding=2) readonly buffer DU { uint du[]; };
+layout(set=0,binding=3) readonly buffer SG { float sgs[]; };
+layout(set=0,binding=4) readonly buffer SU { float sus[]; };
+layout(set=0,binding=5) writeonly buffer O { float outv[]; };
+shared float sg[256]; shared float su[256];
+float q8g(uint idx) { uint word = dg[idx >> 2]; uint shift = (idx & 3u) * 8u; int v = int((word >> shift) & 0xFFu); if (v >= 128) v -= 256; return float(v); }
+float q8u(uint idx) { uint word = du[idx >> 2]; uint shift = (idx & 3u) * 8u; int v = int((word >> shift) & 0xFFu); if (v >= 128) v -= 256; return float(v); }
+void main() {
+  uint row = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; uint base = row * pc.cols;
+  float g = 0.0, u = 0.0;
+  for (uint c = lid; c < pc.cols; c += 256) { g += q8g(base + c) * x[c]; u += q8u(base + c) * x[c]; }
+  sg[lid] = g; su[lid] = u; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) { sg[lid] += sg[lid + stride]; su[lid] += su[lid + stride]; } barrier(); }
+  if (lid == 0) { float gv = sg[0] * sgs[row]; float silu = gv / (1.0 + exp(-gv)); outv[row] = silu * (su[0] * sus[row]); }
+}`
+const vulkanFusedSwiGLUQ6GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DG { uint dg[]; };
+layout(set=0,binding=2) readonly buffer DU { uint du[]; };
+layout(set=0,binding=3) readonly buffer SG { float sgs[]; };
+layout(set=0,binding=4) readonly buffer SU { float sus[]; };
+layout(set=0,binding=5) writeonly buffer O { float outv[]; };
+shared float sg[256]; shared float su[256];
+float q6g(uint bit) { uint widx = bit >> 5; uint shift = bit & 31u; uint w0 = dg[widx]; uint v = (w0 >> shift) & 63u; if (shift > 26u) v = ((w0 >> shift) | (dg[widx+1u] << (32u-shift))) & 63u; return float(int(v)-32); }
+float q6u(uint bit) { uint widx = bit >> 5; uint shift = bit & 31u; uint w0 = du[widx]; uint v = (w0 >> shift) & 63u; if (shift > 26u) v = ((w0 >> shift) | (du[widx+1u] << (32u-shift))) & 63u; return float(int(v)-32); }
+void main() {
+  uint row = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; uint packedCols = (pc.cols * 6u + 7u) / 8u; uint rowBits = row * packedCols * 8u;
+  float g = 0.0, u = 0.0;
+  for (uint c = lid; c < pc.cols; c += 256) { g += q6g(rowBits + c * 6u) * x[c]; u += q6u(rowBits + c * 6u) * x[c]; }
+  sg[lid] = g; su[lid] = u; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) { sg[lid] += sg[lid + stride]; su[lid] += su[lid + stride]; } barrier(); }
+  if (lid == 0) { float gv = sg[0] * sgs[row]; float silu = gv / (1.0 + exp(-gv)); outv[row] = silu * (su[0] * sus[row]); }
+}`
+const vulkanFusedSwiGLUQ4GLSL = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=0) readonly buffer X { float x[]; };
+layout(set=0,binding=1) readonly buffer DG { uint dg[]; };
+layout(set=0,binding=2) readonly buffer DU { uint du[]; };
+layout(set=0,binding=3) readonly buffer SG { float sgs[]; };
+layout(set=0,binding=4) readonly buffer SU { float sus[]; };
+layout(set=0,binding=5) writeonly buffer O { float outv[]; };
+shared float sg[256]; shared float su[256];
+float q4g(uint idx) { uint word = dg[idx >> 3]; uint shift = (idx & 7u) * 4u; uint v = (word >> shift) & 15u; return float(int(v) - 8); }
+float q4u(uint idx) { uint word = du[idx >> 3]; uint shift = (idx & 7u) * 4u; uint v = (word >> shift) & 15u; return float(int(v) - 8); }
+void main() {
+  uint row = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x; uint packedCols = (pc.cols + 1u) / 2u; uint rowBase = row * packedCols * 2u;
+  float g = 0.0, u = 0.0;
+  for (uint c = lid; c < pc.cols; c += 256) { g += q4g(rowBase + c) * x[c]; u += q4u(rowBase + c) * x[c]; }
+  sg[lid] = g; su[lid] = u; barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) { sg[lid] += sg[lid + stride]; su[lid] += su[lid + stride]; } barrier(); }
+  if (lid == 0) { float gv = sg[0] * sgs[row]; float silu = gv / (1.0 + exp(-gv)); outv[row] = silu * (su[0] * sus[row]); }
+}`

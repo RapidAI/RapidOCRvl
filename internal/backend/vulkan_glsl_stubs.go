@@ -5,9 +5,9 @@ package backend
 // gracefully at runtime rather than blocking compilation.
 var (
 	vulkanArgmaxF32GLSL                     = vulkanArgmaxF32GLSLImpl
-	vulkanArgmaxQuantizedF32GLSL            = ""
+	vulkanArgmaxQuantizedF32GLSL            = vulkanArgmaxQuantizedF32GLSLImpl
 	vulkanBlockTopKF32GLSL                  = vulkanBlockTopKF32GLSLImpl
-	vulkanBlockTopKQuantizedF32GLSL         = ""
+	vulkanBlockTopKQuantizedF32GLSL         = vulkanBlockTopKQuantizedF32GLSLImpl
 	vulkanAddRMSNormF32GLSL                 = vulkanAddRMSNormF32GLSLImpl
 	vulkanFusedQKVMRoPEF32GLSL              = vulkanFusedQKVMRoPEF32GLSLImpl
 	vulkanFusedQKVMRoPEQ4GLSL               = vulkanFusedQKVMRoPEQ4GLSLImpl
@@ -15,7 +15,7 @@ var (
 	vulkanFusedQKVMRoPEQ8GLSL               = vulkanFusedQKVMRoPEQ8GLSLImpl
 	vulkanMRoPEF32GLSL                      = vulkanMRoPEF32GLSLImpl
 	vulkanMRoPEPairF32GLSL                  = vulkanMRoPEPairF32GLSLImpl
-	vulkanTextAttentionOutAddRMSNormF32GLSL = ""
+	vulkanTextAttentionOutAddRMSNormF32GLSL = vulkanTextAttentionOutAddRMSNormF32GLSLImpl
 )
 
 const vulkanRMSNormF32PlanGLSL = `#version 450
@@ -556,4 +556,109 @@ void main() {
     }
     barrier();
   }
+}`
+const vulkanArgmaxQuantizedF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=3) readonly buffer O { float outv[]; };
+layout(set=0,binding=4) buffer R { float result[]; };
+shared float sval[256];
+shared uint sidx[256];
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint rows = pc.rows;
+  float bestVal = -1.0/0.0;
+  uint bestIdx = 0u;
+  for (uint i = lid; i < rows; i += 256) {
+    float v = outv[i];
+    if (v > bestVal) { bestVal = v; bestIdx = i; }
+  }
+  sval[lid] = bestVal;
+  sidx[lid] = bestIdx;
+  barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) {
+    if (lid < stride) {
+      float v0 = sval[lid];
+      float v1 = sval[lid + stride];
+      if (v1 > v0) { sval[lid] = v1; sidx[lid] = sidx[lid + stride]; }
+    }
+    barrier();
+  }
+  if (lid == 0) {
+    result[0] = sval[0];
+    result[1] = float(sidx[0]);
+  }
+}`
+const vulkanBlockTopKQuantizedF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=3) readonly buffer O { float outv[]; };
+layout(set=0,binding=4) buffer R { float result[]; };
+shared float sval[256];
+shared uint sidx[256];
+shared uint taken[8];
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint block = gl_WorkGroupID.x;
+  uint base = block * 256u;
+  uint count = min(pc.rows - base, 256u);
+  if (lid < 8u) taken[lid] = 0u;
+  barrier();
+  for (uint sel = 0u; sel < 64u; sel++) {
+    float bestVal = -1.0/0.0;
+    uint bestIdx = 0xFFFFFFFFu;
+    uint i = lid;
+    if (i < count) {
+      uint absIdx = base + i;
+      uint word = taken[i >> 5];
+      if ((word & (1u << (i & 31u))) == 0u) {
+        float v = outv[absIdx];
+        if (v > bestVal) { bestVal = v; bestIdx = absIdx; }
+      }
+    }
+    sval[lid] = bestVal;
+    sidx[lid] = bestIdx;
+    barrier();
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+      if (lid < stride) {
+        float v0 = sval[lid];
+        float v1 = sval[lid + stride];
+        uint i0 = sidx[lid];
+        uint i1 = sidx[lid + stride];
+        bool take1 = (v1 > v0) || (v1 == v0 && (i0 == 0xFFFFFFFFu || (i1 != 0xFFFFFFFFu && i1 < i0)));
+        if (take1) { sval[lid] = v1; sidx[lid] = i1; }
+      }
+      barrier();
+    }
+    if (lid == 0) {
+      uint winner = sidx[0];
+      float winVal = sval[0];
+      uint off = block * 64u * 2u + sel * 2u;
+      result[off] = winVal;
+      result[off + 1u] = float(winner);
+      if (winner != 0xFFFFFFFFu) {
+        uint li = winner - base;
+        taken[li >> 5] |= (1u << (li & 31u));
+      }
+    }
+    barrier();
+  }
+}`
+const vulkanTextAttentionOutAddRMSNormF32GLSLImpl = `#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Push { uint rows; uint cols; } pc;
+layout(set=0,binding=6) readonly buffer Proj { float projv[]; };
+layout(set=0,binding=7) buffer Res { float resv[]; };
+layout(set=0,binding=8) readonly buffer W { float w[]; };
+layout(set=0,binding=9) writeonly buffer O { float outv[]; };
+shared float scratch[256];
+void main() {
+  uint lid = gl_LocalInvocationID.x;
+  uint n = pc.rows;
+  float v = (lid < n) ? (resv[lid] + projv[lid]) : 0.0;
+  scratch[lid] = v * v;
+  barrier();
+  for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
+  float scale = inversesqrt(scratch[0] / float(n) + 1e-6);
+  if (lid < n) { resv[lid] = v; outv[lid] = v * scale * w[lid]; }
 }`
