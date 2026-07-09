@@ -37,8 +37,12 @@ type visionWeights struct {
 }
 
 type visionRoPETables struct {
-	h [][]ropePair
-	w [][]ropePair
+	h    [][]ropePair
+	w    [][]ropePair
+	hCos [][]float32
+	hSin [][]float32
+	wCos [][]float32
+	wSin [][]float32
 }
 
 type visionScratch struct {
@@ -550,10 +554,34 @@ func newVisionRoPETables(grid vision.Grid, hd int) visionRoPETables {
 	data := make([]ropePair, (grid.H+grid.W)*(half/2))
 	fillAxisRoPETable(h, data[:grid.H*(half/2)], half)
 	fillAxisRoPETable(w, data[grid.H*(half/2):], half)
+	// Pre-build deinterleaved cos/sin tables for SIMD RoPE
+	hCos, hSin := deinterleaveRoPETable(h)
+	wCos, wSin := deinterleaveRoPETable(w)
 	return visionRoPETables{
-		h: h,
-		w: w,
+		h:    h,
+		w:    w,
+		hCos: hCos,
+		hSin: hSin,
+		wCos: wCos,
+		wSin: wSin,
 	}
+}
+
+func deinterleaveRoPETable(table [][]ropePair) (cos, sin [][]float32) {
+	cos = make([][]float32, len(table))
+	sin = make([][]float32, len(table))
+	for i, row := range table {
+		n := len(row)
+		c := make([]float32, n)
+		s := make([]float32, n)
+		for j, p := range row {
+			c[j] = p.cos
+			s[j] = p.sin
+		}
+		cos[i] = c
+		sin[i] = s
+	}
+	return cos, sin
 }
 
 func (rt *Runtime) cachedVisionRoPETables(grid vision.Grid, hd int) visionRoPETables {
@@ -609,11 +637,12 @@ func applyVisionRoPEPair(q, k [][]float32, grid vision.Grid, heads, hd int, rope
 	hy, wx := 0, 0
 	for idx, qr := range q {
 		kr := k[idx]
-		ropeH, ropeW := rope.h[hy], rope.w[wx]
+		cosH, sinH := rope.hCos[hy], rope.hSin[hy]
+		cosW, sinW := rope.wCos[wx], rope.wSin[wx]
 		for h := 0; h < heads; h++ {
 			base := h * hd
-			applyAxisRoPEPairWithTableAt(qr, kr, base, half, ropeH)
-			applyAxisRoPEPairWithTableAt(qr, kr, base+half, half, ropeW)
+			tensor.RoPEPairAxis(qr, kr, base, half, cosH, sinH)
+			tensor.RoPEPairAxis(qr, kr, base+half, half, cosW, sinW)
 		}
 		wx++
 		if wx == grid.W {
@@ -628,29 +657,17 @@ func applyVisionRoPEPair(q, k [][]float32, grid vision.Grid, heads, hd int, rope
 
 func applyAxisRoPEPairWithTableAt(q, k []float32, start, axisLen int, table []ropePair) {
 	half := axisLen / 2
+	if half <= 0 {
+		return
+	}
+	// For small half (typical vision: half=32), the deinterleave overhead
+	// exceeds SIMD gains. Use direct struct access instead.
 	other := start + half
 	q0 := q[start:other]
 	q1 := q[other : other+half]
 	k0 := k[start:other]
 	k1 := k[other : other+half]
-	i := 0
-	for ; i+1 < half; i += 2 {
-		cs, sn := table[i].cos, table[i].sin
-		qa, qb := q0[i], q1[i]
-		ka, kb := k0[i], k1[i]
-		q0[i] = qa*cs - qb*sn
-		q1[i] = qb*cs + qa*sn
-		k0[i] = ka*cs - kb*sn
-		k1[i] = kb*cs + ka*sn
-		cs, sn = table[i+1].cos, table[i+1].sin
-		qa, qb = q0[i+1], q1[i+1]
-		ka, kb = k0[i+1], k1[i+1]
-		q0[i+1] = qa*cs - qb*sn
-		q1[i+1] = qb*cs + qa*sn
-		k0[i+1] = ka*cs - kb*sn
-		k1[i+1] = kb*cs + ka*sn
-	}
-	for ; i < half; i++ {
+	for i := 0; i < half; i++ {
 		cs, sn := table[i].cos, table[i].sin
 		qa, qb := q0[i], q1[i]
 		ka, kb := k0[i], k1[i]
@@ -664,6 +681,33 @@ func applyAxisRoPEPairWithTableAt(q, k []float32, start, axisLen int, table []ro
 type ropePair struct {
 	cos float32
 	sin float32
+}
+
+var ropePairScratchBufs struct {
+	cos [128]float32
+	sin [128]float32
+}
+
+// ropePairScratch deinterleaves a []ropePair into separate cos and sin float32 slices.
+// Uses a fixed-size thread-local buffer (safe for single-threaded vision encoding).
+func ropePairScratch(table []ropePair) ([]float32, []float32) {
+	n := len(table)
+	if n > len(ropePairScratchBufs.cos) {
+		cos := make([]float32, n)
+		sin := make([]float32, n)
+		for i, p := range table {
+			cos[i] = p.cos
+			sin[i] = p.sin
+		}
+		return cos, sin
+	}
+	cos := ropePairScratchBufs.cos[:n]
+	sin := ropePairScratchBufs.sin[:n]
+	for i, p := range table {
+		cos[i] = p.cos
+		sin[i] = p.sin
+	}
+	return cos, sin
 }
 
 func fillAxisRoPETable(table [][]ropePair, data []ropePair, dim int) {

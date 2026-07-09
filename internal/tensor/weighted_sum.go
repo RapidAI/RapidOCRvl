@@ -248,3 +248,39 @@ func ApplyMRoPETable(x []float32, cosTable, sinTable []float32, heads, dim int) 
 		}
 	}
 }
+
+
+// RoPEPairAxis rotates q and k in-place for a single axis segment.
+// It rotates q[start:start+axisLen] and k[start:start+axisLen] using
+// cosTable[0:axisLen/2] and sinTable[0:axisLen/2].
+// The rotation is: for i in [0, half):
+//   a = q[start+i], b = q[start+half+i]
+//   q[start+i] = a*cos - b*sin, q[start+half+i] = b*cos + a*sin
+//   same for k
+func RoPEPairAxis(q, k []float32, start, axisLen int, cosTable, sinTable []float32) {
+	half := axisLen / 2
+	if half == 0 {
+		return
+	}
+	if useDotFMA && useDotF32AVX && half >= 8 {
+		ropePairAxisFMA(q, k, start, half, cosTable, sinTable)
+		return
+	}
+	if useDotF32AVX && half >= 8 {
+		ropePairAxisAVX(q, k, start, half, cosTable, sinTable)
+		return
+	}
+	q0 := q[start : start+half]
+	q1 := q[start+half : start+axisLen]
+	k0 := k[start : start+half]
+	k1 := k[start+half : start+axisLen]
+	for i := 0; i < half; i++ {
+		cs, sn := cosTable[i], sinTable[i]
+		qa, qb := q0[i], q1[i]
+		ka, kb := k0[i], k1[i]
+		q0[i] = qa*cs - qb*sn
+		q1[i] = qb*cs + qa*sn
+		k0[i] = ka*cs - kb*sn
+		k1[i] = kb*cs + ka*sn
+	}
+}
