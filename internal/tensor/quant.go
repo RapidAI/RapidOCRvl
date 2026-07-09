@@ -867,10 +867,8 @@ func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4M
 				defer putInt32Scratch(sA)
 				defer putInt32Scratch(sB)
 				dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
-				for r := 0; r < nRows; r++ {
-					out[start+r] = float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
-					tmpU[start+r] = float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
-				}
+				finalizeDotQ8PairVNNI(&sA[0], &gRS[start], &gScale[start], &out[start],
+					&sB[0], &uRS[start], &uScale[start], &tmpU[start], nRows, scaleX)
 				SiLUMulInPlace(out[start:end], tmpU[start:end])
 				return
 			}
@@ -1101,11 +1099,10 @@ func fusedMatVec3Q8EqualRowsBiasSerial(outA, outB, outC, x []float32, a, b, c *Q
 			defer putInt32Scratch(sB)
 			defer putInt32Scratch(sC)
 			dotQ8TripletVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &cData[start*cols], &xq[0], &sA[0], &sB[0], &sC[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				outA[start+r] = float32(sA[r]-128*aRS[start+r])*scaleX*aScale[start+r] + ba[start+r]
-				outB[start+r] = float32(sB[r]-128*bRS[start+r])*scaleX*bScale[start+r] + bb[start+r]
-				outC[start+r] = float32(sC[r]-128*cRS[start+r])*scaleX*cScale[start+r] + bc[start+r]
-			}
+				finalizeDotQ8TripletVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+					&sB[0], &bRS[start], &bScale[start], &outB[start],
+					&sC[0], &cRS[start], &cScale[start], &outC[start], nRows, scaleX)
+				addBias3FMA(&outA[start], &ba[start], &outB[start], &bb[start], &outC[start], &bc[start], nRows)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1144,11 +1141,9 @@ func fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q8Mat
 			defer putInt32Scratch(sB)
 			defer putInt32Scratch(sC)
 			dotQ8TripletVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &cData[start*cols], &xq[0], &sA[0], &sB[0], &sC[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
-				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
-				outC[start+r] = float32(sC[r]-128*cRS[start+r]) * scaleX * cScale[start+r]
-			}
+				finalizeDotQ8TripletVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+					&sB[0], &bRS[start], &bScale[start], &outB[start],
+					&sC[0], &cRS[start], &cScale[start], &outC[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1501,11 +1496,9 @@ func fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q6Mat
 			defer putInt32Scratch(sB)
 			defer putInt32Scratch(sC)
 			dotQ8TripletVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &cData[start*cols], &xq[0], &sA[0], &sB[0], &sC[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
-				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
-				outC[start+r] = float32(sC[r]-128*cRS[start+r]) * scaleX * cScale[start+r]
-			}
+				finalizeDotQ8TripletVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+					&sB[0], &bRS[start], &bScale[start], &outB[start],
+					&sC[0], &cRS[start], &cScale[start], &outC[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1749,11 +1742,9 @@ func fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q4Mat
 			defer putInt32Scratch(sB)
 			defer putInt32Scratch(sC)
 			dotQ8TripletVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &cData[start*cols], &xq[0], &sA[0], &sB[0], &sC[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
-				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
-				outC[start+r] = float32(sC[r]-128*cRS[start+r]) * scaleX * cScale[start+r]
-			}
+				finalizeDotQ8TripletVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+					&sB[0], &bRS[start], &bScale[start], &outB[start],
+					&sC[0], &cRS[start], &cScale[start], &outC[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {

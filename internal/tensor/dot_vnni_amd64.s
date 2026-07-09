@@ -1432,3 +1432,135 @@ finBiasTail:
 
 finBiasRet:
 	RET
+
+// finalizeDotQ8TripletVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32,
+//   dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32,
+//   dotsC *int32, rowSumC *int32, scaleC *float32, outC *float32, n int, scaleX float32)
+// Computes outX[i] = float32(dotsX[i] - 128*rowSumX[i]) * scaleX * scaleX[i] for X in {A,B,C}
+// Processes 8 elements per iteration using YMM registers.
+TEXT ·finalizeDotQ8TripletVNNI(SB), NOSPLIT, $0-116
+	MOVQ dotsA_base+0(FP), SI
+	MOVQ rowSumA_base+8(FP), DI
+	MOVQ scaleA_base+16(FP), DX
+	MOVQ outA_base+24(FP), CX
+	MOVQ dotsB_base+32(FP), R8
+	MOVQ rowSumB_base+40(FP), R10
+	MOVQ scaleB_base+48(FP), R11
+	MOVQ outB_base+56(FP), R12
+	MOVQ dotsC_base+64(FP), R13
+	MOVQ rowSumC_base+72(FP), R14
+	MOVQ scaleC_base+80(FP), R15
+	MOVQ outC_base+88(FP), AX
+	MOVQ n+96(FP), R9
+	VBROADCASTSS scaleX+104(FP), Y1
+	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+
+	CMPQ R9, $8
+	JB finTriTail
+
+finTriLoop:
+	CMPQ R9, $8
+	JB finTriDone
+	// A
+	VMOVDQU (SI), Y0
+	VMOVDQU (DI), Y3
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3
+	VSUBPS Y3, Y0, Y0
+	VMOVUPS (DX), Y4
+	VMULPS Y1, Y0, Y0
+	VMULPS Y4, Y0, Y0
+	VMOVUPS Y0, (CX)
+	// B
+	VMOVDQU (R8), Y0
+	VMOVDQU (R10), Y3
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3
+	VSUBPS Y3, Y0, Y0
+	VMOVUPS (R11), Y5
+	VMULPS Y1, Y0, Y0
+	VMULPS Y5, Y0, Y0
+	VMOVUPS Y0, (R12)
+	// C
+	VMOVDQU (R13), Y0
+	VMOVDQU (R14), Y3
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3
+	VSUBPS Y3, Y0, Y0
+	VMOVUPS (R15), Y6
+	VMULPS Y1, Y0, Y0
+	VMULPS Y6, Y0, Y0
+	VMOVUPS Y0, (AX)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $32, CX
+	ADDQ $32, R8
+	ADDQ $32, R10
+	ADDQ $32, R11
+	ADDQ $32, R12
+	ADDQ $32, R13
+	ADDQ $32, R14
+	ADDQ $32, R15
+	ADDQ $32, AX
+	SUBQ $8, R9
+	JMP finTriLoop
+
+finTriDone:
+	VZEROUPPER
+finTriTail:
+	CMPQ R9, $0
+	JE finTriRet
+	// A
+	MOVL (SI), BX
+	MOVL (DI), BP
+	IMULL $128, BP
+	SUBL BP, BX
+	VMOVD BX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+104(FP), X0, X0
+	MOVSS (DX), X1
+	VMULSS X1, X0, X0
+	MOVSS X0, (CX)
+	// B
+	MOVL (R8), BX
+	MOVL (R10), BP
+	IMULL $128, BP
+	SUBL BP, BX
+	VMOVD BX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+104(FP), X0, X0
+	MOVSS (R11), X1
+	VMULSS X1, X0, X0
+	MOVSS X0, (R12)
+	// C
+	MOVL (R13), BX
+	MOVL (R14), BP
+	IMULL $128, BP
+	SUBL BP, BX
+	VMOVD BX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+104(FP), X0, X0
+	MOVSS (R15), X1
+	VMULSS X1, X0, X0
+	MOVSS X0, (AX)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	ADDQ $4, R10
+	ADDQ $4, R11
+	ADDQ $4, R12
+	ADDQ $4, R13
+	ADDQ $4, R14
+	ADDQ $4, R15
+	ADDQ $4, AX
+	DECQ R9
+	JMP finTriTail
+
+finTriRet:
+	RET

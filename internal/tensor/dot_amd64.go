@@ -120,6 +120,12 @@ func finalizeDotQ8PairVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *
 func finalizeDotQ8BiasVNNI(dots *int32, rowSum *int32, scale *float32, out *float32, bias *float32, n int, scaleX float32)
 
 //go:noescape
+func finalizeDotQ8TripletVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32, dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32, dotsC *int32, rowSumC *int32, scaleC *float32, outC *float32, n int, scaleX float32)
+
+
+//go:noescape
+func addBias3FMA(outA *float32, biasA *float32, outB *float32, biasB *float32, outC *float32, biasC *float32, n int)
+//go:noescape
 func finalizeAddSumSquaresInPlaceVNNI(dots *int32, rowSum *int32, scale *float32, out *float32, residual *float32, n int, scaleX float32) float32
 
 //go:noescape

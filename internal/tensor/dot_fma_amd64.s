@@ -1983,3 +1983,64 @@ q8tfmaDone:
 	MOVSS X1, ret1+100(FP)
 	MOVSS X2, ret2+104(FP)
 	RET
+
+// addBias3FMA(outA *float32, biasA *float32, outB *float32, biasB *float32, outC *float32, biasC *float32, n int)
+// Computes outX[i] += biasX[i] for X in {A,B,C} using YMM.
+TEXT ·addBias3FMA(SB), NOSPLIT, $0-56
+	MOVQ outA_base+0(FP), SI
+	MOVQ biasA_base+8(FP), DI
+	MOVQ outB_base+16(FP), DX
+	MOVQ biasB_base+24(FP), CX
+	MOVQ outC_base+32(FP), R8
+	MOVQ biasC_base+40(FP), R10
+	MOVQ n+48(FP), R9
+
+	CMPQ R9, $8
+	JB addBias3Tail
+
+addBias3Loop:
+	CMPQ R9, $8
+	JB addBias3Done
+	VMOVUPS (SI), Y0
+	VADDPS (DI), Y0, Y0
+	VMOVUPS Y0, (SI)
+	VMOVUPS (DX), Y1
+	VADDPS (CX), Y1, Y1
+	VMOVUPS Y1, (DX)
+	VMOVUPS (R8), Y2
+	VADDPS (R10), Y2, Y2
+	VMOVUPS Y2, (R8)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $32, CX
+	ADDQ $32, R8
+	ADDQ $32, R10
+	SUBQ $8, R9
+	JMP addBias3Loop
+
+addBias3Done:
+	VZEROUPPER
+addBias3Tail:
+	CMPQ R9, $0
+	JE addBias3Ret
+	MOVSS (SI), X0
+	ADDSS (DI), X0
+	MOVSS X0, (SI)
+	MOVSS (DX), X0
+	ADDSS (CX), X0
+	MOVSS X0, (DX)
+	MOVSS (R8), X0
+	ADDSS (R10), X0
+	MOVSS X0, (R8)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	ADDQ $4, R10
+	DECQ R9
+	JMP addBias3Tail
+
+addBias3Ret:
+	RET
