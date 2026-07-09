@@ -31,6 +31,7 @@ func VulkanLayerChainQ8Win(
 	mlpGate, mlpUp, mlpDown *tensor.Q8Matrix,
 	mlpNormWeight []float32,
 	devInputReady bool,
+	readResidual bool,
 ) error {
 	if qA == nil || qB == nil || qC == nil || attW == nil || mlpGate == nil || mlpUp == nil || mlpDown == nil {
 		return fmt.Errorf("nil Vulkan q8 layer chain matrix")
@@ -627,10 +628,12 @@ func VulkanLayerChainQ8Win(
 	}
 	vk.readbackFromDevice(cmd, devMlpNorm, readbackNorm, outBytes)
 
-	if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackResidual, outBytes); err != nil {
-		return fmt.Errorf("readback mlp residual: %w", err)
+	if readResidual {
+		if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackResidual, outBytes); err != nil {
+			return fmt.Errorf("readback mlp residual: %w", err)
+		}
+		vk.readbackFromDevice(cmd, devMlpResidual, readbackResidual, outBytes)
 	}
-	vk.readbackFromDevice(cmd, devMlpResidual, readbackResidual, outBytes)
 
 	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackK, uint64(kvRows)*4); err != nil {
 		return fmt.Errorf("readback k: %w", err)
@@ -666,8 +669,10 @@ func VulkanLayerChainQ8Win(
 	if err := vk.readFloat32Into(device, *readbackNorm, normOut[:hidden]); err != nil {
 		return err
 	}
-	if err := vk.readFloat32Into(device, *readbackResidual, residual[:hidden]); err != nil {
-		return err
+	if readResidual {
+		if err := vk.readFloat32Into(device, *readbackResidual, residual[:hidden]); err != nil {
+			return err
+		}
 	}
 	if err := vk.readFloat32Into(device, *readbackK, outK[:kvRows]); err != nil {
 		return err

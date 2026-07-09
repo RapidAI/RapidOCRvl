@@ -3499,8 +3499,16 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 		// Try fused attention+MLP layer chain (single submit, device-local intermediates)
 		if hasRoPE && !lastLayer && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpLayerChainQ8) {
 			nextNormWeight := rt.textLayers[li+1].w.ln1
-			if rt.vulkanLayerChainQ8(layers[li+1].norm[:c.HiddenSize], h, h, tl.w.ln1, &caches[li], tl, ropeCos, ropeSin, tl.w.ln2, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, nextNormWeight, li > 0) {
+			if rt.vulkanLayerChainQ8(layers[li+1].norm[:c.HiddenSize], h, h, tl.w.ln1, &caches[li], tl, ropeCos, ropeSin, tl.w.ln2, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, nextNormWeight, li > 0, true) {
 				// Unified chain handled attention + MLP + AddRMSNorm for next layer
+				continue
+			}
+		}
+		// Try fused layer chain for last layer (with finalNorm, no residual readback)
+		if hasRoPE && lastLayer && needLogits && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpLayerChainQ8) {
+			finalNormWeight := rt.finalNorm
+			if rt.vulkanLayerChainQ8(scratch.norm[:c.HiddenSize], h, h, tl.w.ln1, &caches[li], tl, ropeCos, ropeSin, tl.w.ln2, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, finalNormWeight, li > 0, false) {
+				// Unified chain handled attention + MLP + finalNorm for last layer
 				continue
 			}
 		}
@@ -4248,7 +4256,7 @@ func (rt *Runtime) vulkanChainedSwiGLUDownAddRMSNormQ8(normOut, residual, x []fl
 
 // vulkanLayerChainQ8 fuses the attention and MLP chains into a single submit
 // with device-local intermediates.  Returns true if the fused path was used.
-func (rt *Runtime) vulkanLayerChainQ8(normOut, residual, rawInput, ln1Weight []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, ln2Weight []float32, numHeads, kvHeads, headDim int, nextNormWeight []float32, devInputReady bool) bool {
+func (rt *Runtime) vulkanLayerChainQ8(normOut, residual, rawInput, ln1Weight []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, ln2Weight []float32, numHeads, kvHeads, headDim int, nextNormWeight []float32, devInputReady bool, readResidual bool) bool {
 	if !rt.vulkanOpEnabled(vulkanOpLayerChainQ8) || tl == nil || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 || headDim%2 != 0 {
 		return false
 	}
@@ -4295,6 +4303,7 @@ func (rt *Runtime) vulkanLayerChainQ8(normOut, residual, rawInput, ln1Weight []f
 		tl.q8.gate, tl.q8.up, tl.q8.down,
 		nextNormWeight,
 		devInputReady,
+		readResidual,
 	); err == nil {
 		cache.append(newK, newV)
 		return true
