@@ -294,30 +294,8 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	readbackK := &attRunner.readbackK
 	readbackV := &attRunner.readbackV
 
-	// --- Descriptor pools ---
-	poolSize1 := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: uint32(qkvRunner.descriptorCount)}
-	dpci1 := vkDescriptorPoolCreateInfo{
-		SType:         vkStructureTypeDescriptorPoolCreateInfo,
-		MaxSets:       1,
-		PoolSizeCount: 1,
-		PPoolSizes:    uintptr(unsafe.Pointer(&poolSize1)),
-	}
-	var qkvPool uintptr
-	if res := vk.call(vk.createDescriptorPool, device, uintptr(unsafe.Pointer(&dpci1)), 0, uintptr(unsafe.Pointer(&qkvPool))); res != vkSuccess {
-		return fmt.Errorf("vkCreateDescriptorPool qkv q8: %d", int32(res))
-	}
-	defer vk.callVoid(vk.destroyDescriptorPool, device, qkvPool, 0)
-
-	var qkvDS uintptr
-	qkvDSAI := vkDescriptorSetAllocateInfo{
-		SType:              vkStructureTypeDescriptorSetAllocateInfo,
-		DescriptorPool:     qkvPool,
-		DescriptorSetCount: 1,
-		PSetLayouts:        uintptr(unsafe.Pointer(&qkvRunner.setLayout)),
-	}
-	if res := vk.call(vk.allocateDescriptorSets, device, uintptr(unsafe.Pointer(&qkvDSAI)), uintptr(unsafe.Pointer(&qkvDS))); res != vkSuccess {
-		return fmt.Errorf("vkAllocateDescriptorSets qkv q8: %d", int32(res))
-	}
+	// --- Reuse persistent descriptor sets (no per-call pool create/destroy) ---
+	qkvDS := qkvRunner.descriptorSet
 
 	qkvInfos := [12]vkDescriptorBufferInfo{
 		{Buffer: devX.buffer, Range: xBytes},
@@ -336,29 +314,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	var qkvDSCache [12]vulkanDescriptorBindingWin
 	updateVulkanDescriptorBuffersWin(vk, device, qkvDS, qkvDSCache[:qkvRunner.descriptorCount], qkvInfos[:])
 
-	poolSize2 := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: 10}
-	dpci2 := vkDescriptorPoolCreateInfo{
-		SType:         vkStructureTypeDescriptorPoolCreateInfo,
-		MaxSets:       1,
-		PoolSizeCount: 1,
-		PPoolSizes:    uintptr(unsafe.Pointer(&poolSize2)),
-	}
-	var attPool uintptr
-	if res := vk.call(vk.createDescriptorPool, device, uintptr(unsafe.Pointer(&dpci2)), 0, uintptr(unsafe.Pointer(&attPool))); res != vkSuccess {
-		return fmt.Errorf("vkCreateDescriptorPool att q8: %d", int32(res))
-	}
-	defer vk.callVoid(vk.destroyDescriptorPool, device, attPool, 0)
-
-	var attDS uintptr
-	attDSAI := vkDescriptorSetAllocateInfo{
-		SType:              vkStructureTypeDescriptorSetAllocateInfo,
-		DescriptorPool:     attPool,
-		DescriptorSetCount: 1,
-		PSetLayouts:        uintptr(unsafe.Pointer(&attRunner.setLayout)),
-	}
-	if res := vk.call(vk.allocateDescriptorSets, device, uintptr(unsafe.Pointer(&attDSAI)), uintptr(unsafe.Pointer(&attDS))); res != vkSuccess {
-		return fmt.Errorf("vkAllocateDescriptorSets att q8: %d", int32(res))
-	}
+	attDS := attRunner.descriptorSet
 
 	attInfos := [10]vkDescriptorBufferInfo{
 		{Buffer: devOutA.buffer, Range: qBytes},
@@ -514,29 +470,8 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 
 	// === Compute phase ===
 
-	// Allocate descriptor set for RMSNorm (3 descriptors: x, weight, out)
-	rmsPoolSize := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: 3}
-	rmsDPCI := vkDescriptorPoolCreateInfo{
-		SType:         vkStructureTypeDescriptorPoolCreateInfo,
-		MaxSets:       1,
-		PoolSizeCount: 1,
-		PPoolSizes:    uintptr(unsafe.Pointer(&rmsPoolSize)),
-	}
-	var rmsPool uintptr
-	if res := vk.call(vk.createDescriptorPool, device, uintptr(unsafe.Pointer(&rmsDPCI)), 0, uintptr(unsafe.Pointer(&rmsPool))); res != vkSuccess {
-		return fmt.Errorf("vkCreateDescriptorPool rmsnorm: %d", int32(res))
-	}
-	defer vk.callVoid(vk.destroyDescriptorPool, device, rmsPool, 0)
-	var rmsDS uintptr
-	rmsDSAI := vkDescriptorSetAllocateInfo{
-		SType:              vkStructureTypeDescriptorSetAllocateInfo,
-		DescriptorPool:     rmsPool,
-		DescriptorSetCount: 1,
-		PSetLayouts:        uintptr(unsafe.Pointer(&normRunner.setLayout)),
-	}
-	if res := vk.call(vk.allocateDescriptorSets, device, uintptr(unsafe.Pointer(&rmsDSAI)), uintptr(unsafe.Pointer(&rmsDS))); res != vkSuccess {
-		return fmt.Errorf("vkAllocateDescriptorSets rmsnorm: %d", int32(res))
-	}
+	// Reuse persistent RMSNorm descriptor set
+	rmsDS := normRunner.descriptorSet
 	// RMSNorm descriptor set: [0]=x (rawInput), [1]=weight (ln1), [2]=out (devX)
 	rmsInfos := [3]vkDescriptorBufferInfo{
 		{Buffer: devX.buffer, Range: xBytes},
