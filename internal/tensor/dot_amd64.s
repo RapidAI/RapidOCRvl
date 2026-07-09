@@ -6705,6 +6705,65 @@ maxF32v2Done:
 	MOVSS X0, ret+24(FP)
 	RET
 
+// maxF32ZMM: ZMM (512-bit) version of maxF32AVX2. 16 elements/iteration.
+TEXT ·maxF32ZMM(SB), NOSPLIT, $32-28
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	LEAQ maxF32NegInf<>(SB), AX
+	VBROADCASTSS (AX), Z0
+	VORPS Z0, Z0, Z1
+	VORPS Z0, Z0, Z2
+	VORPS Z0, Z0, Z3
+	CMPQ CX, $16
+	JB maxF32zmmTail
+maxF32zmmLoop64:
+	CMPQ CX, $64
+	JB maxF32zmmLoop
+	VMAXPS (SI), Z0, Z0
+	VMAXPS 64(SI), Z1, Z1
+	VMAXPS 128(SI), Z2, Z2
+	VMAXPS 192(SI), Z3, Z3
+	ADDQ $256, SI
+	SUBQ $64, CX
+	JMP maxF32zmmLoop64
+maxF32zmmLoop:
+	CMPQ CX, $16
+	JB maxF32zmmReduce
+	VMAXPS (SI), Z0, Z0
+	ADDQ $64, SI
+	SUBQ $16, CX
+	JMP maxF32zmmLoop
+maxF32zmmReduce:
+	VMAXPS Z1, Z0, Z0
+	VMAXPS Z2, Z0, Z0
+	VMAXPS Z3, Z0, Z0
+	VEXTRACTF64X4 $1, Z0, Y1
+	VMAXPS Y0, Y1, Y1
+	VEXTRACTF128 $1, Y1, X2
+	VMAXPS X2, X1, X1
+	VSHUFPS $0x4E, X1, X1, X2
+	VMAXPS X2, X1, X1
+	VSHUFPS $0xB1, X1, X1, X2
+	VMAXPS X2, X1, X1
+	VZEROUPPER
+	JMP maxF32zmmTailScalar
+maxF32zmmTail:
+	VZEROUPPER
+	VPCMPEQD X0, X0, X0
+	VPSRLD $1, X0, X0
+	VXORPS X1, X1, X1
+	VSUBSS X0, X1, X0
+maxF32zmmTailScalar:
+	CMPQ CX, $0
+	JE maxF32zmmDone
+	VMAXSS (SI), X0, X0
+	ADDQ $4, SI
+	DECQ CX
+	JMP maxF32zmmTailScalar
+maxF32zmmDone:
+	MOVSS X0, ret+24(FP)
+	RET
+
 // expScaledVecFMA: fuses out[i] = exp(x[i]*scale + bias) into a single pass.
 // Same polynomial as expF32VecFMA but reads from x (SI), writes to out (DI),
 // and uses VFMADD213PS for scale*x+bias instead of a separate scalar pass.

@@ -1237,7 +1237,9 @@ func SoftmaxInPlace(x []float32) {
 	}
 	n := len(x)
 	m := float32(math.Inf(-1))
-	if useDotF32AVX && n >= 8 {
+	if useDotFMA && n >= 16 {
+		m = maxF32ZMM(x)
+	} else if useDotF32AVX && n >= 8 {
 		m = maxF32AVX2(x)
 	} else {
 		var m0, m1, m2, m3, m4, m5, m6, m7 = m, m, m, m, m, m, m, m

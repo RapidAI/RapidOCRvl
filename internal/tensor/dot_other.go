@@ -365,6 +365,8 @@ func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32) { weightedSumAdd2
 
 func maxF32AVX2(x []float32) float32 { return maxF32AVX(x) }
 
+func maxF32ZMM(x []float32) float32 { return maxF32AVX(x) }
+
 func argmaxF32AVX2(x []float32) (int, float32) {
 	if len(x) == 0 {
 		return 0, 0
