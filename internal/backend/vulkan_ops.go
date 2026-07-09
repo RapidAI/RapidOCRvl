@@ -2117,25 +2117,21 @@ layout(set=0,binding=2) readonly buffer S { float scale[]; };
 layout(set=0,binding=3) writeonly buffer O { float outv[]; };
 shared float scratch[256];
 float q6(uint bit) {
-  uint widx = bit >> 5;
-  uint shift = bit & 31u;
-  uint word0 = packed[widx];
+  uint widx = bit >> 5; uint shift = bit & 31u; uint word0 = packed[widx];
   uint v = (word0 >> shift) & 63u;
   if (shift > 26u) { v = ((word0 >> shift) | (packed[widx + 1u] << (32u - shift))) & 63u; }
   return float(int(v) - 32);
 }
 void main() {
-  uint row = gl_WorkGroupID.x;
-  uint lid = gl_LocalInvocationID.x;
-  uint packedCols = (pc.cols * 6u + 7u) / 8u;
-  uint rowBits = row * packedCols * 8u;
+  uint row = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x;
+  uint packedCols = (pc.cols * 6u + 7u) / 8u; uint rowBits = row * packedCols * 8u;
   float sum = 0.0;
   for (uint c = lid; c < pc.cols; c += 256) sum += q6(rowBits + c * 6u) * x[c];
-  scratch[lid] = sum;
-  barrier();
+  scratch[lid] = sum; barrier();
   for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
   if (lid == 0) outv[row] = scratch[0] * scale[row];
-}`
+}
+`
 
 const vulkanMatVecQ4GLSL = `#version 450
 layout(local_size_x = 256) in;
@@ -2146,23 +2142,18 @@ layout(set=0,binding=2) readonly buffer S { float scale[]; };
 layout(set=0,binding=3) writeonly buffer O { float outv[]; };
 shared float scratch[256];
 float q4(uint idx) {
-  uint word = packed[idx >> 3];
-  uint shift = (idx & 7u) * 4u;
-  uint v = (word >> shift) & 15u;
-  return float(int(v) - 8);
+  uint word = packed[idx >> 3]; uint shift = (idx & 7u) * 4u; uint v = (word >> shift) & 15u; return float(int(v) - 8);
 }
 void main() {
-  uint row = gl_WorkGroupID.x;
-  uint lid = gl_LocalInvocationID.x;
-  uint packedCols = (pc.cols + 1u) / 2u;
-  uint rowBase = row * packedCols * 2u;
+  uint row = gl_WorkGroupID.x; uint lid = gl_LocalInvocationID.x;
+  uint packedCols = (pc.cols + 1u) / 2u; uint rowBase = row * packedCols * 2u;
   float sum = 0.0;
   for (uint c = lid; c < pc.cols; c += 256) sum += q4(rowBase + c) * x[c];
-  scratch[lid] = sum;
-  barrier();
+  scratch[lid] = sum; barrier();
   for (uint stride = 128; stride > 0; stride >>= 1) { if (lid < stride) scratch[lid] += scratch[lid + stride]; barrier(); }
   if (lid == 0) outv[row] = scratch[0] * scale[row];
-}`
+}
+`
 
 const vulkanFusedQKVF32GLSL = `#version 450
 layout(local_size_x = 256) in;

@@ -9,7 +9,7 @@ var useDotQ8AVX2 = cpu.X86.HasAVX2
 var useDotQ4AVX2 = cpu.X86.HasAVX2
 var useDotQ6AVX2 = false // Q6 AVX2 is slower than Go scalar+LUT
 var useDotFMA = cpu.X86.HasFMA
-var useVNNI = cpu.X86.HasAVXVNNI
+var useVNNI = false // VPDPBUSD unsupported by Go assembler
 
 func addAVX(out, a, b []float32)
 func addInPlaceAVX(dst, x []float32)

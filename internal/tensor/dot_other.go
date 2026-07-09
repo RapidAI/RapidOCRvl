@@ -411,15 +411,43 @@ func sumF32FMA(x []float32) float32 { return sumF32AVX(x) }
 
 
 func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) float32 {
-	return 0
+	n := len(a)
+	if len(xq) < n {
+		n = len(xq)
+	}
+	if n == 0 {
+		return float32(-128*rowSumW) * scaleX * scaleW
+	}
+	dot := dotQ8VNNICore(&a[0], &xq[0], n)
+	return float32(dot-128*rowSumW) * scaleX * scaleW
 }
 
 func dotQ8PairVNNI(a, b []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB int32, scaleWA, scaleWB float32) (float32, float32) {
-	return 0, 0
+	n := len(a)
+	if len(xq) < n {
+		n = len(xq)
+	}
+	if n == 0 {
+		return float32(-128*rowSumWA) * scaleX * scaleWA, float32(-128*rowSumWB) * scaleX * scaleWB
+	}
+	dotA, dotB := dotQ8PairVNNICore(&a[0], &b[0], &xq[0], n)
+	return float32(dotA-128*rowSumWA) * scaleX * scaleWA, float32(dotB-128*rowSumWB) * scaleX * scaleWB
 }
 
 func dotQ8TripletVNNI(a, b, c []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB, rowSumWC int32, scaleWA, scaleWB, scaleWC float32) (float32, float32, float32) {
-	return 0, 0, 0
+	n := len(a)
+	if len(xq) < n {
+		n = len(xq)
+	}
+	if n == 0 {
+		return float32(-128*rowSumWA) * scaleX * scaleWA,
+			float32(-128*rowSumWB) * scaleX * scaleWB,
+			float32(-128*rowSumWC) * scaleX * scaleWC
+	}
+	dotA, dotB, dotC := dotQ8TripletVNNICore(&a[0], &b[0], &c[0], &xq[0], n)
+	return float32(dotA-128*rowSumWA) * scaleX * scaleWA,
+		float32(dotB-128*rowSumWB) * scaleX * scaleWB,
+		float32(dotC-128*rowSumWC) * scaleX * scaleWC
 }
 
 func rowSumQ8AVX2(a []int8) int32 {
@@ -452,6 +480,46 @@ func quantizeXForVNNIAVX2(x []float32, xq []uint8) float32 {
 	return scale
 }
 
+
+// Assembly helper stubs (non-amd64 builds use scalar).
+func dotQ8VNNICore(a *int8, xq *uint8, n int) int32 {
+	var s int32
+	for i := 0; i < n; i++ {
+		s += int32(a[i]) * (int32(xq[i]) - 128)
+	}
+	return s
+}
+
+func dotQ8PairVNNICore(a, b *int8, xq *uint8, n int) (int32, int32) {
+	var sa, sb int32
+	for i := 0; i < n; i++ {
+		sa += int32(a[i]) * (int32(xq[i]) - 128)
+		sb += int32(b[i]) * (int32(xq[i]) - 128)
+	}
+	return sa, sb
+}
+
+func dotQ8TripletVNNICore(a, b, c *int8, xq *uint8, n int) (int32, int32, int32) {
+	var sa, sb, sc int32
+	for i := 0; i < n; i++ {
+		sa += int32(a[i]) * (int32(xq[i]) - 128)
+		sb += int32(b[i]) * (int32(xq[i]) - 128)
+		sc += int32(c[i]) * (int32(xq[i]) - 128)
+	}
+	return sa, sb, sc
+}
+
+func rowSumQ8Asm(a *int8, n int) int32 {
+	var s int32
+	for i := 0; i < n; i++ {
+		s += int32(a[i])
+	}
+	return s
+}
+
+func quantizeXForVNNIAsm(x []float32, xq []uint8) float32 {
+	return quantizeXForVNNIAVX2(x, xq)
+}
 func rowSumQ8(a []int8) int32 {
 	if useDotQ8AVX2 {
 		return rowSumQ8AVX2(a)

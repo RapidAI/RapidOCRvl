@@ -3851,9 +3851,15 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 		return out, false
 	}
 	// Try the full chain: QKV+MRoPE + attention+output+AddRMSNorm in one command buffer
-	// Only for F32 weights with RoPE.  Skips two separate submit+wait cycles.
+	// Try the full chain: QKV+MRoPE + attention+output+AddRMSNorm in one command buffer.
+	// F32 path (only when no quantized weights present).
 	if hasRoPE && tl.q8.q == nil && tl.q6.q == nil && tl.q4.q == nil &&
 		rt.vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
+	// Q8 path: fused Q8 QKV+MRoPE + attention + Q8 output proj + AddRMSNorm in one submit.
+	if hasRoPE && tl.q8.q != nil &&
+		rt.vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, x, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
 		return nil, true
 	}
 	qkvHasRoPE := false

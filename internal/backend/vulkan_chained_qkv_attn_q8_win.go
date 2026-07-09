@@ -1,4 +1,4 @@
-﻿//go:build windows
+//go:build windows
 
 package backend
 
@@ -10,14 +10,31 @@ import (
 	"unsafe"
 )
 
+// ensureHostBufferWin allocates or resizes a host-visible buffer to at least size bytes.
+func ensureHostBufferWin(vk *vulkanWin, device uintptr, memProps vkPhysicalDeviceMemoryProperties, buf *vkHostBufferWin, size uint64) error {
+	if buf.buffer != 0 && buf.size >= size {
+		return nil
+	}
+	if buf.buffer != 0 {
+		vk.destroyBuffer(device, *buf)
+		*buf = vkHostBufferWin{}
+	}
+	next, err := vk.newHostBuffer(device, memProps, size)
+	if err != nil {
+		return err
+	}
+	*buf = next
+	return nil
+}
+
 // VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8 chains fused Q8 QKV+MRoPE
 // with text attention+output+AddRMSNorm into a single command buffer.
-// The q/k/v outputs from QKV stay in GPU memory and are fed directly
-// to the attention kernel.  The new token's k/v is copied into the GPU
-// KV cache buffer via vkCmdCopyBuffer before the attention dispatch.
 //
-// This is the Q8 variant — the most common quantization — and applies
-// to ALL layers in the generation path (li > 0).
+// Device-local optimization: all intermediate results (QKV outputs, attention
+// output, KV cache) stay in GPU device-local memory.  Only inputs are uploaded
+// via staging buffers and only final outputs are read back to host-visible
+// memory.  This eliminates per-dispatch host round-trips that occur when
+// using host-visible buffers for intermediates.
 func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	normOut, residual, x []float32,
 	a, b, c *tensor.Q8Matrix,
@@ -64,7 +81,7 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	vk := qkvRunner.vk
 	device := qkvRunner.device
 
-	// --- Prepare Q8 QKV+MRoPE ---
+	// --- Compute byte sizes ---
 	xBytes, err := checkedFloat32ByteLenErrWin(hidden, "Vulkan q8 chained qkv x")
 	if err != nil {
 		return err
@@ -113,59 +130,225 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	outBBytes := sbBytes
 	outCBytes := scBytes
 
-	if err := qkvRunner.ensureHostBuffer(&qkvRunner.cosBuf, tableBytes); err != nil {
-		return err
+	// --- Allocate device-local buffers for intermediates ---
+	devOutA, err := vk.newDeviceBuffer(device, qkvRunner.memProps, outABytes)
+	if err != nil {
+		return fmt.Errorf("device buffer outA: %w", err)
 	}
-	if err := qkvRunner.ensureHostBuffer(&qkvRunner.sinBuf, tableBytes); err != nil {
-		return err
+	defer vk.destroyDeviceBuffer(device, devOutA)
+
+	devOutB, err := vk.newDeviceBuffer(device, qkvRunner.memProps, outBBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer outB: %w", err)
 	}
-	if err := qkvRunner.ensureHostBuffer(&qkvRunner.outABuf, outABytes); err != nil {
-		return err
+	defer vk.destroyDeviceBuffer(device, devOutB)
+
+	devOutC, err := vk.newDeviceBuffer(device, qkvRunner.memProps, outCBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer outC: %w", err)
 	}
-	if err := qkvRunner.ensureHostBuffer(&qkvRunner.outBBuf, outBBytes); err != nil {
-		return err
+	defer vk.destroyDeviceBuffer(device, devOutC)
+
+	qBytes := uint64(qRows) * 4
+	kvDimBytes := uint64(kvRows) * 4
+	fullCacheBytes := uint64(cacheLen+1) * kvDimBytes
+
+	devK, err := vk.newDeviceBuffer(device, attRunner.memProps, fullCacheBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer k: %w", err)
 	}
-	if err := qkvRunner.ensureHostBuffer(&qkvRunner.outCBuf, outCBytes); err != nil {
-		return err
+	defer vk.destroyDeviceBuffer(device, devK)
+
+	devV, err := vk.newDeviceBuffer(device, attRunner.memProps, fullCacheBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer v: %w", err)
 	}
-	abuf, err := qkvRunner.int8WeightBuffer(a.Data[:aLen], aBytes)
+	defer vk.destroyDeviceBuffer(device, devV)
+
+	devOut, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer out: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devOut)
+
+	devFinal, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer final: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devFinal)
+
+	devResidual, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer residual: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devResidual)
+
+	devNorm, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer norm: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devNorm)
+
+	// Weight device buffers
+	wDataLen, err := checkedQ8DataLenWin(qRows, qRows, "Vulkan q8 chained qkv output w")
 	if err != nil {
 		return err
 	}
-	bbuf, err := qkvRunner.int8WeightBuffer(b.Data[:bLen], bBytes)
+	wDataBytes, err := checkedAlignedByteLenErrWin(wDataLen, 4, "Vulkan q8 chained qkv output w data")
 	if err != nil {
 		return err
 	}
-	cbuf, err := qkvRunner.int8WeightBuffer(c.Data[:cLen], cBytes)
+	wScaleBytes, err := checkedFloat32ByteLenErrWin(qRows, "Vulkan q8 chained qkv output w scale")
 	if err != nil {
-		return err
-	}
-	asbuf, err := qkvRunner.floatWeightBuffer(a.Scale[:qRows], saBytes)
-	if err != nil {
-		return err
-	}
-	bsbuf, err := qkvRunner.floatWeightBuffer(b.Scale[:kvRows], sbBytes)
-	if err != nil {
-		return err
-	}
-	csbuf, err := qkvRunner.floatWeightBuffer(c.Scale[:kvRows], scBytes)
-	if err != nil {
-		return err
-	}
-	if err := qkvRunner.ensureHostBuffer(&qkvRunner.xBuf, xBytes); err != nil {
-		return err
-	}
-	if err := vk.writeFloat32(device, qkvRunner.xBuf, x[:hidden]); err != nil {
-		return err
-	}
-	if err := vk.writeFloat32(device, qkvRunner.cosBuf, cosTable[:half]); err != nil {
-		return err
-	}
-	if err := vk.writeFloat32(device, qkvRunner.sinBuf, sinTable[:half]); err != nil {
 		return err
 	}
 
-	// Temporary descriptor pool for Q8 QKV descriptor set
+	devWData, err := vk.newDeviceBuffer(device, attRunner.memProps, wDataBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer wData: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devWData)
+
+	devWScale, err := vk.newDeviceBuffer(device, attRunner.memProps, wScaleBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer wScale: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devWScale)
+
+	devNormWeight, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer normWeight: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devNormWeight)
+
+	devAData, err := vk.newDeviceBuffer(device, qkvRunner.memProps, aBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer aData: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devAData)
+
+	devBData, err := vk.newDeviceBuffer(device, qkvRunner.memProps, bBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer bData: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devBData)
+
+	devCData, err := vk.newDeviceBuffer(device, qkvRunner.memProps, cBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer cData: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devCData)
+
+	devAScale, err := vk.newDeviceBuffer(device, qkvRunner.memProps, saBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer aScale: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devAScale)
+
+	devBScale, err := vk.newDeviceBuffer(device, qkvRunner.memProps, sbBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer bScale: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devBScale)
+
+	devCScale, err := vk.newDeviceBuffer(device, qkvRunner.memProps, scBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer cScale: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devCScale)
+
+	devX, err := vk.newDeviceBuffer(device, qkvRunner.memProps, xBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer x: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devX)
+
+	devCos, err := vk.newDeviceBuffer(device, qkvRunner.memProps, tableBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer cos: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devCos)
+
+	devSin, err := vk.newDeviceBuffer(device, qkvRunner.memProps, tableBytes)
+	if err != nil {
+		return fmt.Errorf("device buffer sin: %w", err)
+	}
+	defer vk.destroyDeviceBuffer(device, devSin)
+
+	// --- Staging host buffers ---
+	maxFloat32Bytes := xBytes
+	if tableBytes > maxFloat32Bytes {
+		maxFloat32Bytes = tableBytes
+	}
+	if qBytes > maxFloat32Bytes {
+		maxFloat32Bytes = qBytes
+	}
+	if saBytes > maxFloat32Bytes {
+		maxFloat32Bytes = saBytes
+	}
+	if sbBytes > maxFloat32Bytes {
+		maxFloat32Bytes = sbBytes
+	}
+	if scBytes > maxFloat32Bytes {
+		maxFloat32Bytes = scBytes
+	}
+	if wScaleBytes > maxFloat32Bytes {
+		maxFloat32Bytes = wScaleBytes
+	}
+	if fullCacheBytes > maxFloat32Bytes {
+		maxFloat32Bytes = fullCacheBytes
+	}
+	var stagingFloat vkHostBufferWin
+	defer func() {
+		if stagingFloat.buffer != 0 {
+			vk.destroyBuffer(device, stagingFloat)
+		}
+	}()
+
+	maxByteBytes := aBytes
+	if bBytes > maxByteBytes {
+		maxByteBytes = bBytes
+	}
+	if cBytes > maxByteBytes {
+		maxByteBytes = cBytes
+	}
+	if wDataBytes > maxByteBytes {
+		maxByteBytes = wDataBytes
+	}
+	var stagingBytes vkHostBufferWin
+	defer func() {
+		if stagingBytes.buffer != 0 {
+			vk.destroyBuffer(device, stagingBytes)
+		}
+	}()
+
+	// Host-visible readback buffers
+	var readbackNorm vkHostBufferWin
+	defer func() {
+		if readbackNorm.buffer != 0 {
+			vk.destroyBuffer(device, readbackNorm)
+		}
+	}()
+	var readbackResidual vkHostBufferWin
+	defer func() {
+		if readbackResidual.buffer != 0 {
+			vk.destroyBuffer(device, readbackResidual)
+		}
+	}()
+	var readbackK vkHostBufferWin
+	defer func() {
+		if readbackK.buffer != 0 {
+			vk.destroyBuffer(device, readbackK)
+		}
+	}()
+	var readbackV vkHostBufferWin
+	defer func() {
+		if readbackV.buffer != 0 {
+			vk.destroyBuffer(device, readbackV)
+		}
+	}()
+
+	// --- Descriptor pools ---
 	poolSize1 := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: uint32(qkvRunner.descriptorCount)}
 	dpci1 := vkDescriptorPoolCreateInfo{
 		SType:         vkStructureTypeDescriptorPoolCreateInfo,
@@ -191,79 +374,22 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	}
 
 	qkvInfos := [12]vkDescriptorBufferInfo{
-		{Buffer: qkvRunner.xBuf.buffer, Range: xBytes},
-		{Buffer: abuf.buffer, Range: aBytes},
-		{Buffer: bbuf.buffer, Range: bBytes},
-		{Buffer: cbuf.buffer, Range: cBytes},
-		{Buffer: asbuf.buffer, Range: saBytes},
-		{Buffer: bsbuf.buffer, Range: sbBytes},
-		{Buffer: csbuf.buffer, Range: scBytes},
-		{Buffer: qkvRunner.cosBuf.buffer, Range: tableBytes},
-		{Buffer: qkvRunner.sinBuf.buffer, Range: tableBytes},
-		{Buffer: qkvRunner.outABuf.buffer, Range: outABytes},
-		{Buffer: qkvRunner.outBBuf.buffer, Range: outBBytes},
-		{Buffer: qkvRunner.outCBuf.buffer, Range: outCBytes},
+		{Buffer: devX.buffer, Range: xBytes},
+		{Buffer: devAData.buffer, Range: aBytes},
+		{Buffer: devBData.buffer, Range: bBytes},
+		{Buffer: devCData.buffer, Range: cBytes},
+		{Buffer: devAScale.buffer, Range: saBytes},
+		{Buffer: devBScale.buffer, Range: sbBytes},
+		{Buffer: devCScale.buffer, Range: scBytes},
+		{Buffer: devCos.buffer, Range: tableBytes},
+		{Buffer: devSin.buffer, Range: tableBytes},
+		{Buffer: devOutA.buffer, Range: outABytes},
+		{Buffer: devOutB.buffer, Range: outBBytes},
+		{Buffer: devOutC.buffer, Range: outCBytes},
 	}
 	var qkvDSCache [12]vulkanDescriptorBindingWin
 	updateVulkanDescriptorBuffersWin(vk, device, qkvDS, qkvDSCache[:qkvRunner.descriptorCount], qkvInfos[:])
 
-	// --- Prepare attention+output+AddRMSNorm ---
-	if err := attRunner.uploadTextCacheLocked(kCache, vCache, cacheEpoch, cacheLen, kvRows); err != nil {
-		return err
-	}
-	kvDimBytes := uint64(kvRows) * 4
-	fullCacheBytes := uint64(cacheLen+1) * kvDimBytes
-	if err := attRunner.ensureHostBuffer(&attRunner.kBuf, fullCacheBytes); err != nil {
-		return err
-	}
-	if err := attRunner.ensureHostBuffer(&attRunner.vBuf, fullCacheBytes); err != nil {
-		return err
-	}
-	qBytes := uint64(qRows) * 4
-
-	if err := attRunner.ensureHostBuffer(&attRunner.outBuf, qBytes); err != nil {
-		return err
-	}
-	if err := attRunner.ensureHostBuffer(&attRunner.finalBuf, qBytes); err != nil {
-		return err
-	}
-	if err := attRunner.ensureHostBuffer(&attRunner.residualBuf, qBytes); err != nil {
-		return err
-	}
-	if err := attRunner.ensureHostBuffer(&attRunner.normBuf, qBytes); err != nil {
-		return err
-	}
-	// Q8 output projection weight: upload as int8 packed data + scale
-	wDataLen, err := checkedQ8DataLenWin(qRows, qRows, "Vulkan q8 chained qkv output w")
-	if err != nil {
-		return err
-	}
-	wDataBytes, err := checkedAlignedByteLenErrWin(wDataLen, 4, "Vulkan q8 chained qkv output w data")
-	if err != nil {
-		return err
-	}
-	wScaleBytes, err := checkedFloat32ByteLenErrWin(qRows, "Vulkan q8 chained qkv output w scale")
-	if err != nil {
-		return err
-	}
-	wDataBuf, err := attRunner.q8DataBuffer(w.Data[:wDataLen], wDataBytes)
-	if err != nil {
-		return err
-	}
-	wScaleBuf, err := attRunner.cachedBuffer(w.Scale[:qRows], wScaleBytes, attRunner.q8ScaleBuffers)
-	if err != nil {
-		return err
-	}
-	normWeightBuf, err := attRunner.cachedBuffer(normWeight[:qRows], qBytes, attRunner.biasBuffers)
-	if err != nil {
-		return err
-	}
-	if err := vk.writeFloat32(device, attRunner.residualBuf, residual[:qRows]); err != nil {
-		return err
-	}
-
-	// Attention descriptor set: [0]=q (from qkvRunner.outABuf), [1]=k, [2]=v,
-	// [3]=outBuf, [4]=w, [5]=bias, [6]=finalBuf, [7]=residualBuf, [8]=normWeight, [9]=normBuf
 	poolSize2 := vkDescriptorPoolSize{Type: vkDescriptorTypeStorageBuffer, DescriptorCount: 10}
 	dpci2 := vkDescriptorPoolCreateInfo{
 		SType:         vkStructureTypeDescriptorPoolCreateInfo,
@@ -289,21 +415,21 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	}
 
 	attInfos := [10]vkDescriptorBufferInfo{
-		{Buffer: qkvRunner.outABuf.buffer, Range: qBytes},
-		{Buffer: attRunner.kBuf.buffer, Range: attRunner.kBuf.size},
-		{Buffer: attRunner.vBuf.buffer, Range: attRunner.vBuf.size},
-		{Buffer: attRunner.outBuf.buffer, Range: qBytes},
-		{Buffer: wDataBuf.buffer, Range: wDataBytes},  // binding 4: Q8 weight data
-		{Buffer: wScaleBuf.buffer, Range: wScaleBytes}, // binding 5: Q8 weight scale (replaces bias)
-		{Buffer: attRunner.finalBuf.buffer, Range: qBytes},
-		{Buffer: attRunner.residualBuf.buffer, Range: qBytes},
-		{Buffer: normWeightBuf.buffer, Range: qBytes},
-		{Buffer: attRunner.normBuf.buffer, Range: qBytes},
+		{Buffer: devOutA.buffer, Range: qBytes},
+		{Buffer: devK.buffer, Range: fullCacheBytes},
+		{Buffer: devV.buffer, Range: fullCacheBytes},
+		{Buffer: devOut.buffer, Range: qBytes},
+		{Buffer: devWData.buffer, Range: wDataBytes},
+		{Buffer: devWScale.buffer, Range: wScaleBytes},
+		{Buffer: devFinal.buffer, Range: qBytes},
+		{Buffer: devResidual.buffer, Range: qBytes},
+		{Buffer: devNormWeight.buffer, Range: qBytes},
+		{Buffer: devNorm.buffer, Range: qBytes},
 	}
 	var attDSCache [10]vulkanDescriptorBindingWin
 	updateVulkanDescriptorBuffersWin(vk, device, attDS, attDSCache[:], attInfos[:])
 
-	// --- Record command buffer (single submit for the whole chain) ---
+	// --- Record command buffer ---
 	if res := vk.call(vk.resetCommandPool, device, qkvRunner.commandPool, 0); res != vkSuccess {
 		return fmt.Errorf("vkResetCommandPool chained q8: %d", int32(res))
 	}
@@ -313,7 +439,59 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 		return fmt.Errorf("vkBeginCommandBuffer chained q8: %d", int32(res))
 	}
 
-	// Dispatch 1: Q8 QKV+MRoPE
+	// === Upload phase ===
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devX, x[:hidden]); err != nil {
+		return fmt.Errorf("upload x: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devCos, cosTable[:half]); err != nil {
+		return fmt.Errorf("upload cos: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devSin, sinTable[:half]); err != nil {
+		return fmt.Errorf("upload sin: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devResidual, residual[:qRows]); err != nil {
+		return fmt.Errorf("upload residual: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devNormWeight, normWeight[:qRows]); err != nil {
+		return fmt.Errorf("upload normWeight: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devAScale, a.Scale[:qRows]); err != nil {
+		return fmt.Errorf("upload aScale: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devBScale, b.Scale[:kvRows]); err != nil {
+		return fmt.Errorf("upload bScale: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, &stagingFloat, devCScale, c.Scale[:kvRows]); err != nil {
+		return fmt.Errorf("upload cScale: %w", err)
+	}
+	if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devWScale, w.Scale[:qRows]); err != nil {
+		return fmt.Errorf("upload wScale: %w", err)
+	}
+	if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, &stagingBytes, devAData, unsafe.Slice((*byte)(unsafe.Pointer(&a.Data[0])), aLen)); err != nil {
+		return fmt.Errorf("upload aData: %w", err)
+	}
+	if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, &stagingBytes, devBData, unsafe.Slice((*byte)(unsafe.Pointer(&b.Data[0])), bLen)); err != nil {
+		return fmt.Errorf("upload bData: %w", err)
+	}
+	if err := vk.uploadBytesToDevice(device, cmd, qkvRunner.memProps, &stagingBytes, devCData, unsafe.Slice((*byte)(unsafe.Pointer(&c.Data[0])), cLen)); err != nil {
+		return fmt.Errorf("upload cData: %w", err)
+	}
+	if err := vk.uploadBytesToDevice(device, cmd, attRunner.memProps, &stagingBytes, devWData, unsafe.Slice((*byte)(unsafe.Pointer(&w.Data[0])), wDataLen)); err != nil {
+		return fmt.Errorf("upload wData: %w", err)
+	}
+
+	// Upload KV cache
+	cacheElems := cacheLen * kvRows
+	if cacheElems > 0 {
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devK, kCache[:cacheElems]); err != nil {
+			return fmt.Errorf("upload kCache: %w", err)
+		}
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, &stagingFloat, devV, vCache[:cacheElems]); err != nil {
+			return fmt.Errorf("upload vCache: %w", err)
+		}
+	}
+
+	// === Compute phase ===
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, qkvRunner.pipeline)
 	vk.callVoid(vk.cmdBindDescriptorSets, cmd, vkPipelineBindPointCompute, qkvRunner.pipelineLayout, 0, 1, uintptr(unsafe.Pointer(&qkvDS)), 0, 0)
 	packed := headDim | (kvHeads << 16)
@@ -327,19 +505,15 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	groups := qRows/2 + kvRows/2 + kvRows
 	vk.callVoid(vk.cmdDispatch, cmd, uintptr(groups), 1, 1)
 
-	// Barrier: QKV writes visible to k/v cache copy
 	vk.computeBarrier(cmd)
 
-	// Copy new k/v from QKV output into KV cache at position cacheLen
 	kvCopyBytes := uint64(kvRows) * 4
 	kvCopyOffset := uint64(cacheLen) * uint64(kvRows) * 4
-	vk.cmdCopyBufferOffsetWin(cmd, qkvRunner.outBBuf.buffer, attRunner.kBuf.buffer, kvCopyOffset, kvCopyBytes)
-	vk.cmdCopyBufferOffsetWin(cmd, qkvRunner.outCBuf.buffer, attRunner.vBuf.buffer, kvCopyOffset, kvCopyBytes)
+	vk.cmdCopyBufferOffsetWin(cmd, devOutB.buffer, devK.buffer, kvCopyOffset, kvCopyBytes)
+	vk.cmdCopyBufferOffsetWin(cmd, devOutC.buffer, devV.buffer, kvCopyOffset, kvCopyBytes)
 
-	// Barrier: copy writes visible to attention reads
 	vk.computeBarrier(cmd)
 
-	// Dispatch 2: Attention
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, attRunner.pipeline)
 	vk.callVoid(vk.cmdBindDescriptorSets, cmd, vkPipelineBindPointCompute, attRunner.pipelineLayout, 0, 1, uintptr(unsafe.Pointer(&attDS)), 0, 0)
 	var attPC [20]byte
@@ -351,11 +525,9 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	vk.callVoid(vk.cmdPushConstants, cmd, attRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(20), uintptr(unsafe.Pointer(&attPC[0])))
 	vk.callVoid(vk.cmdDispatch, cmd, uintptr(numHeads), 1, 1)
 
-	// Barrier: attention writes visible to output proj
 	barrier := vkMemoryBarrier{SType: vkStructureTypeMemoryBarrier, SrcAccessMask: vkAccessShaderWriteBit, DstAccessMask: vkAccessShaderReadBit}
 	vk.callVoid(vk.cmdPipelineBarrier, cmd, vkPipelineStageComputeShaderBit, vkPipelineStageComputeShaderBit, 0, 1, uintptr(unsafe.Pointer(&barrier)), 0, 0, 0, 0)
 
-	// Dispatch 3: Output projection
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, attRunner.q8ProjPipeline)
 	binary.LittleEndian.PutUint32(attPC[0:4], 1)
 	binary.LittleEndian.PutUint32(attPC[4:8], uint32(qRows))
@@ -365,21 +537,39 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	vk.callVoid(vk.cmdPushConstants, cmd, attRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(20), uintptr(unsafe.Pointer(&attPC[0])))
 	vk.callVoid(vk.cmdDispatch, cmd, uintptr(qRows), 1, 1)
 
-	// Barrier: output proj writes visible to AddRMSNorm
 	vk.callVoid(vk.cmdPipelineBarrier, cmd, vkPipelineStageComputeShaderBit, vkPipelineStageComputeShaderBit, 0, 1, uintptr(unsafe.Pointer(&barrier)), 0, 0, 0, 0)
 
-	// Dispatch 4: AddRMSNorm
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, attRunner.normPipeline)
 	binary.LittleEndian.PutUint32(attPC[0:4], uint32(qRows))
 	binary.LittleEndian.PutUint32(attPC[4:8], 1)
 	vk.callVoid(vk.cmdPushConstants, cmd, attRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(8), uintptr(unsafe.Pointer(&attPC[0])))
 	vk.callVoid(vk.cmdDispatch, cmd, 1, 1, 1)
 
+	// === Readback phase ===
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackNorm, qBytes); err != nil {
+		return fmt.Errorf("readback norm buffer: %w", err)
+	}
+	vk.readbackFromDevice(cmd, devNorm, &readbackNorm, qBytes)
+
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackResidual, qBytes); err != nil {
+		return fmt.Errorf("readback residual buffer: %w", err)
+	}
+	vk.readbackFromDevice(cmd, devResidual, &readbackResidual, qBytes)
+
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackK, uint64(kvRows)*4); err != nil {
+		return fmt.Errorf("readback k buffer: %w", err)
+	}
+	vk.readbackFromDevice(cmd, devOutB, &readbackK, uint64(kvRows)*4)
+
+	if err := ensureHostBufferWin(vk, device, attRunner.memProps, &readbackV, uint64(kvRows)*4); err != nil {
+		return fmt.Errorf("readback v buffer: %w", err)
+	}
+	vk.readbackFromDevice(cmd, devOutC, &readbackV, uint64(kvRows)*4)
+
 	if res := vk.call(vk.endCommandBuffer, cmd); res != vkSuccess {
 		return fmt.Errorf("vkEndCommandBuffer chained q8: %d", int32(res))
 	}
 
-	// Single submit + wait
 	if res := vk.call(vk.resetFences, device, 1, uintptr(unsafe.Pointer(&qkvRunner.fence))); res != vkSuccess {
 		return fmt.Errorf("vkResetFences chained q8: %d", int32(res))
 	}
@@ -395,15 +585,14 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 		return fmt.Errorf("vkWaitForFences chained q8: %d", int32(res))
 	}
 
-	// Read back: residual, normOut, new k/v for host cache update
-	if err := vk.readFloat32Into(device, attRunner.residualBuf, residual[:qRows]); err != nil {
+	if err := vk.readFloat32Into(device, readbackNorm, normOut[:qRows]); err != nil {
 		return err
 	}
-	if err := vk.readFloat32Into(device, qkvRunner.outBBuf, outK[:kvRows]); err != nil {
+	if err := vk.readFloat32Into(device, readbackResidual, residual[:qRows]); err != nil {
 		return err
 	}
-	if err := vk.readFloat32Into(device, qkvRunner.outCBuf, outV[:kvRows]); err != nil {
+	if err := vk.readFloat32Into(device, readbackK, outK[:kvRows]); err != nil {
 		return err
 	}
-	return vk.readFloat32Into(device, attRunner.normBuf, normOut[:qRows])
+	return vk.readFloat32Into(device, readbackV, outV[:kvRows])
 }

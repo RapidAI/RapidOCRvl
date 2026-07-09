@@ -179,6 +179,57 @@ func (v *vulkanWin) uploadToDevice(device, cmd uintptr, hostBuf *vkHostBufferWin
 	return nil
 }
 
+
+// uploadBytesToDevice copies arbitrary byte data to a device-local buffer via
+// a staging host-visible buffer.  Used for int8/byte weight data.
+func (v *vulkanWin) uploadBytesToDevice(device, cmd uintptr, memProps vkPhysicalDeviceMemoryProperties, hostBuf *vkHostBufferWin, deviceBuf vkDeviceBufferWin, data []byte) error {
+	byteLen := uint64(len(data))
+	if byteLen == 0 {
+		return nil
+	}
+	// Ensure staging host buffer is large enough
+	if hostBuf.buffer == 0 || hostBuf.size < byteLen {
+		if hostBuf.buffer != 0 {
+			v.destroyBuffer(device, *hostBuf)
+		}
+		next, err := v.newHostBuffer(device, memProps, byteLen)
+		if err != nil {
+			return err
+		}
+		*hostBuf = next
+	}
+	// Write bytes into mapped staging buffer
+	dst := unsafe.Slice((*byte)(hostBuf.mapped), int(hostBuf.size))
+	copy(dst[:len(data)], data)
+	// Barrier: host writes visible before transfer read
+	hostBarrier := vkMemoryBarrier{
+		SType:         vkStructureTypeMemoryBarrier,
+		SrcAccessMask: 0,
+		DstAccessMask: vkAccessTransferReadBit,
+	}
+	v.callVoid(v.cmdPipelineBarrier, cmd,
+		vkPipelineStageHostBit, vkPipelineStageTransferBit,
+		0, 1, uintptr(unsafe.Pointer(&hostBarrier)), 0, 0, 0, 0)
+	// Copy
+	region := vkBufferCopy{SrcOffset: 0, DstOffset: 0, Size: byteLen}
+	v.callVoid(v.cmdCopyBuffer, cmd, hostBuf.buffer, deviceBuf.buffer, 1, uintptr(unsafe.Pointer(&region)))
+	// Barrier: transfer writes visible before compute reads
+	devBarrier := vkMemoryBarrier{
+		SType:         vkStructureTypeMemoryBarrier,
+		SrcAccessMask: vkAccessTransferWriteBit,
+		DstAccessMask: vkAccessShaderReadBit | vkAccessShaderWriteBit,
+	}
+	v.callVoid(v.cmdPipelineBarrier, cmd,
+		vkPipelineStageTransferBit, vkPipelineStageComputeShaderBit,
+		0, 1, uintptr(unsafe.Pointer(&devBarrier)), 0, 0, 0, 0)
+	return nil
+}
+
+// uploadFloat32ToDevice copies float32 data to a device-local buffer via staging.
+func (v *vulkanWin) uploadFloat32ToDevice(device, cmd uintptr, memProps vkPhysicalDeviceMemoryProperties, hostBuf *vkHostBufferWin, deviceBuf vkDeviceBufferWin, data []float32) error {
+	return v.uploadBytesToDevice(device, cmd, memProps, hostBuf, deviceBuf, unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4))
+}
+
 // readbackFromDevice copies data from a device-local buffer to a host-visible
 // buffer via vkCmdCopyBuffer recorded into the given command buffer.
 func (v *vulkanWin) readbackFromDevice(cmd uintptr, deviceBuf vkDeviceBufferWin, hostBuf *vkHostBufferWin, byteLen uint64) {
