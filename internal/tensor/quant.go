@@ -713,10 +713,27 @@ func matVecQ8SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q8M
 		xq := getVNNIScratch(gate.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		gData := gate.Data
+		uData := up.Data
+		gScale := gate.Scale
+		uScale := up.Scale
+		gRowSum := gate.RowSum
+		uRowSum := up.RowSum
+		cols := gate.Cols
 		if batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+			if useVNNI {
+				for r := start; r < end; r++ {
+					base := r * cols
+					dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
+					out[r] = float32(dotA-128*gRowSum[r]) * scaleX * gScale[r]
+					tmpU[r] = float32(dotB-128*uRowSum[r]) * scaleX * uScale[r]
+				}
+				SiLUMulInPlace(out[start:end], tmpU[start:end])
+				return
+			}
 			for r := start; r < end; r++ {
-				base := r * gate.Cols
-				g, u := dotQ8PairVNNI(gate.Data[base:base+gate.Cols], up.Data[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+				base := r * cols
+				g, u := dotQ8PairVNNI(gData[base:base+cols], uData[base:base+cols], xq, scaleX, gRowSum[r], uRowSum[r], gScale[r], uScale[r])
 				out[r] = g
 				tmpU[r] = u
 			}
@@ -803,6 +820,23 @@ func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4M
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
 		if batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+			if useVNNI {
+				gData := gate.Unpacked
+				uData := up.Unpacked
+				gScale := gate.Scale
+				uScale := up.Scale
+				gRS := gate.RowSum
+				uRS := up.RowSum
+				cols := gate.Cols
+				for r := start; r < end; r++ {
+					base := r * cols
+					dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
+					out[r] = float32(dotA-128*gRS[r]) * scaleX * gScale[r]
+					tmpU[r] = float32(dotB-128*uRS[r]) * scaleX * uScale[r]
+				}
+				SiLUMulInPlace(out[start:end], tmpU[start:end])
+				return
+			}
 			for r := start; r < end; r++ {
 				base := r * gate.Cols
 				g, u := dotQ8PairVNNI(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
@@ -810,6 +844,23 @@ func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4M
 				tmpU[r] = u
 			}
 			SiLUMulInPlace(out[start:end], tmpU[start:end])
+			return
+		}
+		if useVNNI {
+			gData := gate.Unpacked
+			uData := up.Unpacked
+			gScale := gate.Scale
+			uScale := up.Scale
+			gRS := gate.RowSum
+			uRS := up.RowSum
+			cols := gate.Cols
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
+				g := float32(dotA-128*gRS[r]) * scaleX * gScale[r]
+				u := float32(dotB-128*uRS[r]) * scaleX * uScale[r]
+				out[r] = SiLU(g) * u
+			}
 			return
 		}
 		for r := start; r < end; r++ {
@@ -975,9 +1026,23 @@ func fusedMatVec3Q8EqualRowsBiasSerial(outA, outB, outC, x []float32, a, b, c *Q
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData, cData := a.Data, b.Data, c.Data
+		aScale, bScale, cScale := a.Scale, b.Scale, c.Scale
+		aRS, bRS, cRS := a.RowSum, b.RowSum, c.RowSum
+		cols := a.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB, dotC := dotQ8TripletVNNICore(&aData[base], &bData[base], &cData[base], &xq[0], cols)
+				outA[r] = float32(dotA-128*aRS[r])*scaleX*aScale[r] + ba[r]
+				outB[r] = float32(dotB-128*bRS[r])*scaleX*bScale[r] + bb[r]
+				outC[r] = float32(dotC-128*cRS[r])*scaleX*cScale[r] + bc[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * a.Cols
-			av, bv, cv := dotQ8TripletVNNI(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			base := r * cols
+			av, bv, cv := dotQ8TripletVNNI(aData[base:base+cols], bData[base:base+cols], cData[base:base+cols], xq, scaleX, aRS[r], bRS[r], cRS[r], aScale[r], bScale[r], cScale[r])
 			outA[r] = av + ba[r]
 			outB[r] = bv + bb[r]
 			outC[r] = cv + bc[r]
@@ -998,9 +1063,23 @@ func fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q8Mat
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData, cData := a.Data, b.Data, c.Data
+		aScale, bScale, cScale := a.Scale, b.Scale, c.Scale
+		aRS, bRS, cRS := a.RowSum, b.RowSum, c.RowSum
+		cols := a.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB, dotC := dotQ8TripletVNNICore(&aData[base], &bData[base], &cData[base], &xq[0], cols)
+				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
+				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+				outC[r] = float32(dotC-128*cRS[r]) * scaleX * cScale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * a.Cols
-			av, bv, cv := dotQ8TripletVNNI(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			base := r * cols
+			av, bv, cv := dotQ8TripletVNNI(aData[base:base+cols], bData[base:base+cols], cData[base:base+cols], xq, scaleX, aRS[r], bRS[r], cRS[r], aScale[r], bScale[r], cScale[r])
 			outA[r] = av
 			outB[r] = bv
 			outC[r] = cv
@@ -1066,9 +1145,22 @@ func matVecQ8Serial(out, x []float32, q *Q8Matrix, start, end int) {
 		xq := getVNNIScratch(q.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		data := q.Data
+		scale := q.Scale
+		rowSum := q.RowSum
+		cols := q.Cols
+		if useVNNI {
+			// Inline the VNNI dot product to avoid per-row function call overhead
+			for r := start; r < end; r++ {
+				base := r * cols
+				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+				out[r] = float32(dot-128*rowSum[r]) * scaleX * scale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * q.Cols
-			out[r] = dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+			base := r * cols
+			out[r] = dotQ8VNNI(data[base:base+cols], xq, scaleX, scale[r], rowSum[r])
 		}
 		return
 	}
@@ -1144,9 +1236,21 @@ func matVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, en
 		xq := getVNNIScratch(q.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		data := q.Data
+		scale := q.Scale
+		rowSum := q.RowSum
+		cols := q.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+				out[r] = float32(dot-128*rowSum[r])*scaleX*scale[r] + bias[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * q.Cols
-			out[r] = dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r]) + bias[r]
+			base := r * cols
+			out[r] = dotQ8VNNI(data[base:base+cols], xq, scaleX, scale[r], rowSum[r]) + bias[r]
 		}
 		return
 	}
@@ -1385,9 +1489,21 @@ func matVecQ6Serial(out, x []float32, q *Q6Matrix, start, end int) {
 		xq := getVNNIScratch(q.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		data := q.Unpacked
+		scale := q.Scale
+		rowSum := q.RowSum
+		cols := q.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+				out[r] = float32(dot-128*rowSum[r]) * scaleX * scale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * q.Cols
-			out[r] = dotQ8VNNI(q.Unpacked[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+			base := r * cols
+			out[r] = dotQ8VNNI(data[base:base+cols], xq, scaleX, scale[r], rowSum[r])
 		}
 		return
 	}
@@ -1410,9 +1526,21 @@ func matVecQ4Serial(out, x []float32, q *Q4Matrix, start, end int) {
 		xq := getVNNIScratch(q.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		data := q.Unpacked
+		scale := q.Scale
+		rowSum := q.RowSum
+		cols := q.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+				out[r] = float32(dot-128*rowSum[r]) * scaleX * scale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
-			base := r * q.Cols
-			out[r] = dotQ8VNNI(q.Unpacked[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+			base := r * cols
+			out[r] = dotQ8VNNI(data[base:base+cols], xq, scaleX, scale[r], rowSum[r])
 		}
 		return
 	}
