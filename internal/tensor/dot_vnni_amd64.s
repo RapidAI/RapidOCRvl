@@ -1107,48 +1107,48 @@ TEXT ·finalizeDotQ8PairVNNI(SB), NOSPLIT, $0-80
 	MOVQ scaleB_base+48(FP), R11
 	MOVQ outB_base+56(FP), R12
 	MOVQ n+64(FP), R9
-	VBROADCASTSS scaleX+72(FP), Y1
-	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+	VBROADCASTSS scaleX+72(FP), Z1
+	VBROADCASTSS offset128<>(SB), Z2   // 128.0
 
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB finPairTail
 
 finPairLoop:
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB finPairDone
 	// Process A: outA = (dotsA - 128*rowSumA) * scaleX * scaleA
-	VMOVDQU (SI), Y0         // 8 int32 dotsA
-	VMOVDQU (DI), Y3         // 8 int32 rowSumA
-	VCVTDQ2PS Y0, Y0
-	VCVTDQ2PS Y3, Y3
-	VMULPS Y2, Y3, Y3        // 128 * rowSumA
-	VSUBPS Y3, Y0, Y0        // dotsA - 128*rowSumA
-	VMOVUPS (DX), Y4         // scaleA
-	VMULPS Y1, Y0, Y0        // * scaleX
-	VMULPS Y4, Y0, Y0        // * scaleA
-	VMOVUPS Y0, (CX)         // store outA
+	VMOVDQU64 (SI), Z0         // 16 int32 dotsA
+	VMOVDQU64 (DI), Z3         // 16 int32 rowSumA
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z3, Z3
+	VMULPS Z2, Z3, Z3        // 128 * rowSumA
+	VSUBPS Z3, Z0, Z0        // dotsA - 128*rowSumA
+	VMOVUPS (DX), Z4         // scaleA
+	VMULPS Z1, Z0, Z0        // * scaleX
+	VMULPS Z4, Z0, Z0        // * scaleA
+	VMOVUPS Z0, (CX)         // store outA
 
 	// Process B: outB = (dotsB - 128*rowSumB) * scaleX * scaleB
-	VMOVDQU (R8), Y0         // 8 int32 dotsB
-	VMOVDQU (R10), Y3        // 8 int32 rowSumB
-	VCVTDQ2PS Y0, Y0
-	VCVTDQ2PS Y3, Y3
-	VMULPS Y2, Y3, Y3        // 128 * rowSumB
-	VSUBPS Y3, Y0, Y0        // dotsB - 128*rowSumB
-	VMOVUPS (R11), Y5        // scaleB
-	VMULPS Y1, Y0, Y0        // * scaleX
-	VMULPS Y5, Y0, Y0        // * scaleB
-	VMOVUPS Y0, (R12)        // store outB
+	VMOVDQU64 (R8), Z0         // 16 int32 dotsB
+	VMOVDQU64 (R10), Z3        // 16 int32 rowSumB
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z3, Z3
+	VMULPS Z2, Z3, Z3        // 128 * rowSumB
+	VSUBPS Z3, Z0, Z0        // dotsB - 128*rowSumB
+	VMOVUPS (R11), Z5        // scaleB
+	VMULPS Z1, Z0, Z0        // * scaleX
+	VMULPS Z5, Z0, Z0        // * scaleB
+	VMOVUPS Z0, (R12)        // store outB
 
-	ADDQ $32, SI
-	ADDQ $32, DI
-	ADDQ $32, DX
-	ADDQ $32, CX
-	ADDQ $32, R8
-	ADDQ $32, R10
-	ADDQ $32, R11
-	ADDQ $32, R12
-	SUBQ $8, R9
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, DX
+	ADDQ $64, CX
+	ADDQ $64, R8
+	ADDQ $64, R10
+	ADDQ $64, R11
+	ADDQ $64, R12
+	SUBQ $16, R9
 	JMP finPairLoop
 
 finPairDone:
