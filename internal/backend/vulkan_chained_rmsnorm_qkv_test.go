@@ -110,7 +110,7 @@ func TestVulkanChainedRMSNormFusedQKVMRoPEF32(t *testing.T) {
 		t.Fatalf("VulkanChainedRMSNormFusedQKVMRoPEF32 failed: %v", err)
 	}
 
-	tol := float32(0.01)
+	tol := float32(0.02) // GPU uses f32 dot, CPU VNNI uses quantized input
 	for i := range outA {
 		if diff := float32(math.Abs(float64(outA[i] - outARef[i]))); diff > tol {
 			t.Errorf("outA[%d]: got %f want %f diff %f", i, outA[i], outARef[i], diff)
@@ -219,7 +219,7 @@ func TestVulkanChainedRMSNormFusedQKVMRoPEQ8(t *testing.T) {
 		t.Fatalf("VulkanChainedRMSNormFusedQKVMRoPEQ8 failed: %v", err)
 	}
 
-	tol := float32(0.01)
+	tol := float32(0.02) // GPU uses f32 dot, CPU VNNI uses quantized input
 	for i := range outA {
 		if diff := float32(math.Abs(float64(outA[i] - outARef[i]))); diff > tol {
 			t.Errorf("outA[%d]: got %f want %f diff %f", i, outA[i], outARef[i], diff)
