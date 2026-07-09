@@ -996,13 +996,13 @@ func LayerNorm(out, x, weight, bias []float32, eps float32) {
 	}
 }
 func SiLU(x float32) float32 {
-	return x / (1 + fastExpF32(-x))
+	return x / (1 + FastExpF32(-x))
 }
 
-// fastExpF32 computes exp(x) using range reduction to 2^f polynomial.
+// FastExpF32 computes exp(x) using range reduction to 2^f polynomial.
 // Uses the same 5th-degree polynomial as the AVX2 expF32VecAVX kernel,
 // ensuring bit-exact consistency between scalar and vectorized paths.
-func fastExpF32(x float32) float32 {
+func FastExpF32(x float32) float32 {
 	if x > 88.0 {
 		return float32(math.MaxFloat32)
 	}
@@ -1033,14 +1033,14 @@ func fastExpF32(x float32) float32 {
 	return *(*float32)(unsafe.Pointer(&bits))
 }
 
-// fastSiLU approximates x*sigmoid(x) using fastExpF32.
+// fastSiLU approximates x*sigmoid(x) using FastExpF32.
 // For x >= 0: silu = x / (1 + exp(-x))
 // For x < 0: silu = x * exp(x) / (1 + exp(x))
 func fastSiLU(x float32) float32 {
 	if x >= 0 {
-		return x / (1 + fastExpF32(-x))
+		return x / (1 + FastExpF32(-x))
 	}
-	ex := fastExpF32(x)
+	ex := FastExpF32(x)
 	return x * ex / (1 + ex)
 }
 

@@ -1878,14 +1878,14 @@ func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, 
 		// reuse generationScratch across samples see a stable backing array.
 		weights := makeSampleWeights(len(candidates), scratch)
 		for i, c := range candidates {
-			weights[i] = float32(math.Exp(float64(c.score*invTemp - maxScore)))
+			weights[i] = tensor.FastExpF32(c.score*invTemp - maxScore)
 		}
 		return sampleCandidateScoresSmall(candidates, invTemp, maxScore, rng)
 	}
 	weights := makeSampleWeights(len(candidates), scratch)
 	var sum float64
 	for i, c := range candidates {
-		w := math.Exp(float64(c.score*invTemp - maxScore))
+		w := float64(tensor.FastExpF32(c.score*invTemp - maxScore))
 		if weights != nil {
 			weights[i] = float32(w)
 		}
@@ -1899,7 +1899,7 @@ func sampleTokenScratch(logits []float32, opts GenerateOptions, rng float64RNG, 
 	} else {
 		var acc float64
 		for _, c := range candidates {
-			acc += math.Exp(float64(c.score*invTemp - maxScore))
+			acc += float64(tensor.FastExpF32(c.score*invTemp - maxScore))
 			if pick <= acc {
 				return c.id
 			}
@@ -1942,7 +1942,7 @@ func sampleCandidateScoresScratch(candidates []tokenScore, temp float64, rng flo
 	weights := makeSampleWeights(len(candidates), scratch)
 	var sum float64
 	for i, c := range candidates {
-		w := math.Exp(float64(c.score*invTemp - maxScore))
+		w := float64(tensor.FastExpF32(c.score*invTemp - maxScore))
 		if weights != nil {
 			weights[i] = float32(w)
 		}
@@ -1956,7 +1956,7 @@ func sampleCandidateScoresScratch(candidates []tokenScore, temp float64, rng flo
 	} else {
 		var acc float64
 		for _, c := range candidates {
-			acc += math.Exp(float64(c.score*invTemp - maxScore))
+			acc += float64(tensor.FastExpF32(c.score*invTemp - maxScore))
 			if pick <= acc {
 				return c.id
 			}
@@ -1975,21 +1975,21 @@ func sampleCandidateScoresSmall(candidates []tokenScore, invTemp, maxScore float
 		s0 := candidates[0].score * invTemp
 		s1 := candidates[1].score * invTemp
 		if s0 >= s1 {
-			w1 := math.Exp(float64(s1 - s0))
+			w1 := float64(tensor.FastExpF32(s1 - s0))
 			if rng.Float64()*(1+w1) <= 1 {
 				return candidates[0].id
 			}
 			return candidates[1].id
 		}
-		w0 := math.Exp(float64(s0 - s1))
+		w0 := float64(tensor.FastExpF32(s0 - s1))
 		if rng.Float64()*(w0+1) <= w0 {
 			return candidates[0].id
 		}
 		return candidates[1].id
 	case 3:
-		w0 := math.Exp(float64(candidates[0].score*invTemp - maxScore))
-		w1 := math.Exp(float64(candidates[1].score*invTemp - maxScore))
-		w2 := math.Exp(float64(candidates[2].score*invTemp - maxScore))
+		w0 := float64(tensor.FastExpF32(candidates[0].score*invTemp - maxScore))
+		w1 := float64(tensor.FastExpF32(candidates[1].score*invTemp - maxScore))
+		w2 := float64(tensor.FastExpF32(candidates[2].score*invTemp - maxScore))
 		pick := rng.Float64() * ((w0 + w1) + w2)
 		acc := w0
 		if pick <= acc {
@@ -2001,10 +2001,10 @@ func sampleCandidateScoresSmall(candidates []tokenScore, invTemp, maxScore float
 		}
 		return candidates[2].id
 	case 4:
-		w0 := math.Exp(float64(candidates[0].score*invTemp - maxScore))
-		w1 := math.Exp(float64(candidates[1].score*invTemp - maxScore))
-		w2 := math.Exp(float64(candidates[2].score*invTemp - maxScore))
-		w3 := math.Exp(float64(candidates[3].score*invTemp - maxScore))
+		w0 := float64(tensor.FastExpF32(candidates[0].score*invTemp - maxScore))
+		w1 := float64(tensor.FastExpF32(candidates[1].score*invTemp - maxScore))
+		w2 := float64(tensor.FastExpF32(candidates[2].score*invTemp - maxScore))
+		w3 := float64(tensor.FastExpF32(candidates[3].score*invTemp - maxScore))
 		pick := rng.Float64() * ((w0 + w1) + (w2 + w3))
 		acc := w0
 		if pick <= acc {
@@ -2027,7 +2027,7 @@ func sampleCandidateScoresTemp1Scratch(candidates []tokenScore, maxScore float32
 	weights := makeSampleWeights(len(candidates), scratch)
 	var sum float32
 	for i, c := range candidates {
-		w := float32(math.Exp(float64(c.score - maxScore)))
+		w := tensor.FastExpF32(c.score - maxScore)
 		if weights != nil {
 			weights[i] = w
 		}
@@ -2041,7 +2041,7 @@ func sampleCandidateScoresTemp1Scratch(candidates []tokenScore, maxScore float32
 	} else {
 		var acc float32
 		for _, c := range candidates {
-			acc += float32(math.Exp(float64(c.score - maxScore)))
+			acc += tensor.FastExpF32(c.score - maxScore)
 			if pick <= acc {
 				return c.id
 			}
@@ -2062,8 +2062,8 @@ func sampleCandidateScoresTemp1SmallScratch(candidates []tokenScore, maxScore fl
 		weights[0] = 1
 		return candidates[0].id
 	case 2:
-		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
-		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
+		w0 := tensor.FastExpF32(candidates[0].score - maxScore)
+		w1 := tensor.FastExpF32(candidates[1].score - maxScore)
 		weights[0] = w0
 		weights[1] = w1
 		pick := float32(rng.Float64()) * (w0 + w1)
@@ -2072,9 +2072,9 @@ func sampleCandidateScoresTemp1SmallScratch(candidates []tokenScore, maxScore fl
 		}
 		return candidates[1].id
 	case 3:
-		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
-		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
-		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
+		w0 := tensor.FastExpF32(candidates[0].score - maxScore)
+		w1 := tensor.FastExpF32(candidates[1].score - maxScore)
+		w2 := tensor.FastExpF32(candidates[2].score - maxScore)
 		weights[0] = w0
 		weights[1] = w1
 		weights[2] = w2
@@ -2087,10 +2087,10 @@ func sampleCandidateScoresTemp1SmallScratch(candidates []tokenScore, maxScore fl
 		}
 		return candidates[2].id
 	case 4:
-		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
-		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
-		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
-		w3 := float32(math.Exp(float64(candidates[3].score - maxScore)))
+		w0 := tensor.FastExpF32(candidates[0].score - maxScore)
+		w1 := tensor.FastExpF32(candidates[1].score - maxScore)
+		w2 := tensor.FastExpF32(candidates[2].score - maxScore)
+		w3 := tensor.FastExpF32(candidates[3].score - maxScore)
 		weights[0] = w0
 		weights[1] = w1
 		weights[2] = w2
@@ -2112,7 +2112,7 @@ func sampleCandidateScoresTemp1SmallScratch(candidates []tokenScore, maxScore fl
 	}
 	var sum float32
 	for i, c := range candidates {
-		w := float32(math.Exp(float64(c.score - maxScore)))
+		w := tensor.FastExpF32(c.score - maxScore)
 		weights[i] = w
 		sum += w
 	}
@@ -2137,21 +2137,21 @@ func sampleCandidateScoresTemp1Small(candidates []tokenScore, maxScore float32, 
 		s0 := candidates[0].score
 		s1 := candidates[1].score
 		if s0 >= s1 {
-			w1 := math.Exp(float64(s1 - s0))
+			w1 := float64(tensor.FastExpF32(s1 - s0))
 			if rng.Float64()*(1+w1) <= 1 {
 				return candidates[0].id
 			}
 			return candidates[1].id
 		}
-		w0 := math.Exp(float64(s0 - s1))
+		w0 := float64(tensor.FastExpF32(s0 - s1))
 		if rng.Float64()*(w0+1) <= w0 {
 			return candidates[0].id
 		}
 		return candidates[1].id
 	case 3:
-		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
-		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
-		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
+		w0 := tensor.FastExpF32(candidates[0].score - maxScore)
+		w1 := tensor.FastExpF32(candidates[1].score - maxScore)
+		w2 := tensor.FastExpF32(candidates[2].score - maxScore)
 		pick := float32(rng.Float64()) * ((w0 + w1) + w2)
 		if pick <= w0 {
 			return candidates[0].id
@@ -2161,10 +2161,10 @@ func sampleCandidateScoresTemp1Small(candidates []tokenScore, maxScore float32, 
 		}
 		return candidates[2].id
 	case 4:
-		w0 := float32(math.Exp(float64(candidates[0].score - maxScore)))
-		w1 := float32(math.Exp(float64(candidates[1].score - maxScore)))
-		w2 := float32(math.Exp(float64(candidates[2].score - maxScore)))
-		w3 := float32(math.Exp(float64(candidates[3].score - maxScore)))
+		w0 := tensor.FastExpF32(candidates[0].score - maxScore)
+		w1 := tensor.FastExpF32(candidates[1].score - maxScore)
+		w2 := tensor.FastExpF32(candidates[2].score - maxScore)
+		w3 := tensor.FastExpF32(candidates[3].score - maxScore)
 		pick := float32(rng.Float64()) * ((w0 + w1) + (w2 + w3))
 		acc := w0
 		if pick <= acc {
@@ -2183,7 +2183,7 @@ func sampleCandidateScoresTemp1Small(candidates []tokenScore, maxScore float32, 
 	var weights [8]float32
 	var sum float32
 	for i, c := range candidates {
-		w := float32(math.Exp(float64(c.score - maxScore)))
+		w := tensor.FastExpF32(c.score - maxScore)
 		weights[i] = w
 		sum += w
 	}
@@ -2221,19 +2221,19 @@ func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scr
 		var sum float64
 		i := 0
 		for ; i+3 < len(logits); i += 4 {
-			w0 := math.Exp(float64(logits[i]*invTemp - maxScore))
-			w1 := math.Exp(float64(logits[i+1]*invTemp - maxScore))
-			w2 := math.Exp(float64(logits[i+2]*invTemp - maxScore))
-			w3 := math.Exp(float64(logits[i+3]*invTemp - maxScore))
+			w0 := float64(tensor.FastExpF32(logits[i]*invTemp - maxScore))
+			w1 := float64(tensor.FastExpF32(logits[i+1]*invTemp - maxScore))
+			w2 := float64(tensor.FastExpF32(logits[i+2]*invTemp - maxScore))
+			w3 := float64(tensor.FastExpF32(logits[i+3]*invTemp - maxScore))
 			sum += (w0 + w1) + (w2 + w3)
 		}
 		for ; i < len(logits); i++ {
-			sum += math.Exp(float64(logits[i]*invTemp - maxScore))
+			sum += float64(tensor.FastExpF32(logits[i]*invTemp - maxScore))
 		}
 		pick := rng.Float64() * sum
 		var acc float64
 		for i, score := range logits {
-			acc += math.Exp(float64(score*invTemp - maxScore))
+			acc += float64(tensor.FastExpF32(score*invTemp - maxScore))
 			if pick <= acc {
 				return i
 			}
@@ -2243,10 +2243,10 @@ func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scr
 	var sum float32
 	i := 0
 	for ; i+3 < len(logits); i += 4 {
-		w0 := float32(math.Exp(float64(logits[i]*invTemp - maxScore)))
-		w1 := float32(math.Exp(float64(logits[i+1]*invTemp - maxScore)))
-		w2 := float32(math.Exp(float64(logits[i+2]*invTemp - maxScore)))
-		w3 := float32(math.Exp(float64(logits[i+3]*invTemp - maxScore)))
+		w0 := tensor.FastExpF32(logits[i]*invTemp - maxScore)
+		w1 := tensor.FastExpF32(logits[i+1]*invTemp - maxScore)
+		w2 := tensor.FastExpF32(logits[i+2]*invTemp - maxScore)
+		w3 := tensor.FastExpF32(logits[i+3]*invTemp - maxScore)
 		sum += w0
 		weights[i] = sum
 		sum += w1
@@ -2257,7 +2257,7 @@ func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scr
 		weights[i+3] = sum
 	}
 	for ; i < len(logits); i++ {
-		w := float32(math.Exp(float64(logits[i]*invTemp - maxScore)))
+		w := tensor.FastExpF32(logits[i]*invTemp - maxScore)
 		sum += w
 		weights[i] = sum
 	}
@@ -2283,19 +2283,19 @@ func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *gen
 		var sum float32
 		i := 0
 		for ; i+3 < len(logits); i += 4 {
-			w0 := float32(math.Exp(float64(logits[i] - maxScore)))
-			w1 := float32(math.Exp(float64(logits[i+1] - maxScore)))
-			w2 := float32(math.Exp(float64(logits[i+2] - maxScore)))
-			w3 := float32(math.Exp(float64(logits[i+3] - maxScore)))
+			w0 := tensor.FastExpF32(logits[i] - maxScore)
+			w1 := tensor.FastExpF32(logits[i+1] - maxScore)
+			w2 := tensor.FastExpF32(logits[i+2] - maxScore)
+			w3 := tensor.FastExpF32(logits[i+3] - maxScore)
 			sum += (w0 + w1) + (w2 + w3)
 		}
 		for ; i < len(logits); i++ {
-			sum += float32(math.Exp(float64(logits[i] - maxScore)))
+			sum += tensor.FastExpF32(logits[i] - maxScore)
 		}
 		pick := float32(rng.Float64()) * sum
 		var acc float32
 		for i, score := range logits {
-			acc += float32(math.Exp(float64(score - maxScore)))
+			acc += tensor.FastExpF32(score - maxScore)
 			if pick <= acc {
 				return i
 			}
@@ -2305,10 +2305,10 @@ func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *gen
 	var sum float32
 	i := 0
 	for ; i+3 < len(logits); i += 4 {
-		w0 := float32(math.Exp(float64(logits[i] - maxScore)))
-		w1 := float32(math.Exp(float64(logits[i+1] - maxScore)))
-		w2 := float32(math.Exp(float64(logits[i+2] - maxScore)))
-		w3 := float32(math.Exp(float64(logits[i+3] - maxScore)))
+		w0 := tensor.FastExpF32(logits[i] - maxScore)
+		w1 := tensor.FastExpF32(logits[i+1] - maxScore)
+		w2 := tensor.FastExpF32(logits[i+2] - maxScore)
+		w3 := tensor.FastExpF32(logits[i+3] - maxScore)
 		sum += w0
 		weights[i] = sum
 		sum += w1
@@ -2319,7 +2319,7 @@ func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *gen
 		weights[i+3] = sum
 	}
 	for ; i < len(logits); i++ {
-		w := float32(math.Exp(float64(logits[i] - maxScore)))
+		w := tensor.FastExpF32(logits[i] - maxScore)
 		sum += w
 		weights[i] = sum
 	}
@@ -2334,13 +2334,13 @@ func sampleTwoLogits(logits []float32, invTemp float32, rng float64RNG) int {
 	s0 := logits[0]
 	s1 := logits[1]
 	if s0 >= s1 {
-		w1 := math.Exp(float64((s1 - s0) * invTemp))
+		w1 := float64(tensor.FastExpF32((s1 - s0) * invTemp))
 		if rng.Float64()*(1+w1) <= 1 {
 			return 0
 		}
 		return 1
 	}
-	w0 := math.Exp(float64((s0 - s1) * invTemp))
+	w0 := float64(tensor.FastExpF32((s0 - s1) * invTemp))
 	if rng.Float64()*(w0+1) <= w0 {
 		return 0
 	}
@@ -4505,12 +4505,12 @@ func cacheAttentionLen6(dst, q []float32, cache *kvCache, head, dim int, scale f
 	s4 *= scale
 	s5 *= scale
 	m := max32Local(max32Local(max32Local(s0, s1), max32Local(s2, s3)), max32Local(s4, s5))
-	e0 := float32(math.Exp(float64(s0 - m)))
-	e1 := float32(math.Exp(float64(s1 - m)))
-	e2 := float32(math.Exp(float64(s2 - m)))
-	e3 := float32(math.Exp(float64(s3 - m)))
-	e4 := float32(math.Exp(float64(s4 - m)))
-	e5 := float32(math.Exp(float64(s5 - m)))
+	e0 := tensor.FastExpF32(s0 - m)
+	e1 := tensor.FastExpF32(s1 - m)
+	e2 := tensor.FastExpF32(s2 - m)
+	e3 := tensor.FastExpF32(s3 - m)
+	e4 := tensor.FastExpF32(s4 - m)
+	e5 := tensor.FastExpF32(s5 - m)
 	inv := 1 / ((e0 + e1) + (e2 + e3) + (e4 + e5))
 	w0, w1, w2, w3, w4, w5 := e0*inv, e1*inv, e2*inv, e3*inv, e4*inv, e5*inv
 	weights := [...]float32{w0, w1, w2, w3, w4, w5}
@@ -4567,11 +4567,11 @@ func cacheAttentionLen5(dst, q []float32, cache *kvCache, head, dim int, scale f
 	s3 *= scale
 	s4 *= scale
 	m := max32Local(max32Local(s0, s1), max32Local(max32Local(s2, s3), s4))
-	e0 := float32(math.Exp(float64(s0 - m)))
-	e1 := float32(math.Exp(float64(s1 - m)))
-	e2 := float32(math.Exp(float64(s2 - m)))
-	e3 := float32(math.Exp(float64(s3 - m)))
-	e4 := float32(math.Exp(float64(s4 - m)))
+	e0 := tensor.FastExpF32(s0 - m)
+	e1 := tensor.FastExpF32(s1 - m)
+	e2 := tensor.FastExpF32(s2 - m)
+	e3 := tensor.FastExpF32(s3 - m)
+	e4 := tensor.FastExpF32(s4 - m)
 	inv := 1 / ((e0 + e1) + (e2 + e3) + e4)
 	w0, w1, w2, w3, w4 := e0*inv, e1*inv, e2*inv, e3*inv, e4*inv
 	weights := [...]float32{w0, w1, w2, w3, w4}
@@ -4623,9 +4623,9 @@ func cacheAttentionLen3(dst, q []float32, cache *kvCache, head, dim int, scale f
 	s1 *= scale
 	s2 *= scale
 	m := max32Local(max32Local(s0, s1), s2)
-	e0 := float32(math.Exp(float64(s0 - m)))
-	e1 := float32(math.Exp(float64(s1 - m)))
-	e2 := float32(math.Exp(float64(s2 - m)))
+	e0 := tensor.FastExpF32(s0 - m)
+	e1 := tensor.FastExpF32(s1 - m)
+	e2 := tensor.FastExpF32(s2 - m)
 	inv := 1 / (e0 + e1 + e2)
 	x0 := cache.v[headBase : headBase+dim]
 	x1 := cache.v[base1 : base1+dim]
@@ -4666,10 +4666,10 @@ func cacheAttentionLen4(dst, q []float32, cache *kvCache, head, dim int, scale f
 	s2 *= scale
 	s3 *= scale
 	m := max32Local(max32Local(s0, s1), max32Local(s2, s3))
-	e0 := float32(math.Exp(float64(s0 - m)))
-	e1 := float32(math.Exp(float64(s1 - m)))
-	e2 := float32(math.Exp(float64(s2 - m)))
-	e3 := float32(math.Exp(float64(s3 - m)))
+	e0 := tensor.FastExpF32(s0 - m)
+	e1 := tensor.FastExpF32(s1 - m)
+	e2 := tensor.FastExpF32(s2 - m)
+	e3 := tensor.FastExpF32(s3 - m)
 	inv := 1 / ((e0 + e1) + (e2 + e3))
 	x0 := cache.v[headBase : headBase+dim]
 	x1 := cache.v[base1 : base1+dim]
@@ -4708,12 +4708,12 @@ func cacheAttentionLen2(dst, q []float32, cache *kvCache, head, dim int, scale f
 	s1 *= scale
 	var w0, w1 float32
 	if s0 >= s1 {
-		e := float32(math.Exp(float64(s1 - s0)))
+		e := tensor.FastExpF32(s1 - s0)
 		inv := 1 / (1 + e)
 		w0 = inv
 		w1 = e * inv
 	} else {
-		e := float32(math.Exp(float64(s0 - s1)))
+		e := tensor.FastExpF32(s0 - s1)
 		inv := 1 / (1 + e)
 		w0 = e * inv
 		w1 = inv
