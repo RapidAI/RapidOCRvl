@@ -389,11 +389,12 @@ func (rt *Runtime) interpolateVisionPos(h, w int) [][]float32 {
 			b := src[(y0*base+x1)*d : (y0*base+x1+1)*d]
 			c := src[(y1*base+x0)*d : (y1*base+x0+1)*d]
 			e := src[(y1*base+x1)*d : (y1*base+x1+1)*d]
-			for i := 0; i < d; i++ {
-				top := a[i]*(1-wx) + b[i]*wx
-				bot := c[i]*(1-wx) + e[i]*wx
-				row[i] = top*(1-wy) + bot*wy
-			}
+			// Bilinear interpolation = weighted sum of 4 vectors
+			wa := (1-wx)*(1-wy)
+			wb := wx*(1-wy)
+			wc := (1-wx)*wy
+			we := wx*wy
+			tensor.WeightedSum4(row[:d], a, b, c, e, wa, wb, wc, we)
 			out[y*w+x] = row
 		}
 	}
