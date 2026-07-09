@@ -301,51 +301,57 @@ pairVnniTailDone:
 	RET
 
 // dotQ8TripletVNNICore(a *int8, b *int8, c *int8, xq *uint8, n int) (int32, int32, int32)
+// ZMM (512-bit) version: each VPDPBUSD processes 64 int8 values.
+// 6 accumulators (Z0-Z1 for a, Z2-Z3 for b, Z4-Z5 for c), 128 elements per loop.
 TEXT ·dotQ8TripletVNNICore(SB), NOSPLIT, $0-56
 	MOVQ a+0(FP), SI
 	MOVQ b+8(FP), BX
 	MOVQ c+16(FP), R12
 	MOVQ xq+24(FP), DI
 	MOVQ n+32(FP), CX
-	VPXORD Y0, Y0, Y0
-	VPXORD Y1, Y1, Y1
-	VPXORD Y2, Y2, Y2
-	VPXORD Y3, Y3, Y3
-	VPXORD Y4, Y4, Y4
-	VPXORD Y5, Y5, Y5
-	CMPQ CX, $32
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+	VPXORD Z4, Z4, Z4
+	VPXORD Z5, Z5, Z5
+	CMPQ CX, $64
 	JB tripVnniTail
 tripVnniLoop:
+	CMPQ CX, $128
+	JB tripVnniLoop64
+	// Process 128 elements: 2 x 64 = 128
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VPDPBUSD (BX), Z8, Z2
+	VPDPBUSD (R12), Z8, Z4
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VPDPBUSD 64(BX), Z9, Z3
+	VPDPBUSD 64(R12), Z9, Z5
+	ADDQ $128, SI
+	ADDQ $128, BX
+	ADDQ $128, R12
+	ADDQ $128, DI
+	SUBQ $128, CX
+	JMP tripVnniLoop
+tripVnniLoop64:
 	CMPQ CX, $64
-	JB tripVnniLoop32
-	VMOVDQU (DI), Y8
-	VPDPBUSD (SI), Y8, Y0
-	VPDPBUSD (BX), Y8, Y2
-	VPDPBUSD (R12), Y8, Y4
-	VMOVDQU 32(DI), Y9
-	VPDPBUSD 32(SI), Y9, Y1
-	VPDPBUSD 32(BX), Y9, Y3
-	VPDPBUSD 32(R12), Y9, Y5
+	JB tripVnniReduce
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VPDPBUSD (BX), Z8, Z2
+	VPDPBUSD (R12), Z8, Z4
 	ADDQ $64, SI
 	ADDQ $64, BX
 	ADDQ $64, R12
 	ADDQ $64, DI
 	SUBQ $64, CX
 	JMP tripVnniLoop
-tripVnniLoop32:
-	CMPQ CX, $32
-	JB tripVnniReduce
-	VMOVDQU (DI), Y8
-	VPDPBUSD (SI), Y8, Y0
-	VPDPBUSD (BX), Y8, Y2
-	VPDPBUSD (R12), Y8, Y4
-	ADDQ $32, SI
-	ADDQ $32, BX
-	ADDQ $32, R12
-	ADDQ $32, DI
-	SUBQ $32, CX
-	JMP tripVnniLoop32
 tripVnniReduce:
+	// Reduce A: Z0+Z1
+	VPADDD Z1, Z0, Z0
+	VEXTRACTI64X4 $1, Z0, Y1
 	VPADDD Y1, Y0, Y0
 	VEXTRACTI128 $1, Y0, X2
 	VPADDD X2, X0, X0
@@ -354,6 +360,9 @@ tripVnniReduce:
 	VPSHUFD $0xB1, X0, X1
 	VPADDD X1, X0, X0
 	VMOVD X0, AX
+	// Reduce B: Z2+Z3
+	VPADDD Z3, Z2, Z2
+	VEXTRACTI64X4 $1, Z2, Y3
 	VPADDD Y3, Y2, Y2
 	VEXTRACTI128 $1, Y2, X10
 	VPADDD X10, X2, X2
@@ -362,6 +371,9 @@ tripVnniReduce:
 	VPSHUFD $0xB1, X2, X3
 	VPADDD X3, X2, X2
 	VMOVD X2, R8
+	// Reduce C: Z4+Z5
+	VPADDD Z5, Z4, Z4
+	VEXTRACTI64X4 $1, Z4, Y5
 	VPADDD Y5, Y4, Y4
 	VEXTRACTI128 $1, Y4, X12
 	VPADDD X12, X4, X4
