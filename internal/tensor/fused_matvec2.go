@@ -73,6 +73,16 @@ func addSumSquaresOutScalar(out, dst, add []float32) float32 {
 // FusedMatVec2 computes outB = x . wB^T and outC = x . wC^T in a single
 // pass over x, reducing memory bandwidth for the K and V projections.
 func FusedMatVec2(outB, outC, x, wB, wC []float32, rowsB, rowsC, cols int) {
+	if rowsB == rowsC {
+		if shouldParallel(rowsB*cols*2, rowsB) {
+			parallelFor(rowsB, func(start, end int) {
+				fusedMatVec2EqualRowsSerial(outB, outC, x, wB, wC, cols, start, end)
+			})
+			return
+		}
+		fusedMatVec2EqualRowsSerial(outB, outC, x, wB, wC, cols, 0, rowsB)
+		return
+	}
 	totalRows := rowsB + rowsC
 	if shouldParallel(totalRows*cols, totalRows) {
 		parallelFor(totalRows, func(start, end int) {
@@ -81,6 +91,13 @@ func FusedMatVec2(outB, outC, x, wB, wC []float32, rowsB, rowsC, cols int) {
 		return
 	}
 	fusedMatVec2Serial(outB, outC, x, wB, wC, rowsB, cols, 0, totalRows)
+}
+
+func fusedMatVec2EqualRowsSerial(outB, outC, x, wB, wC []float32, cols, start, end int) {
+	for r := start; r < end; r++ {
+		base := r * cols
+		outB[r], outC[r] = dotF32Pair(wB[base:base+cols], wC[base:base+cols], x)
+	}
 }
 
 func fusedMatVec2Serial(outB, outC, x, wB, wC []float32, rowsB, cols, start, end int) {
