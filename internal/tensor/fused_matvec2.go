@@ -539,6 +539,9 @@ func MatVecQ8AddRMSNormOutOnly(normOut, residual, x []float32, down *Q8Matrix, n
 }
 
 func matVecQ8AddSumSquaresSerial(out, residual, x []float32, q *Q8Matrix, start, end int) float32 {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		return matVecQ8AddSumSquaresVNNISerial(out, residual, x, q, start, end)
+	}
 	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	i := start
 	for ; i+7 < end; i += 8 {
@@ -570,6 +573,59 @@ func matVecQ8AddSumSquaresSerial(out, residual, x []float32, q *Q8Matrix, start,
 	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
 	for ; i < end; i++ {
 		v := residual[i] + dotQ8(q.Data[i*q.Cols:(i+1)*q.Cols], x)*q.Scale[i]
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ8AddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Matrix, start, end int) float32 {
+	xq := getVNNIScratch(q.Cols)
+	defer putVNNIScratch(xq)
+	scaleX := quantizeXForVNNI(x, xq)
+	data := q.Data
+	scale := q.Scale
+	rowSum := q.RowSum
+	cols := q.Cols
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * cols
+		b1 := (i + 1) * cols
+		b2 := (i + 2) * cols
+		b3 := (i + 3) * cols
+		b4 := (i + 4) * cols
+		b5 := (i + 5) * cols
+		b6 := (i + 6) * cols
+		b7 := (i + 7) * cols
+		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
 		out[i] = v
 		ss += v * v
 	}
@@ -889,6 +945,9 @@ func MatVecQ4AddRMSNormOutOnly(normOut, residual, x []float32, down *Q4Matrix, n
 }
 
 func matVecQ4AddSumSquaresSerial(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		return matVecQ4AddSumSquaresVNNISerial(out, residual, x, q, start, end)
+	}
 	if q.Unpacked != nil {
 		return matVecQ4AddSumSquaresUnpacked(out, residual, x, q, start, end)
 	}
@@ -980,6 +1039,59 @@ func matVecQ4AddSumSquaresUnpacked(out, residual, x []float32, q *Q4Matrix, star
 	for ; i < end; i++ {
 		base := i * q.Cols
 		v := residual[i] + dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ4AddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
+	xq := getVNNIScratch(q.Cols)
+	defer putVNNIScratch(xq)
+	scaleX := quantizeXForVNNI(x, xq)
+	data := q.Unpacked
+	scale := q.Scale
+	rowSum := q.RowSum
+	cols := q.Cols
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * cols
+		b1 := (i + 1) * cols
+		b2 := (i + 2) * cols
+		b3 := (i + 3) * cols
+		b4 := (i + 4) * cols
+		b5 := (i + 5) * cols
+		b6 := (i + 6) * cols
+		b7 := (i + 7) * cols
+		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
 		out[i] = v
 		ss += v * v
 	}
@@ -1299,6 +1411,9 @@ func MatVecQ6AddRMSNormOutOnly(normOut, residual, x []float32, down *Q6Matrix, n
 }
 
 func matVecQ6AddSumSquaresSerial(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		return matVecQ6AddSumSquaresVNNISerial(out, residual, x, q, start, end)
+	}
 	if q.Unpacked != nil {
 		return matVecQ6AddSumSquaresUnpacked(out, residual, x, q, start, end)
 	}
@@ -1390,6 +1505,59 @@ func matVecQ6AddSumSquaresUnpacked(out, residual, x []float32, q *Q6Matrix, star
 	for ; i < end; i++ {
 		base := i * q.Cols
 		v := residual[i] + dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ6AddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
+	xq := getVNNIScratch(q.Cols)
+	defer putVNNIScratch(xq)
+	scaleX := quantizeXForVNNI(x, xq)
+	data := q.Unpacked
+	scale := q.Scale
+	rowSum := q.RowSum
+	cols := q.Cols
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * cols
+		b1 := (i + 1) * cols
+		b2 := (i + 2) * cols
+		b3 := (i + 3) * cols
+		b4 := (i + 4) * cols
+		b5 := (i + 5) * cols
+		b6 := (i + 6) * cols
+		b7 := (i + 7) * cols
+		v0 := residual[i] + float32(dotQ8VNNICoreZMM(&data[b0], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
+		v1 := residual[i+1] + float32(dotQ8VNNICoreZMM(&data[b1], &xq[0], cols)-128*rowSum[i+1])*scaleX*scale[i+1]
+		v2 := residual[i+2] + float32(dotQ8VNNICoreZMM(&data[b2], &xq[0], cols)-128*rowSum[i+2])*scaleX*scale[i+2]
+		v3 := residual[i+3] + float32(dotQ8VNNICoreZMM(&data[b3], &xq[0], cols)-128*rowSum[i+3])*scaleX*scale[i+3]
+		v4 := residual[i+4] + float32(dotQ8VNNICoreZMM(&data[b4], &xq[0], cols)-128*rowSum[i+4])*scaleX*scale[i+4]
+		v5 := residual[i+5] + float32(dotQ8VNNICoreZMM(&data[b5], &xq[0], cols)-128*rowSum[i+5])*scaleX*scale[i+5]
+		v6 := residual[i+6] + float32(dotQ8VNNICoreZMM(&data[b6], &xq[0], cols)-128*rowSum[i+6])*scaleX*scale[i+6]
+		v7 := residual[i+7] + float32(dotQ8VNNICoreZMM(&data[b7], &xq[0], cols)-128*rowSum[i+7])*scaleX*scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		v := residual[i] + float32(dotQ8VNNICoreZMM(&data[i*cols], &xq[0], cols)-128*rowSum[i])*scaleX*scale[i]
 		out[i] = v
 		ss += v * v
 	}
