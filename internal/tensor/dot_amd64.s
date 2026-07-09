@@ -555,45 +555,34 @@ TEXT ·addScaledFMA(SB), NOSPLIT, $0-52
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x_base+24(FP), DI
-	VBROADCASTSS scale+48(FP), Y1
-
-	CMPQ CX, $8
+	VBROADCASTSS scale+48(FP), Z1
+	CMPQ CX, $16
 	JB addScaledFmaTail
-
 addScaledFmaLoop32:
 	CMPQ CX, $32
 	JB addScaledFmaLoop
-	VMOVUPS (SI), Y0
-	VFMADD231PS (DI), Y1, Y0
-	VMOVUPS Y0, (SI)
-	VMOVUPS 32(SI), Y0
-	VFMADD231PS 32(DI), Y1, Y0
-	VMOVUPS Y0, 32(SI)
-	VMOVUPS 64(SI), Y0
-	VFMADD231PS 64(DI), Y1, Y0
-	VMOVUPS Y0, 64(SI)
-	VMOVUPS 96(SI), Y0
-	VFMADD231PS 96(DI), Y1, Y0
-	VMOVUPS Y0, 96(SI)
+	VMOVUPS (SI), Z0
+	VFMADD231PS (DI), Z1, Z0
+	VMOVUPS Z0, (SI)
+	VMOVUPS 64(SI), Z0
+	VFMADD231PS 64(DI), Z1, Z0
+	VMOVUPS Z0, 64(SI)
 	ADDQ $128, SI
 	ADDQ $128, DI
 	SUBQ $32, CX
 	JMP addScaledFmaLoop32
-
 addScaledFmaLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB addScaledFmaDoneVec
-	VMOVUPS (SI), Y0
-	VFMADD231PS (DI), Y1, Y0
-	VMOVUPS Y0, (SI)
-	ADDQ $32, SI
-	ADDQ $32, DI
-	SUBQ $8, CX
+	VMOVUPS (SI), Z0
+	VFMADD231PS (DI), Z1, Z0
+	VMOVUPS Z0, (SI)
+	ADDQ $64, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
 	JMP addScaledFmaLoop
-
 addScaledFmaDoneVec:
 	VZEROUPPER
-
 addScaledFmaTail:
 	CMPQ CX, $0
 	JE addScaledFmaDone
@@ -605,10 +594,8 @@ addScaledFmaTail:
 	ADDQ $4, DI
 	DECQ CX
 	JMP addScaledFmaTail
-
 addScaledFmaDone:
 	RET
-
 TEXT ·scaleInPlaceAVX(SB), NOSPLIT, $0-28
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
@@ -6705,50 +6692,37 @@ TEXT ·scaleAddFMA(SB), NOSPLIT, $0-52
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
 	MOVQ x_base+24(FP), DI
-	VBROADCASTSS a+48(FP), Y1
-
-	CMPQ CX, $8
+	VBROADCASTSS a+48(FP), Z1
+	CMPQ CX, $16
 	JB scaleAddFmaTail
-
 scaleAddFmaLoop32:
 	CMPQ CX, $32
 	JB scaleAddFmaLoop
-	VMOVUPS (DI), Y0
-	VMOVUPS (SI), Y2
-	VFMADD231PS Y0, Y1, Y2
-	VMOVUPS Y2, (SI)
-	VMOVUPS 32(DI), Y0
-	VMOVUPS 32(SI), Y2
-	VFMADD231PS Y0, Y1, Y2
-	VMOVUPS Y2, 32(SI)
-	VMOVUPS 64(DI), Y0
-	VMOVUPS 64(SI), Y2
-	VFMADD231PS Y0, Y1, Y2
-	VMOVUPS Y2, 64(SI)
-	VMOVUPS 96(DI), Y0
-	VMOVUPS 96(SI), Y2
-	VFMADD231PS Y0, Y1, Y2
-	VMOVUPS Y2, 96(SI)
+	VMOVUPS (DI), Z0
+	VMOVUPS (SI), Z2
+	VFMADD231PS Z0, Z1, Z2
+	VMOVUPS Z2, (SI)
+	VMOVUPS 64(DI), Z0
+	VMOVUPS 64(SI), Z2
+	VFMADD231PS Z0, Z1, Z2
+	VMOVUPS Z2, 64(SI)
 	ADDQ $128, SI
 	ADDQ $128, DI
 	SUBQ $32, CX
 	JMP scaleAddFmaLoop32
-
 scaleAddFmaLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB scaleAddFmaDoneVec
-	VMOVUPS (DI), Y0
-	VMOVUPS (SI), Y2
-	VFMADD231PS Y0, Y1, Y2
-	VMOVUPS Y2, (SI)
-	ADDQ $32, SI
-	ADDQ $32, DI
-	SUBQ $8, CX
+	VMOVUPS (DI), Z0
+	VMOVUPS (SI), Z2
+	VFMADD231PS Z0, Z1, Z2
+	VMOVUPS Z2, (SI)
+	ADDQ $64, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
 	JMP scaleAddFmaLoop
-
 scaleAddFmaDoneVec:
 	VZEROUPPER
-
 scaleAddFmaTail:
 	CMPQ CX, $0
 	JE scaleAddFmaDone
@@ -6760,11 +6734,8 @@ scaleAddFmaTail:
 	ADDQ $4, DI
 	DECQ CX
 	JMP scaleAddFmaTail
-
 scaleAddFmaDone:
 	RET
-
-// weightedSumAdd2FMA: dst[i] += a0*x0[i] + a1*x1[i] using FMA
 TEXT ·weightedSumAdd2FMA(SB), NOSPLIT, $0-80
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX
