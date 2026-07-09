@@ -242,19 +242,18 @@ func matVecArgmaxUnpackedParallel(rows, cols int, data []int8, scale []float32, 
 }
 
 // FusedMatVec2Q8 computes outB = qb @ x and outC = qc @ x for Q8 matrices.
+// When both matrices share the same shape, the pair dot kernel reads x once for
+// both rows instead of twice.
 func FusedMatVec2Q8(outB, outC, x []float32, b, c *Q8Matrix) {
-	MatVecQ8(outB, x, b)
-	MatVecQ8(outC, x, c)
+	matVecQ8Pair(outB, outC, x, b, c)
 }
 
 // FusedMatVec2Q6 computes outB = qb @ x and outC = qc @ x for Q6 matrices.
 func FusedMatVec2Q6(outB, outC, x []float32, b, c *Q6Matrix) {
-	MatVecQ6(outB, x, b)
-	MatVecQ6(outC, x, c)
+	matVecQ6Pair(outB, outC, x, b, c)
 }
 
 // FusedMatVec2Q4 computes outB = qb @ x and outC = qc @ x for Q4 matrices.
 func FusedMatVec2Q4(outB, outC, x []float32, b, c *Q4Matrix) {
-	MatVecQ4(outB, x, b)
-	MatVecQ4(outC, x, c)
+	matVecQ4Pair(outB, outC, x, b, c)
 }
