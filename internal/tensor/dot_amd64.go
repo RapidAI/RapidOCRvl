@@ -109,13 +109,20 @@ func rowSumQ8Asm(a *int8, n int) int32
 // VNNI-accelerated Q8 dot product using VPDPBUSD.
 // dotQ8VNNI scalar fallback (VNNI not available in assembly).
 func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) float32 {
-	var dot int32
 	n := len(a)
 	if len(xq) < n {
 		n = len(xq)
 	}
-	for i := 0; i < n; i++ {
-		dot += int32(a[i]) * (int32(xq[i]) - 128)
+	if n == 0 {
+		return float32(-128*rowSumW) * scaleX * scaleW
+	}
+	var dot int32
+	if useVNNI {
+		dot = dotQ8VNNICore(&a[0], &xq[0], n)
+	} else {
+		for i := 0; i < n; i++ {
+			dot += int32(a[i]) * (int32(xq[i]) - 128)
+		}
 	}
 	return float32(dot-128*rowSumW) * scaleX * scaleW
 }
@@ -148,6 +155,12 @@ func dotQ8TripletVNNI(a, b, c []int8, xq []uint8, scaleX float32, rowSumWA, rowS
 }
 
 func rowSumQ8AVX2(a []int8) int32 {
+	if len(a) == 0 {
+		return 0
+	}
+	if useVNNI {
+		return rowSumQ8Asm(&a[0], len(a))
+	}
 	var s int32
 	for _, v := range a {
 		s += int32(v)
