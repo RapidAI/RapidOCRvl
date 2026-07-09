@@ -3967,6 +3967,26 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 		}
 	}
 	out := sc.att[:c.HiddenSize]
+	// Try CPU fused matvec + AddRMSNorm when Vulkan path failed
+	if len(normOut) >= c.HiddenSize && len(residual) >= c.HiddenSize && len(normWeight) >= c.HiddenSize {
+		eps := float32(c.RMSNormEps)
+		if tl.q8.o != nil {
+			tensor.MatVecQ8AddRMSNorm(normOut, residual, headOut, tl.q8.o, normWeight, eps)
+			return nil, true
+		}
+		if tl.q4.o != nil {
+			tensor.MatVecQ4AddRMSNormOutOnly(normOut, residual, headOut, tl.q4.o, normWeight, eps)
+			return nil, true
+		}
+		if tl.q6.o != nil {
+			tensor.MatVecQ6AddRMSNormOutOnly(normOut, residual, headOut, tl.q6.o, normWeight, eps)
+			return nil, true
+		}
+		if tl.w.o != nil {
+			tensor.MatVecAddRMSNorm(normOut, residual, headOut, tl.w.o, c.HiddenSize, qRows, normWeight, eps)
+			return nil, true
+		}
+	}
 	rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
 	return out, false
 }
