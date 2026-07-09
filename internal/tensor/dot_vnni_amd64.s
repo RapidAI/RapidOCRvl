@@ -418,20 +418,37 @@ tripVnniTailDone:
 
 // quantizeXForVNNIAsm(x_base *float32, xq_base *uint8, n int, inv float32)
 // Quantizes float32 x to uint8 with offset 128: q = round(x*inv) + 128, clamped [0,255].
-// Uses VPMOVDB to pack 8 int32 -> 8 uint8 without saturation issues.
+// Uses ZMM VPMOVDB to pack 16 int32 -> 16 uint8 per iteration.
 TEXT ·quantizeXForVNNIAsm(SB), NOSPLIT, $0-40
 	MOVQ x_base+0(FP), SI
 	MOVQ xq_base+8(FP), DI
 	MOVQ n+16(FP), CX
-	VBROADCASTSS inv+24(FP), Y1
-	VBROADCASTSS quantClamp255<>(SB), Y4
-	VXORPS Y5, Y5, Y5
-	VBROADCASTSS quantOffset128<>(SB), Y3
+	VBROADCASTSS inv+24(FP), Z1
+	VBROADCASTSS quantClamp255<>(SB), Z4
+	VXORPS Z5, Z5, Z5
+	VBROADCASTSS quantOffset128<>(SB), Z3
 
-	CMPQ CX, $8
-	JB quantXTail
+	CMPQ CX, $16
+	JB quantXLoop8
 
-quantXLoop:
+quantXLoop16:
+	CMPQ CX, $16
+	JB quantXLoop8
+	VMOVUPS (SI), Z0
+	VMULPS Z1, Z0, Z0
+	VROUNDPS $8, Z0, Z0
+	VADDPS Z3, Z0, Z0
+	VMAXPS Z5, Z0, Z0
+	VMINPS Z4, Z0, Z0
+	VCVTPS2DQ Z0, Z0
+	VPMOVDB Z0, X0
+	VMOVDQU X0, (DI)
+	ADDQ $64, SI
+	ADDQ $16, DI
+	SUBQ $16, CX
+	JMP quantXLoop16
+
+quantXLoop8:
 	CMPQ CX, $8
 	JB quantXDone
 	VMOVUPS (SI), Y0
@@ -446,7 +463,7 @@ quantXLoop:
 	ADDQ $32, SI
 	ADDQ $8, DI
 	SUBQ $8, CX
-	JMP quantXLoop
+	JMP quantXLoop8
 
 quantXDone:
 	VZEROUPPER
