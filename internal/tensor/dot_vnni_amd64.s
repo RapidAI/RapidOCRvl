@@ -1376,33 +1376,33 @@ TEXT ·finalizeDotQ8BiasVNNI(SB), NOSPLIT, $0-52
 	MOVQ out_base+24(FP), CX
 	MOVQ bias_base+32(FP), R8
 	MOVQ n+40(FP), R9
-	VBROADCASTSS scaleX+48(FP), Y1
-	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+	VBROADCASTSS scaleX+48(FP), Z1
+	VBROADCASTSS offset128<>(SB), Z2   // 128.0
 
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB finBiasTail
 
 finBiasLoop:
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB finBiasDone
-	VMOVDQU (SI), Y0        // 8 int32 dots
-	VMOVDQU (DI), Y3        // 8 int32 rowSum
-	VCVTDQ2PS Y0, Y0
-	VCVTDQ2PS Y3, Y3
-	VMULPS Y2, Y3, Y3       // 128 * rowSum
-	VSUBPS Y3, Y0, Y0       // dot - 128*rowSum
-	VMOVUPS (DX), Y4        // scale[i..i+7]
-	VMULPS Y1, Y0, Y0       // * scaleX
-	VMULPS Y4, Y0, Y0      // * scale[i]
-	VMOVUPS (R8), Y5        // bias[i..i+7]
-	VADDPS Y5, Y0, Y0       // + bias
-	VMOVUPS Y0, (CX)        // store result
-	ADDQ $32, SI
-	ADDQ $32, DI
-	ADDQ $32, DX
-	ADDQ $32, CX
-	ADDQ $32, R8
-	SUBQ $8, R9
+	VMOVDQU64 (SI), Z0        // 16 int32 dots
+	VMOVDQU64 (DI), Z3        // 16 int32 rowSum
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z3, Z3
+	VMULPS Z2, Z3, Z3         // 128 * rowSum
+	VSUBPS Z3, Z0, Z0         // dot - 128*rowSum
+	VMOVUPS (DX), Z4          // scale
+	VMULPS Z1, Z0, Z0         // * scaleX
+	VMULPS Z4, Z0, Z0         // * scale
+	VMOVUPS (R8), Z5          // bias
+	VADDPS Z5, Z0, Z0         // + bias
+	VMOVUPS Z0, (CX)          // store
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, DX
+	ADDQ $64, CX
+	ADDQ $64, R8
+	SUBQ $16, R9
 	JMP finBiasLoop
 
 finBiasDone:
