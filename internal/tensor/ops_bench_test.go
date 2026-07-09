@@ -1690,3 +1690,13 @@ func BenchmarkFusedSwiGLUQ8ModelSizeParts(b *testing.B) {
 		}
 	})
 }
+func BenchmarkSiLUMulInPlace8192(b *testing.B) {
+	gate := make([]float32, 8192)
+	up := make([]float32, 8192)
+	fillBench(gate)
+	fillBench(up)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		SiLUMulInPlace(gate, up)
+	}
+}

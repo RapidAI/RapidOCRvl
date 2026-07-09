@@ -88,3 +88,25 @@ func BenchmarkMatVecQ8PairModelGateUpSingleProc(b *testing.B) {
 	defer runtime.GOMAXPROCS(orig)
 	BenchmarkMatVecQ8PairModelGateUp(b)
 }
+func BenchmarkMatVecQ4PackedModelDown(b *testing.B) {
+	// Q4 without Unpacked: uses dotQ4FMA directly on packed nibbles
+	// Down projection: 2048 rows, 8192 cols
+	rows, cols := 2048, 8192
+	w := make([]float32, rows*cols)
+	x := make([]float32, cols)
+	out := make([]float32, rows)
+	for i := range w {
+		w[i] = float32(i%17-8) / 17
+	}
+	for i := range x {
+		x[i] = float32(i%13-6) / 13
+	}
+	// Create Q4 matrix WITHOUT unpacking
+	q4 := QuantizeQ4Row(w, rows, cols)
+	// Remove Unpacked to force using dotQ4FMA
+	q4.Unpacked = nil
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVecQ4(out, x, q4)
+	}
+}
