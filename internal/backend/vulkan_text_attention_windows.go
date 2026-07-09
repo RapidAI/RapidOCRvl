@@ -545,6 +545,13 @@ type vulkanTextAttentionF32WinRunner struct {
 	descriptorCache        [10]vulkanDescriptorBindingWin
 	deviceInt8WeightCache   map[uintptr]vulkanCachedDeviceInt8BufferWin
 	deviceFloat32WeightCache map[uintptr]vulkanCachedDeviceFloat32BufferWin
+	// Persistent intermediate device buffers (reused across calls)
+	devK        vkDeviceBufferWin
+	devV        vkDeviceBufferWin
+	devOut      vkDeviceBufferWin
+	devFinal    vkDeviceBufferWin
+	devResidual vkDeviceBufferWin
+	devNorm     vkDeviceBufferWin
 	commandRecorded        bool
 	commandKind            int
 	commandCacheLen        int

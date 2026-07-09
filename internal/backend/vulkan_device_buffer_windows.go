@@ -582,3 +582,21 @@ func (v *vulkanWin) getOrCreateDeviceFloat32Weight(
 	cache[key] = vulkanCachedDeviceFloat32BufferWin{buffer: devBuf, length: len(data), fingerprint: fingerprint}
 	return devBuf, true, nil
 }
+
+// ensureDeviceBuffer ensures a device-local buffer is at least `size` bytes.
+// Reuses the existing buffer if large enough; otherwise destroys and reallocates.
+func (v *vulkanWin) ensureDeviceBuffer(device uintptr, memProps vkPhysicalDeviceMemoryProperties, buf *vkDeviceBufferWin, size uint64) error {
+	if buf.buffer != 0 && buf.size >= size {
+		return nil
+	}
+	if buf.buffer != 0 {
+		v.destroyDeviceBuffer(device, *buf)
+		*buf = vkDeviceBufferWin{}
+	}
+	next, err := v.newDeviceBuffer(device, memProps, size)
+	if err != nil {
+		return err
+	}
+	*buf = next
+	return nil
+}

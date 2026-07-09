@@ -97,36 +97,31 @@ func VulkanChainedSwiGLUDownAddRMSNormQ8(
 	}
 
 	// --- Allocate device-local buffers for intermediates ---
-	devInter, err := vk.newDeviceBuffer(device, runner.memProps, interBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer inter: %w", err)
+	if err := vk.ensureDeviceBuffer(device, runner.memProps, &runner.devInter, interBytes); err != nil {
+		return fmt.Errorf("ensure device buffer inter: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devInter)
+	devInter := runner.devInter
 
-	devOut, err := vk.newDeviceBuffer(device, runner.memProps, outBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer out: %w", err)
+	if err := vk.ensureDeviceBuffer(device, runner.memProps, &runner.devOut, outBytes); err != nil {
+		return fmt.Errorf("ensure device buffer out: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devOut)
+	devOut := runner.devOut
 
-	devResidual, err := vk.newDeviceBuffer(device, runner.memProps, outBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer residual: %w", err)
+	if err := vk.ensureDeviceBuffer(device, runner.memProps, &runner.devResidual, outBytes); err != nil {
+		return fmt.Errorf("ensure device buffer residual: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devResidual)
+	devResidual := runner.devResidual
 
-	devNorm, err := vk.newDeviceBuffer(device, runner.memProps, outBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer norm: %w", err)
+	if err := vk.ensureDeviceBuffer(device, runner.memProps, &runner.devNorm, outBytes); err != nil {
+		return fmt.Errorf("ensure device buffer norm: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devNorm)
+	devNorm := runner.devNorm
 
 	// Device-local input buffer (x)
-	devX, err := vk.newDeviceBuffer(device, runner.memProps, xBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer x: %w", err)
+	if err := vk.ensureDeviceBuffer(device, runner.memProps, &runner.devX, xBytes); err != nil {
+		return fmt.Errorf("ensure device buffer x: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devX)
+	devX := runner.devX
 
 	// Device-local weight buffers
 	devGateData, gateDataUpload, err := vk.getOrCreateDeviceInt8Weight(device, runner.memProps, gate.Data[:gateLen], gateBytes, runner.deviceInt8WeightCache)

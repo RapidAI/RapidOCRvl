@@ -137,63 +137,54 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 	outCBytes := scBytes
 
 	// --- Allocate device-local buffers for intermediates ---
-	devOutA, err := vk.newDeviceBuffer(device, qkvRunner.memProps, outABytes)
-	if err != nil {
-		return fmt.Errorf("device buffer outA: %w", err)
+	if err := vk.ensureDeviceBuffer(device, qkvRunner.memProps, &qkvRunner.devOutA, outABytes); err != nil {
+		return fmt.Errorf("ensure device buffer outA: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devOutA)
+	devOutA := qkvRunner.devOutA
 
-	devOutB, err := vk.newDeviceBuffer(device, qkvRunner.memProps, outBBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer outB: %w", err)
+	if err := vk.ensureDeviceBuffer(device, qkvRunner.memProps, &qkvRunner.devOutB, outBBytes); err != nil {
+		return fmt.Errorf("ensure device buffer outB: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devOutB)
+	devOutB := qkvRunner.devOutB
 
-	devOutC, err := vk.newDeviceBuffer(device, qkvRunner.memProps, outCBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer outC: %w", err)
+	if err := vk.ensureDeviceBuffer(device, qkvRunner.memProps, &qkvRunner.devOutC, outCBytes); err != nil {
+		return fmt.Errorf("ensure device buffer outC: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devOutC)
+	devOutC := qkvRunner.devOutC
 
 	qBytes := uint64(qRows) * 4
 	kvDimBytes := uint64(kvRows) * 4
 	fullCacheBytes := uint64(cacheLen+1) * kvDimBytes
 
-	devK, err := vk.newDeviceBuffer(device, attRunner.memProps, fullCacheBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer k: %w", err)
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devK, fullCacheBytes); err != nil {
+		return fmt.Errorf("ensure device buffer k: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devK)
+	devK := attRunner.devK
 
-	devV, err := vk.newDeviceBuffer(device, attRunner.memProps, fullCacheBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer v: %w", err)
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devV, fullCacheBytes); err != nil {
+		return fmt.Errorf("ensure device buffer v: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devV)
+	devV := attRunner.devV
 
-	devOut, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer out: %w", err)
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devOut, qBytes); err != nil {
+		return fmt.Errorf("ensure device buffer out: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devOut)
+	devOut := attRunner.devOut
 
-	devFinal, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer final: %w", err)
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devFinal, qBytes); err != nil {
+		return fmt.Errorf("ensure device buffer final: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devFinal)
+	devFinal := attRunner.devFinal
 
-	devResidual, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer residual: %w", err)
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devResidual, qBytes); err != nil {
+		return fmt.Errorf("ensure device buffer residual: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devResidual)
+	devResidual := attRunner.devResidual
 
-	devNorm, err := vk.newDeviceBuffer(device, attRunner.memProps, qBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer norm: %w", err)
+	if err := vk.ensureDeviceBuffer(device, attRunner.memProps, &attRunner.devNorm, qBytes); err != nil {
+		return fmt.Errorf("ensure device buffer norm: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devNorm)
+	devNorm := attRunner.devNorm
 
 	// Weight device buffers
 	wDataLen, err := checkedQ8DataLenWin(qRows, qRows, "Vulkan q8 chained qkv output w")
@@ -254,11 +245,10 @@ func VulkanChainedQKVMRoPEAttentionOutAddRMSNormQ8(
 		return fmt.Errorf("cached device buffer cScale: %w", err)
 	}
 
-	devX, err := vk.newDeviceBuffer(device, qkvRunner.memProps, xBytes)
-	if err != nil {
-		return fmt.Errorf("device buffer x: %w", err)
+	if err := vk.ensureDeviceBuffer(device, qkvRunner.memProps, &qkvRunner.devX, xBytes); err != nil {
+		return fmt.Errorf("ensure device buffer x: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devX)
+	devX := qkvRunner.devX
 
 	devCos, cosUpload, err := vk.getOrCreateDeviceFloat32Weight(device, qkvRunner.memProps, cosTable[:half], tableBytes, qkvRunner.deviceFloat32WeightCache)
 	if err != nil {

@@ -900,6 +900,14 @@ type vulkanFusedMatVec3Q8WinRunner struct {
 	sharedDevice bool
 	deviceInt8WeightCache   map[uintptr]vulkanCachedDeviceInt8BufferWin
 	deviceFloat32WeightCache map[uintptr]vulkanCachedDeviceFloat32BufferWin
+	// Persistent intermediate device buffers (reused across calls)
+	devOutA   vkDeviceBufferWin
+	devOutB   vkDeviceBufferWin
+	devOutC   vkDeviceBufferWin
+	devX      vkDeviceBufferWin
+	devLn1W   vkDeviceBufferWin
+	devCos    vkDeviceBufferWin
+	devSin    vkDeviceBufferWin
 	mu          sync.Mutex
 }
 
@@ -1632,6 +1640,12 @@ type vulkanSwiGLUDownQ8WinRunner struct {
 	commandOutRows      int
 	deviceInt8WeightCache   map[uintptr]vulkanCachedDeviceInt8BufferWin
 	deviceFloat32WeightCache map[uintptr]vulkanCachedDeviceFloat32BufferWin
+	// Persistent intermediate device buffers (reused across calls)
+	devInter   vkDeviceBufferWin
+	devOut     vkDeviceBufferWin
+	devResidual vkDeviceBufferWin
+	devNorm    vkDeviceBufferWin
+	devX       vkDeviceBufferWin
 	sharedDevice bool
 	mu          sync.Mutex
 }
