@@ -455,6 +455,19 @@ func MatVecQ8Plain(out, x []float32, q *Q8Matrix) {
 }
 
 func matVecQ8Rows(out, x []float32, q *Q8Matrix, rows int) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallelQuantMatVec(rows*q.Cols, rows) {
+			parallelForQuantMatVec(rows, func(start, end int) {
+				matVecQ8SerialPreQuant(out, q, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ8SerialPreQuant(out, q, xq, scaleX, 0, rows)
+		return
+	}
 	if shouldParallelQuantMatVec(rows*q.Cols, rows) {
 		parallelForQuantMatVec(rows, func(start, end int) {
 			matVecQ8Serial(out, x, q, start, end)
@@ -465,6 +478,19 @@ func matVecQ8Rows(out, x []float32, q *Q8Matrix, rows int) {
 }
 
 func MatVecQ8Bias(out, x []float32, q *Q8Matrix, bias []float32) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallelQuantMatVec(q.Rows*q.Cols, q.Rows) {
+			parallelForQuantMatVec(q.Rows, func(start, end int) {
+				matVecQ8BiasSerialPreQuant(out, q, bias, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ8BiasSerialPreQuant(out, q, bias, xq, scaleX, 0, q.Rows)
+		return
+	}
 	if shouldParallelQuantMatVec(q.Rows*q.Cols, q.Rows) {
 		parallelForQuantMatVec(q.Rows, func(start, end int) {
 			matVecQ8BiasSerial(out, x, q, bias, start, end)
@@ -485,6 +511,19 @@ func MatVecQ4(out, x []float32, q *Q4Matrix) {
 }
 
 func matVecQ4Rows(out, x []float32, q *Q4Matrix, rows int) {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallelQuantMatVec(rows*q.Cols, rows) {
+			parallelForQuantMatVec(rows, func(start, end int) {
+				matVecQ4SerialPreQuant(out, q, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ4SerialPreQuant(out, q, xq, scaleX, 0, rows)
+		return
+	}
 	if shouldParallelQuantMatVec(rows*q.Cols, rows) {
 		parallelForQuantMatVec(rows, func(start, end int) {
 			matVecQ4Serial(out, x, q, start, end)
@@ -499,6 +538,19 @@ func MatVecQ6(out, x []float32, q *Q6Matrix) {
 }
 
 func matVecQ6Rows(out, x []float32, q *Q6Matrix, rows int) {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallelQuantMatVec(rows*q.Cols, rows) {
+			parallelForQuantMatVec(rows, func(start, end int) {
+				matVecQ6SerialPreQuant(out, q, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ6SerialPreQuant(out, q, xq, scaleX, 0, rows)
+		return
+	}
 	if shouldParallelQuantMatVec(rows*q.Cols, rows) {
 		parallelForQuantMatVec(rows, func(start, end int) {
 			matVecQ6Serial(out, x, q, start, end)
@@ -556,6 +608,19 @@ func parallelForQuantMatVec3EqualRows(rows int, fn func(start, end int)) {
 func FusedMatVec3Q8(outA, outB, outC, x []float32, a, b, c *Q8Matrix) {
 	totalRows := a.Rows + b.Rows + c.Rows
 	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
+		if useVNNI && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+			xq := getVNNIScratch(a.Cols)
+			defer putVNNIScratch(xq)
+			scaleX := quantizeXForVNNI(x, xq)
+			if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
+				parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
+					fusedMatVec3Q8EqualRowsSerialPreQuant(outA, outB, outC, a, b, c, xq, scaleX, start, end)
+				})
+				return
+			}
+			fusedMatVec3Q8EqualRowsSerialPreQuant(outA, outB, outC, a, b, c, xq, scaleX, 0, a.Rows)
+			return
+		}
 		if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
 			parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
 				fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
@@ -581,6 +646,19 @@ func FusedMatVec3Q8(outA, outB, outC, x []float32, a, b, c *Q8Matrix) {
 func FusedMatVec3Q6(outA, outB, outC, x []float32, a, b, c *Q6Matrix) {
 	totalRows := a.Rows + b.Rows + c.Rows
 	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
+		if useVNNI && a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+			xq := getVNNIScratch(a.Cols)
+			defer putVNNIScratch(xq)
+			scaleX := quantizeXForVNNI(x, xq)
+			if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
+				parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
+					fusedMatVec3Q6EqualRowsSerialPreQuant(outA, outB, outC, a, b, c, xq, scaleX, start, end)
+				})
+				return
+			}
+			fusedMatVec3Q6EqualRowsSerialPreQuant(outA, outB, outC, a, b, c, xq, scaleX, 0, a.Rows)
+			return
+		}
 		if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
 			parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
 				fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
@@ -606,6 +684,19 @@ func FusedMatVec3Q6(outA, outB, outC, x []float32, a, b, c *Q6Matrix) {
 func FusedMatVec3Q4(outA, outB, outC, x []float32, a, b, c *Q4Matrix) {
 	totalRows := a.Rows + b.Rows + c.Rows
 	if a.Rows == b.Rows && b.Rows == c.Rows && a.Cols == b.Cols && b.Cols == c.Cols {
+		if useVNNI && a.Unpacked != nil && b.Unpacked != nil && c.Unpacked != nil && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+			xq := getVNNIScratch(a.Cols)
+			defer putVNNIScratch(xq)
+			scaleX := quantizeXForVNNI(x, xq)
+			if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
+				parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
+					fusedMatVec3Q4EqualRowsSerialPreQuant(outA, outB, outC, a, b, c, xq, scaleX, start, end)
+				})
+				return
+			}
+			fusedMatVec3Q4EqualRowsSerialPreQuant(outA, outB, outC, a, b, c, xq, scaleX, 0, a.Rows)
+			return
+		}
 		if shouldParallelQuantMatVec3EqualRows(totalRows*a.Cols, a.Rows) {
 			parallelForQuantMatVec3EqualRows(a.Rows, func(start, end int) {
 				fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x, a, b, c, start, end)
@@ -708,6 +799,19 @@ func matVecQ8SwiGLUScratch(out, x []float32, gate, up *Q8Matrix, tmpU []float32)
 		swiGLUFallbackInPlace(out, tmpU)
 		return
 	}
+	if useVNNI && gate.Cols >= 32 && gate.RowSum != nil && up.RowSum != nil {
+		xq := getVNNIScratch(gate.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
+			parallelForQuantPair(gate.Rows, func(start, end int) {
+				matVecQ8SwiGLUSerialBatchedPreQuant(out, tmpU, gate, up, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ8SwiGLUSerialBatchedPreQuant(out, tmpU, gate, up, xq, scaleX, 0, gate.Rows)
+		return
+	}
 	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
 		parallelForQuantPair(gate.Rows, func(start, end int) {
 			matVecQ8SwiGLUSerialBatched(out, tmpU, x, gate, up, start, end)
@@ -786,6 +890,19 @@ func matVecQ4SwiGLUScratch(out, x []float32, gate, up *Q4Matrix, tmpU []float32)
 		matVecQ4Rows(out, x, gate, rows)
 		matVecQ4Rows(tmpU, x, up, rows)
 		swiGLUFallbackInPlace(out, tmpU)
+		return
+	}
+	if useVNNI && gate.Unpacked != nil && up.Unpacked != nil && gate.Cols >= 32 && gate.RowSum != nil && up.RowSum != nil {
+		xq := getVNNIScratch(gate.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
+			parallelForQuantPair(gate.Rows, func(start, end int) {
+				matVecQ4SwiGLUSerialBatchedPreQuant(out, tmpU, gate, up, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ4SwiGLUSerialBatchedPreQuant(out, tmpU, gate, up, xq, scaleX, 0, gate.Rows)
 		return
 	}
 	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
@@ -942,6 +1059,19 @@ func matVecQ6SwiGLUScratch(out, x []float32, gate, up *Q6Matrix, tmpU []float32)
 		matVecQ6Rows(out, x, gate, rows)
 		matVecQ6Rows(tmpU, x, up, rows)
 		swiGLUFallbackInPlace(out, tmpU)
+		return
+	}
+	if useVNNI && gate.Unpacked != nil && up.Unpacked != nil && gate.Cols >= 32 && gate.RowSum != nil && up.RowSum != nil {
+		xq := getVNNIScratch(gate.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
+			parallelForQuantPair(gate.Rows, func(start, end int) {
+				matVecQ6SwiGLUSerialBatchedPreQuant(out, tmpU, gate, up, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ6SwiGLUSerialBatchedPreQuant(out, tmpU, gate, up, xq, scaleX, 0, gate.Rows)
 		return
 	}
 	if shouldParallel(gate.Rows*gate.Cols*2, gate.Rows) {
@@ -1336,6 +1466,19 @@ func matVecQ4Pair(outA, outB, x []float32, a, b *Q4Matrix) {
 		MatVecQ4(outB, x, b)
 		return
 	}
+	if useVNNI && a.Unpacked != nil && b.Unpacked != nil && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
+			parallelForQuantPair(a.Rows, func(start, end int) {
+				matVecQ4PairSerialPreQuant(outA, outB, a, b, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ4PairSerialPreQuant(outA, outB, a, b, xq, scaleX, 0, a.Rows)
+		return
+	}
 	if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
 		parallelForQuantPair(a.Rows, func(start, end int) {
 			matVecQ4PairSerial(outA, outB, x, a, b, start, end)
@@ -1395,6 +1538,19 @@ func matVecQ6Pair(outA, outB, x []float32, a, b *Q6Matrix) {
 	if a.Rows != b.Rows || a.Cols != b.Cols {
 		MatVecQ6(outA, x, a)
 		MatVecQ6(outB, x, b)
+		return
+	}
+	if useVNNI && a.Unpacked != nil && b.Unpacked != nil && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
+			parallelForQuantPair(a.Rows, func(start, end int) {
+				matVecQ6PairSerialPreQuant(outA, outB, a, b, xq, scaleX, start, end)
+			})
+			return
+		}
+		matVecQ6PairSerialPreQuant(outA, outB, a, b, xq, scaleX, 0, a.Rows)
 		return
 	}
 	if shouldParallel(a.Rows*a.Cols*2, a.Rows) {
@@ -1916,6 +2072,11 @@ func rowSumQ8(a []int8) int32 {
 // Returns (xq, scaleX) where scaleX = maxAbs(x)/127.
 // The caller must provide xq with at least len(x) capacity.
 func quantizeXForVNNI(x []float32, xq []uint8) float32 {
+	// x may be longer than xq (e.g. when the caller passes a buffer with extra
+	// capacity). Only quantize the first len(xq) elements.
+	if len(x) > len(xq) {
+		x = x[:len(xq)]
+	}
 	if useVNNI && len(x) >= 8 {
 		return quantizeXForVNNIAVX2(x, xq)
 	}

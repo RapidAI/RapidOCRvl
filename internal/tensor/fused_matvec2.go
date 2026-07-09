@@ -427,6 +427,12 @@ func matVecQ8InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Mat
 }
 
 func matVecQ8InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q8Matrix) float32 {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		return matVecQ8InPlaceAddSumSquaresParallelPreQuant(out, residual, q, xq, scaleX)
+	}
 	workers := runtime.GOMAXPROCS(0)
 	if workers > q.Rows {
 		workers = q.Rows
@@ -457,6 +463,45 @@ func matVecQ8InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q8Matri
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ8InPlaceAddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+func matVecQ8InPlaceAddSumSquaresParallelPreQuant(out, residual []float32, q *Q8Matrix, xq []uint8, scaleX float32) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ8InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, q.Rows)
+	}
+	var partialsArr [16]float32; partials := partialsArr[:workers]
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ8InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ8InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
@@ -548,6 +593,12 @@ func matVecQ8AddSumSquaresVNNISerial(out, residual, x []float32, q *Q8Matrix, st
 }
 
 func matVecQ8AddSumSquaresParallel(out, residual, x []float32, q *Q8Matrix) float32 {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		return matVecQ8AddSumSquaresParallelPreQuant(out, residual, q, xq, scaleX)
+	}
 	workers := runtime.GOMAXPROCS(0)
 	if workers > q.Rows {
 		workers = q.Rows
@@ -578,6 +629,45 @@ func matVecQ8AddSumSquaresParallel(out, residual, x []float32, q *Q8Matrix) floa
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ8AddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+func matVecQ8AddSumSquaresParallelPreQuant(out, residual []float32, q *Q8Matrix, xq []uint8, scaleX float32) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ8AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, q.Rows)
+	}
+	var partialsArr [16]float32; partials := partialsArr[:workers]
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ8AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ8AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
@@ -748,6 +838,13 @@ func matVecQ4InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Mat
 }
 
 func matVecQ4InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q4Matrix) float32 {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		return matVecQ4InPlaceAddSumSquaresParallelPreQuant(out, residual, q, xq, scaleX)
+	}
+
 	workers := runtime.GOMAXPROCS(0)
 	if workers > q.Rows {
 		workers = q.Rows
@@ -778,6 +875,45 @@ func matVecQ4InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q4Matri
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ4InPlaceAddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+func matVecQ4InPlaceAddSumSquaresParallelPreQuant(out, residual []float32, q *Q4Matrix, xq []uint8, scaleX float32) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ4InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, q.Rows)
+	}
+	var partialsArr [16]float32; partials := partialsArr[:workers]
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ4InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ4InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
@@ -929,6 +1065,13 @@ func matVecQ4AddSumSquaresVNNISerial(out, residual, x []float32, q *Q4Matrix, st
 }
 
 func matVecQ4AddSumSquaresParallel(out, residual, x []float32, q *Q4Matrix) float32 {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		return matVecQ4AddSumSquaresParallelPreQuant(out, residual, q, xq, scaleX)
+	}
+
 	workers := runtime.GOMAXPROCS(0)
 	if workers > q.Rows {
 		workers = q.Rows
@@ -959,6 +1102,45 @@ func matVecQ4AddSumSquaresParallel(out, residual, x []float32, q *Q4Matrix) floa
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ4AddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+func matVecQ4AddSumSquaresParallelPreQuant(out, residual []float32, q *Q4Matrix, xq []uint8, scaleX float32) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ4AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, q.Rows)
+	}
+	var partialsArr [16]float32; partials := partialsArr[:workers]
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ4AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ4AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
@@ -1129,6 +1311,13 @@ func matVecQ6InPlaceAddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Mat
 }
 
 func matVecQ6InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q6Matrix) float32 {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		return matVecQ6InPlaceAddSumSquaresParallelPreQuant(out, residual, q, xq, scaleX)
+	}
+
 	workers := runtime.GOMAXPROCS(0)
 	if workers > q.Rows {
 		workers = q.Rows
@@ -1159,6 +1348,45 @@ func matVecQ6InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q6Matri
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ6InPlaceAddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+func matVecQ6InPlaceAddSumSquaresParallelPreQuant(out, residual []float32, q *Q6Matrix, xq []uint8, scaleX float32) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ6InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, q.Rows)
+	}
+	var partialsArr [16]float32; partials := partialsArr[:workers]
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ6InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ6InPlaceAddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
@@ -1310,6 +1538,13 @@ func matVecQ6AddSumSquaresVNNISerial(out, residual, x []float32, q *Q6Matrix, st
 }
 
 func matVecQ6AddSumSquaresParallel(out, residual, x []float32, q *Q6Matrix) float32 {
+	if useVNNI && q.Unpacked != nil && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		return matVecQ6AddSumSquaresParallelPreQuant(out, residual, q, xq, scaleX)
+	}
+
 	workers := runtime.GOMAXPROCS(0)
 	if workers > q.Rows {
 		workers = q.Rows
@@ -1340,6 +1575,45 @@ func matVecQ6AddSumSquaresParallel(out, residual, x []float32, q *Q6Matrix) floa
 		firstEnd = q.Rows
 	}
 	partials[0] = matVecQ6AddSumSquaresSerial(out, residual, x, q, 0, firstEnd)
+	wg.Wait()
+	var ss float32
+	for _, p := range partials {
+		ss += p
+	}
+	return ss
+}
+
+func matVecQ6AddSumSquaresParallelPreQuant(out, residual []float32, q *Q6Matrix, xq []uint8, scaleX float32) float32 {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > q.Rows {
+		workers = q.Rows
+	}
+	if workers <= 1 {
+		return matVecQ6AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, q.Rows)
+	}
+	var partialsArr [16]float32; partials := partialsArr[:workers]
+	chunk := (q.Rows + workers - 1) / workers
+	var wg sync.WaitGroup
+	for worker := 1; worker < workers; worker++ {
+		start := worker * chunk
+		end := start + chunk
+		if end > q.Rows {
+			end = q.Rows
+		}
+		if start >= end {
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+			partials[slot] = matVecQ6AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, start, end)
+		}(worker, start, end)
+	}
+	firstEnd := chunk
+	if firstEnd > q.Rows {
+		firstEnd = q.Rows
+	}
+	partials[0] = matVecQ6AddSumSquaresVNNIPreQuant(out, residual, q, xq, scaleX, 0, firstEnd)
 	wg.Wait()
 	var ss float32
 	for _, p := range partials {
