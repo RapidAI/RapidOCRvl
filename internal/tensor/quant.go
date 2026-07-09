@@ -1320,10 +1320,12 @@ func matVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, en
 		rowSum := q.RowSum
 		cols := q.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
-				out[r] = float32(dot-128*rowSum[r])*scaleX*scale[r] + bias[r]
+			nRows := end - start
+			scratch := getInt32Scratch(nRows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				out[start+r] = float32(scratch[r]-128*rowSum[start+r])*scaleX*scale[start+r] + bias[start+r]
 			}
 			return
 		}
@@ -1560,25 +1562,38 @@ func fusedMatVec3Q6Serial(outA, outB, outC, x []float32, a, b, c *Q6Matrix, star
 		bCols := b.Cols
 		cCols := c.Cols
 		if useVNNI {
-			for r := start; r < aEnd; r++ {
-				base := r * aCols
-				dot := dotQ8VNNICoreZMM(&aData[base], &xq[0], aCols)
-				outA[r] = float32(dot-128*aRS[r]) * scaleX * aScale[r]
+			// Matrix A
+			nA := aEnd - start
+			if nA > 0 {
+				sA := getInt32Scratch(nA)
+				defer putInt32Scratch(sA)
+				dotQ8VNNICoreMultiRowZMM(&aData[start*aCols], &xq[0], &sA[0], nA, aCols)
+				for r := 0; r < nA; r++ {
+					outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
+				}
 			}
 			bStart := max(start, a.Rows)
 			bEnd := min(end, splitB)
-			for r := bStart; r < bEnd; r++ {
-				br := r - a.Rows
-				base := br * bCols
-				dot := dotQ8VNNICoreZMM(&bData[base], &xq[0], bCols)
-				outB[br] = float32(dot-128*bRS[br]) * scaleX * bScale[br]
+			nB := bEnd - bStart
+			if nB > 0 {
+				br0 := bStart - a.Rows
+				sB := getInt32Scratch(nB)
+				defer putInt32Scratch(sB)
+				dotQ8VNNICoreMultiRowZMM(&bData[br0*bCols], &xq[0], &sB[0], nB, bCols)
+				for r := 0; r < nB; r++ {
+					outB[br0+r] = float32(sB[r]-128*bRS[br0+r]) * scaleX * bScale[br0+r]
+				}
 			}
 			cStart := max(start, splitB)
-			for r := cStart; r < end; r++ {
-				cr := r - splitB
-				base := cr * cCols
-				dot := dotQ8VNNICoreZMM(&cData[base], &xq[0], cCols)
-				outC[cr] = float32(dot-128*cRS[cr]) * scaleX * cScale[cr]
+			nC := end - cStart
+			if nC > 0 {
+				cr0 := cStart - splitB
+				sC := getInt32Scratch(nC)
+				defer putInt32Scratch(sC)
+				dotQ8VNNICoreMultiRowZMM(&cData[cr0*cCols], &xq[0], &sC[0], nC, cCols)
+				for r := 0; r < nC; r++ {
+					outC[cr0+r] = float32(sC[r]-128*cRS[cr0+r]) * scaleX * cScale[cr0+r]
+				}
 			}
 			return
 		}
@@ -1799,25 +1814,38 @@ func fusedMatVec3Q4Serial(outA, outB, outC, x []float32, a, b, c *Q4Matrix, star
 		bCols := b.Cols
 		cCols := c.Cols
 		if useVNNI {
-			for r := start; r < aEnd; r++ {
-				base := r * aCols
-				dot := dotQ8VNNICoreZMM(&aData[base], &xq[0], aCols)
-				outA[r] = float32(dot-128*aRS[r]) * scaleX * aScale[r]
+			// Matrix A
+			nA := aEnd - start
+			if nA > 0 {
+				sA := getInt32Scratch(nA)
+				defer putInt32Scratch(sA)
+				dotQ8VNNICoreMultiRowZMM(&aData[start*aCols], &xq[0], &sA[0], nA, aCols)
+				for r := 0; r < nA; r++ {
+					outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
+				}
 			}
 			bStart := max(start, a.Rows)
 			bEnd := min(end, splitB)
-			for r := bStart; r < bEnd; r++ {
-				br := r - a.Rows
-				base := br * bCols
-				dot := dotQ8VNNICoreZMM(&bData[base], &xq[0], bCols)
-				outB[br] = float32(dot-128*bRS[br]) * scaleX * bScale[br]
+			nB := bEnd - bStart
+			if nB > 0 {
+				br0 := bStart - a.Rows
+				sB := getInt32Scratch(nB)
+				defer putInt32Scratch(sB)
+				dotQ8VNNICoreMultiRowZMM(&bData[br0*bCols], &xq[0], &sB[0], nB, bCols)
+				for r := 0; r < nB; r++ {
+					outB[br0+r] = float32(sB[r]-128*bRS[br0+r]) * scaleX * bScale[br0+r]
+				}
 			}
 			cStart := max(start, splitB)
-			for r := cStart; r < end; r++ {
-				cr := r - splitB
-				base := cr * cCols
-				dot := dotQ8VNNICoreZMM(&cData[base], &xq[0], cCols)
-				outC[cr] = float32(dot-128*cRS[cr]) * scaleX * cScale[cr]
+			nC := end - cStart
+			if nC > 0 {
+				cr0 := cStart - splitB
+				sC := getInt32Scratch(nC)
+				defer putInt32Scratch(sC)
+				dotQ8VNNICoreMultiRowZMM(&cData[cr0*cCols], &xq[0], &sC[0], nC, cCols)
+				for r := 0; r < nC; r++ {
+					outC[cr0+r] = float32(sC[r]-128*cRS[cr0+r]) * scaleX * cScale[cr0+r]
+				}
 			}
 			return
 		}
