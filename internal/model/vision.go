@@ -616,10 +616,12 @@ func applyVisionRoPE(x [][]float32, grid vision.Grid, heads, hd int, rope vision
 	half := hd / 2
 	hy, wx := 0, 0
 	for _, row := range x {
+		cosH, sinH := rope.hCos[hy], rope.hSin[hy]
+		cosW, sinW := rope.wCos[wx], rope.wSin[wx]
 		for h := 0; h < heads; h++ {
 			base := h * hd
-			applyAxisRoPEWithTable(row[base:base+half], rope.h[hy])
-			applyAxisRoPEWithTable(row[base+half:base+hd], rope.w[wx])
+			tensor.RoPEPairAxis(row, row, base, half, cosH, sinH)
+			tensor.RoPEPairAxis(row, row, base+half, half, cosW, sinW)
 		}
 		wx++
 		if wx == grid.W {
