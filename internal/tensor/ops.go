@@ -1012,7 +1012,10 @@ func FastExpF32(x float32) float32 {
 	// exp(x) = 2^(x * log2(e))
 	const log2e = float32(1.4426950408889634)
 	t := x * log2e
-	n := int32(math.RoundToEven(float64(t)))
+	// Fast round-to-nearest-even using magic number (avoids math.RoundToEven call)
+	// For |t| < 2^22, adding 2^23+2^22 forces round-to-integer with ties-to-even.
+	const roundMagic = float32(0x1.0p23 + 0x1.0p22) // 12582912.0
+	n := int32((t + roundMagic) - roundMagic)
 	f := t - float32(n)
 	// 2^f polynomial (Estrin scheme, degree 5)
 	// poly = c1 + c2*f + c3*f^2 + c4*f^3 + c5*f^4
@@ -1080,7 +1083,8 @@ func fastExpF32T(x float32) float32 {
 	if x < -88.0*1.4426950 {
 		return 0
 	}
-	n := int32(math.RoundToEven(float64(x)))
+	const roundMagic = float32(0x1.0p23 + 0x1.0p22)
+	n := int32((x + roundMagic) - roundMagic)
 	f := x - float32(n)
 	const c1 = float32(0.6931471824645996)
 	const c2 = float32(0.24022650718688965)
