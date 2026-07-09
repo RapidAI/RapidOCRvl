@@ -694,7 +694,7 @@ func BenchmarkFusedSwiGLUQ8(b *testing.B) {
 	upW := make([]float32, inter*hidden)
 	downW := make([]float32, hidden*inter)
 	out := make([]float32, hidden)
-	tmpG := make([]float32, inter)
+	tmpG := make([]float32, inter*2)
 	fillBench(x)
 	fillBench(gateW)
 	fillBench(upW)
@@ -1641,4 +1641,52 @@ func makeRowsBench(rows, cols int) [][]float32 {
 		out[i] = data[i*cols : (i+1)*cols]
 	}
 	return out
+}
+func BenchmarkFusedSwiGLUQ8ModelSize(b *testing.B) {
+	// Model dimensions: hidden=2048, inter=8192
+	hidden, inter := 2048, 8192
+	x := make([]float32, hidden)
+	gateW := make([]float32, inter*hidden)
+	upW := make([]float32, inter*hidden)
+	downW := make([]float32, hidden*inter)
+	out := make([]float32, hidden)
+	tmpG := make([]float32, inter)
+	fillBench(x)
+	fillBench(gateW)
+	fillBench(upW)
+	fillBench(downW)
+	gate := QuantizeQ8Row(gateW, inter, hidden)
+	up := QuantizeQ8Row(upW, inter, hidden)
+	down := QuantizeQ8Row(downW, hidden, inter)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		FusedSwiGLUQ8Scratch(out, x, gate, up, down, tmpG)
+	}
+}
+func BenchmarkFusedSwiGLUQ8ModelSizeParts(b *testing.B) {
+	hidden, inter := 2048, 8192
+	x := make([]float32, hidden)
+	gateW := make([]float32, inter*hidden)
+	upW := make([]float32, inter*hidden)
+	downW := make([]float32, hidden*inter)
+	out := make([]float32, hidden)
+	tmpG := make([]float32, inter*2)
+	fillBench(x)
+	fillBench(gateW)
+	fillBench(upW)
+	fillBench(downW)
+	gate := QuantizeQ8Row(gateW, inter, hidden)
+	up := QuantizeQ8Row(upW, inter, hidden)
+	down := QuantizeQ8Row(downW, hidden, inter)
+	tmpU := tmpG[inter:]
+	b.Run("GateUp", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			matVecQ8SwiGLUScratch(tmpG, x, gate, up, tmpU)
+		}
+	})
+	b.Run("Down", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			MatVecQ8(out, tmpG, down)
+		}
+	})
 }
