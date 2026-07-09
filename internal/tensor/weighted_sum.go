@@ -162,6 +162,10 @@ func ScaleCopy(dst, x []float32, a float32) {
 
 // ScaleAdd computes dst[i] += a * x[i].
 func ScaleAdd(dst, x []float32, a float32) {
+	if useDotFMA && len(dst) >= 8 {
+		scaleAddFMA(dst, x, a)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		scaleAddAVX(dst, x, a)
 		return
