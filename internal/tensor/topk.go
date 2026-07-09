@@ -68,7 +68,7 @@ func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 		return bestIdx, bestVal
 	}
 	chunk := (rows + workers - 1) / workers
-	results := make([]partial, workers)
+	var resultsArr [16]partial; results := resultsArr[:workers]
 	var wg sync.WaitGroup
 	for wi := 0; wi < workers; wi++ {
 		start := wi * chunk

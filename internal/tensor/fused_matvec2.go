@@ -172,7 +172,7 @@ func matVecAddSumSquaresParallel(out, residual, x, w []float32, rows, cols int) 
 	if workers <= 1 {
 		return matVecAddSumSquaresSerial(out, residual, x, w, 0, rows, cols)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -286,7 +286,7 @@ func matVecInPlaceAddSumSquaresParallel(out, residual, x, w []float32, rows, col
 	if workers <= 1 {
 		return matVecInPlaceAddSumSquaresSerial(out, residual, x, w, 0, rows, cols)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -399,7 +399,7 @@ func matVecQ8InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q8Matri
 	if workers <= 1 {
 		return matVecQ8InPlaceAddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (q.Rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -502,7 +502,7 @@ func matVecQ8AddSumSquaresParallel(out, residual, x []float32, q *Q8Matrix) floa
 	if workers <= 1 {
 		return matVecQ8AddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (q.Rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -591,7 +591,7 @@ func matVecQ4InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q4Matri
 	if workers <= 1 {
 		return matVecQ4InPlaceAddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (q.Rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -677,7 +677,7 @@ func matVecQ4AddSumSquaresParallel(out, residual, x []float32, q *Q4Matrix) floa
 	if workers <= 1 {
 		return matVecQ4AddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (q.Rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -766,7 +766,7 @@ func matVecQ6InPlaceAddSumSquaresParallel(out, residual, x []float32, q *Q6Matri
 	if workers <= 1 {
 		return matVecQ6InPlaceAddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (q.Rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
@@ -852,7 +852,7 @@ func matVecQ6AddSumSquaresParallel(out, residual, x []float32, q *Q6Matrix) floa
 	if workers <= 1 {
 		return matVecQ6AddSumSquaresSerial(out, residual, x, q, 0, q.Rows)
 	}
-	partials := make([]float32, workers)
+	var partialsArr [16]float32; partials := partialsArr[:workers]
 	chunk := (q.Rows + workers - 1) / workers
 	var wg sync.WaitGroup
 	for worker := 1; worker < workers; worker++ {
