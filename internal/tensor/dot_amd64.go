@@ -107,6 +107,7 @@ func dotQ8VNNICore(a *int8, xq *uint8, n int) int32
 func dotQ8PairVNNICore(a *int8, b *int8, xq *uint8, n int) (int32, int32)
 func dotQ8TripletVNNICore(a *int8, b *int8, c *int8, xq *uint8, n int) (int32, int32, int32)
 func rowSumQ8Asm(a *int8, n int) int32
+func quantizeXForVNNIAsm(x_base *float32, xq_base *uint8, n int, inv float32)
 
 // VNNI-accelerated Q8 dot product using VPDPBUSD.
 // dotQ8VNNI scalar fallback (VNNI not available in assembly).
@@ -191,13 +192,17 @@ func rowSumQ8AVX2(a []int8) int32 {
 func quantizeXForVNNIAVX2(x []float32, xq []uint8) float32 {
 	maxAbs := maxAbsFloat32(x)
 	if maxAbs == 0 {
-		for i := range xq {
+		for i := range xq[:len(x)] {
 			xq[i] = 128
 		}
 		return 1
 	}
 	scale := maxAbs / 127
 	inv := 1 / scale
+	if useDotQ8AVX2 && len(x) >= 8 && len(xq) >= len(x) {
+		quantizeXForVNNIAsm(&x[0], &xq[0], len(x), inv)
+		return scale
+	}
 	for i, v := range x {
 		q := int(v*inv) + 128
 		if q < 0 {

@@ -350,3 +350,63 @@ tripVnniTailDone:
 	MOVL R8, ret1+44(FP)
 	MOVL R9, ret2+48(FP)
 	RET
+
+// quantizeXForVNNIAsm(x_base *float32, xq_base *uint8, n int, inv float32)
+// Quantizes float32 x to uint8 with offset 128: q = round(x*inv) + 128, clamped [0,255].
+// Uses VPMOVDB to pack 8 int32 -> 8 uint8 without saturation issues.
+TEXT ·quantizeXForVNNIAsm(SB), NOSPLIT, $0-40
+	MOVQ x_base+0(FP), SI
+	MOVQ xq_base+8(FP), DI
+	MOVQ n+16(FP), CX
+	VBROADCASTSS inv+24(FP), Y1
+	VBROADCASTSS quantClamp255<>(SB), Y4
+	VXORPS Y5, Y5, Y5
+	VBROADCASTSS quantOffset128<>(SB), Y3
+
+	CMPQ CX, $8
+	JB quantXTail
+
+quantXLoop:
+	CMPQ CX, $8
+	JB quantXDone
+	VMOVUPS (SI), Y0
+	VMULPS Y1, Y0, Y0
+	VROUNDPS $8, Y0, Y0
+	VADDPS Y3, Y0, Y0
+	VMAXPS Y5, Y0, Y0
+	VMINPS Y4, Y0, Y0
+	VCVTPS2DQ Y0, Y0
+	VPMOVDB Y0, X0
+	VMOVQ X0, (DI)
+	ADDQ $32, SI
+	ADDQ $8, DI
+	SUBQ $8, CX
+	JMP quantXLoop
+
+quantXDone:
+	VZEROUPPER
+quantXTail:
+	CMPQ CX, $0
+	JE quantXRet
+	MOVSS (SI), X0
+	MULSS X1, X0
+	ROUNDSS $8, X0, X0
+	ADDSS quantOffset128<>(SB), X0
+	MAXSS X5, X0
+	MINSS X4, X0
+	VCVTSS2SI X0, AX
+	MOVB AX, (DI)
+	ADDQ $4, SI
+	INCQ DI
+	DECQ CX
+	JMP quantXTail
+
+quantXRet:
+	VZEROUPPER
+	RET
+
+DATA quantClamp255<>+0(SB)/4, $0x437F0000
+GLOBL quantClamp255<>(SB), RODATA, $4
+
+DATA quantOffset128<>+0(SB)/4, $0x43000000
+GLOBL quantOffset128<>(SB), RODATA, $4
