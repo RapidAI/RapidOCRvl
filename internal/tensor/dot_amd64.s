@@ -5146,6 +5146,87 @@ ropeDone:
 	RET
 
 
+// ropeFMA: FMA version of ropeAVX. Fuses mul+sub and mul+add into
+// VFMSUB231PS and VFMADD231PS, reducing arithmetic from 6 to 4 ops per iter.
+TEXT ·ropeFMA(SB), NOSPLIT, $0-88
+	MOVQ x_base+0(FP), SI
+	MOVQ cosTable_base+24(FP), DI
+	MOVQ sinTable_base+48(FP), R8
+	MOVQ heads+72(FP), AX
+	MOVQ dim+80(FP), BX
+	MOVQ BX, CX
+	SHRQ $1, CX
+	IMULQ $4, BX
+
+ropeFmaHeadLoop:
+	TESTQ AX, AX
+	JZ ropeFmaDone
+	DECQ AX
+	MOVQ SI, R11
+	LEAQ (SI)(CX*4), R10
+	MOVQ CX, R9
+
+ropeFmaInnerLoop:
+	CMPQ R9, $8
+	JB ropeFmaInnerTail
+	VMOVUPS (DI), Y0          // cos
+	VMOVUPS (R8), Y1          // sin
+	VMOVUPS (SI), Y2          // a
+	VMOVUPS (R10), Y3         // b
+	// new_a = a*cos - b*sin
+	VMULPS Y0, Y2, Y4         // Y4 = a*cos
+	VMULPS Y1, Y3, Y5         // Y5 = b*sin
+	VSUBPS Y5, Y4, Y4         // Y4 = a*cos - b*sin
+	// new_b = b*cos + a*sin (VFMADD: Y6 = b*cos + a*sin)
+	VMULPS Y0, Y3, Y6         // Y6 = b*cos
+	VFMADD231PS Y1, Y2, Y6    // Y6 = b*cos + a*sin
+	VMOVUPS Y4, (SI)
+	VMOVUPS Y6, (R10)
+	ADDQ $32, SI
+	ADDQ $32, R10
+	ADDQ $32, DI
+	ADDQ $32, R8
+	SUBQ $8, R9
+	JMP ropeFmaInnerLoop
+
+
+ropeFmaInnerTail:
+	CMPQ R9, $0
+	JE ropeFmaHeadAdvance
+
+	MOVSS (R8), X1
+	MOVSS (SI), X2
+	MOVSS (R10), X3
+	MULSS X0, X2
+	MULSS X1, X3
+	MOVSS X2, X4
+	SUBSS X3, X4
+	MOVSS (R10), X5
+	MULSS X0, X5
+	MOVSS (SI), X6
+	MULSS X1, X6
+	ADDSS X6, X5
+	MOVSS X4, (SI)
+	MOVSS X5, (R10)
+	ADDQ $4, SI
+	ADDQ $4, R10
+	ADDQ $4, DI
+	ADDQ $4, R8
+	DECQ R9
+	JMP ropeFmaInnerTail
+
+ropeFmaHeadAdvance:
+	VZEROUPPER
+	MOVQ cosTable_base+24(FP), DI
+	MOVQ sinTable_base+48(FP), R8
+	MOVQ R11, SI
+	ADDQ BX, SI
+	JMP ropeFmaHeadLoop
+
+ropeFmaDone:
+	RET
+
+
 TEXT ·geluTanhAVX(SB), NOSPLIT, $0-24
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX

@@ -45,6 +45,7 @@ func scaleCopyAVX(dst, x []float32, a float32)
 func scaleAddAVX(dst, x []float32, a float32)
 func expF32VecAVX(x []float32, m float32) float32
 func ropeAVX(x []float32, cosTable, sinTable []float32, heads, dim int)
+func ropeFMA(x []float32, cosTable, sinTable []float32, heads, dim int)
 func geluTanhAVX(x []float32)
 func siluMulInPlaceAVX(gate, up []float32)
 

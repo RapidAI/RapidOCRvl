@@ -289,6 +289,7 @@ func expF32VecAVX(x []float32, m float32) float32 {
 }
 
 func ropeAVX(x []float32, cosTable, sinTable []float32, heads, dim int) {}
+func ropeFMA(x []float32, cosTable, sinTable []float32, heads, dim int) {}
 
 func geluTanhAVX(x []float32) {
 	for i := range x {

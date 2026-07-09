@@ -227,6 +227,10 @@ func ExpVec(x []float32, m float32) float32 {
 // ApplyMRoPETable applies multi-dimensional rotary position embedding using precomputed cos/sin tables.
 // For each head, it performs complex rotation: x[i] = x[i]*cos - x[half+i]*sin, x[half+i] = x[half+i]*cos + x[i]*sin
 func ApplyMRoPETable(x []float32, cosTable, sinTable []float32, heads, dim int) {
+	if useDotFMA && useDotF32AVX && dim >= 16 {
+		ropeFMA(x, cosTable, sinTable, heads, dim)
+		return
+	}
 	if useDotF32AVX && dim >= 16 {
 		ropeAVX(x, cosTable, sinTable, heads, dim)
 		return
