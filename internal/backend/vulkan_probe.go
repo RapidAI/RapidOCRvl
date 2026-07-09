@@ -128,6 +128,7 @@ func vulkanDispatchProbes() []vulkanDispatchProbeCase {
 		{name: "chained_matvec_add_rmsnorm_matvec_f32", run: probeVulkanChainedMatVecAddRMSNormMatVecF32},
 		{name: "chained_rmsnorm_qkv_mrope_f32", run: probeVulkanChainedRMSNormQKVMRoPEF32},
 		{name: "chained_rmsnorm_qkv_mrope_q8", run: probeVulkanChainedRMSNormQKVMRoPEQ8},
+		{name: "chained_qkv_attention_out_norm_f32", run: probeVulkanChainedQKVAttentionOutAddRMSNormF32},
 	}
 }
 
@@ -2084,6 +2085,77 @@ func probeVulkanChainedRMSNormQKVMRoPEQ8() error {
 	outB := make([]float32, rowsB)
 	outC := make([]float32, rowsC)
 	if err := VulkanChainedRMSNormFusedQKVMRoPEQ8(outA, outB, outC, x, normWeight, cosTable, sinTable, qa, qb, qc, n, kvHeads, headDim); err != nil {
+		return err
+	}
+	return nil
+}
+
+func probeVulkanChainedQKVAttentionOutAddRMSNormF32() error {
+	// Small dims: hidden=8, numHeads=2, kvHeads=1, headDim=4
+	hidden := 8
+	numHeads := 2
+	kvHeads := 1
+	headDim := 4
+	qRows := numHeads * headDim
+	kvRows := kvHeads * headDim
+	cacheLen := 3
+
+	x := make([]float32, hidden)
+	for i := range x {
+		x[i] = float32(i+1) * 0.1
+	}
+	wa := make([]float32, qRows*hidden)
+	wb := make([]float32, kvRows*hidden)
+	wc := make([]float32, kvRows*hidden)
+	for i := range wa {
+		wa[i] = 0.01
+	}
+	for i := range wb {
+		wb[i] = 0.01
+	}
+	for i := range wc {
+		wc[i] = 0.01
+	}
+	half := headDim / 2
+	cosTable := make([]float32, half)
+	sinTable := make([]float32, half)
+	for i := range cosTable {
+		angle := float64(i) / float64(half) * 0.5
+		cosTable[i] = float32(math.Cos(angle))
+		sinTable[i] = float32(math.Sin(angle))
+	}
+	w := make([]float32, qRows*qRows)
+	for i := range w {
+		w[i] = 0.01
+	}
+	bias := make([]float32, qRows)
+	normWeight := make([]float32, qRows)
+	for i := range normWeight {
+		normWeight[i] = 1.0
+	}
+	kvDim := kvRows
+	kCache := make([]float32, (cacheLen+1)*kvDim)
+	vCache := make([]float32, (cacheLen+1)*kvDim)
+	for i := range kCache {
+		kCache[i] = 0.1
+		vCache[i] = 0.1
+	}
+	normOut := make([]float32, qRows)
+	residual := make([]float32, qRows)
+	for i := range residual {
+		residual[i] = 0.05
+	}
+	outK := make([]float32, kvRows)
+	outV := make([]float32, kvRows)
+	if err := VulkanChainedQKVMRoPEAttentionOutAddRMSNormF32(
+		normOut, residual, x,
+		wa, wb, wc,
+		cosTable, sinTable,
+		w, bias, normWeight,
+		kCache, vCache,
+		0, cacheLen, hidden, numHeads, kvHeads, headDim,
+		outK, outV,
+	); err != nil {
 		return err
 	}
 	return nil

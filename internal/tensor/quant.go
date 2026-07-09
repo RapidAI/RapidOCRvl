@@ -934,6 +934,12 @@ func matVecQ8Serial(out, x []float32, q *Q8Matrix, start, end int) {
 	}
 }
 
+// MatVecQ8BiasSerial computes out[start:end] = q*x + bias for the specified rows,
+// without parallelization. Safe for concurrent use across different output ranges.
+func MatVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, end int) {
+	matVecQ8BiasSerial(out, x, q, bias, start, end)
+}
+
 func matVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, end int) {
 	for r := start; r < end; r++ {
 		base := r * q.Cols

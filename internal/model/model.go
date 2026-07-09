@@ -197,6 +197,7 @@ const (
 	vulkanOpChainedMatVecAddRMSNormMatVecF32
 	vulkanOpChainedRMSNormQKVMRoPEF32
 	vulkanOpChainedRMSNormQKVMRoPEQ8
+	vulkanOpChainedQKVAttentionOutAddRMSNormF32
 )
 
 var vulkanOpNames = [...]string{
@@ -284,6 +285,7 @@ var vulkanOpNames = [...]string{
 	vulkanOpChainedMatVecAddRMSNormMatVecF32:    "chained_matvec_add_rmsnorm_matvec_f32",
 	vulkanOpChainedRMSNormQKVMRoPEF32:           "chained_rmsnorm_qkv_mrope_f32",
 	vulkanOpChainedRMSNormQKVMRoPEQ8:            "chained_rmsnorm_qkv_mrope_q8",
+	vulkanOpChainedQKVAttentionOutAddRMSNormF32: "chained_qkv_attention_out_norm_f32",
 }
 
 type vulkanPlanCache struct {
@@ -3846,6 +3848,12 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
 		return out, false
 	}
+	// Try the full chain: QKV+MRoPE + attention+output+AddRMSNorm in one command buffer
+	// Only for F32 weights with RoPE.  Skips two separate submit+wait cycles.
+	if hasRoPE && tl.q8.q == nil && tl.q6.q == nil && tl.q4.q == nil &&
+		rt.vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		return nil, true
+	}
 	qkvHasRoPE := false
 	if hasRoPE {
 		qkvHasRoPE = rt.fusedQKVMRoPE(q, k, v, x, tl, qRows, kvRows, c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
@@ -4065,6 +4073,53 @@ func (rt *Runtime) vulkanTextCacheAttentionOutAddRMSNorm(normOut, residual, q []
 	return false
 }
 
+// vulkanChainedQKVAttentionOutAddRMSNorm chains the fused QKV+MRoPE dispatch
+// with attention+output+AddRMSNorm into a single command buffer.  The QKV
+// output (q/k/v) stays in GPU memory and is fed directly to the attention
+// kernel.  The new token's k/v is copied into the GPU KV cache buffer via
+// vkCmdCopyBuffer before the attention dispatch.  Only for F32 weights and
+// layers where cache.len > 0 (generation path, li > 0).
+func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x []float32, cache *kvCache, tl *textLayer, cosTable, sinTable, normWeight []float32, numHeads, kvHeads, headDim int) bool {
+	if !rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormF32) || tl == nil || cache == nil || cache.len <= 0 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 || headDim%2 != 0 {
+		return false
+	}
+	qRows := numHeads * headDim
+	kvRows := kvHeads * headDim
+	hidden := len(x)
+	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
+		return false
+	}
+	if len(normOut) < qRows || len(residual) < qRows || len(x) < hidden || len(normWeight) < qRows {
+		return false
+	}
+	if !f32MatVecWeightsReady(tl.w.q, qRows, hidden) || !f32MatVecWeightsReady(tl.w.k, kvRows, hidden) || !f32MatVecWeightsReady(tl.w.v, kvRows, hidden) || !f32MatVecWeightsReady(tl.w.o, qRows, qRows) {
+		return false
+	}
+	if !fusedMRoPEShapeOK(make([]float32, qRows), make([]float32, kvRows), numHeads, kvHeads, headDim, cosTable, sinTable) {
+		return false
+	}
+	if !textAttentionOutWorkReady(cache.len, numHeads, headDim, qRows, true) {
+		return false
+	}
+	kCache, vCache := cache.vulkanBufferSlices()
+	newK := make([]float32, kvRows)
+	newV := make([]float32, kvRows)
+	if err := backend.VulkanChainedQKVMRoPEAttentionOutAddRMSNormF32(
+		normOut, residual, x,
+		tl.w.q, tl.w.k, tl.w.v,
+		cosTable, sinTable,
+		tl.w.o, rt.zeroBias(qRows), normWeight,
+		kCache, vCache,
+		cache.epoch, cache.len, hidden, numHeads, kvHeads, headDim,
+		newK, newV,
+	); err == nil {
+		cache.append(newK, newV)
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedQKVAttentionOutAddRMSNormF32, err)
+	}
+	return false
+}
 func (rt *Runtime) vulkanTextFirstTokenValueOutAddRMSNorm(normOut, residual []float32, cache *kvCache, tl *textLayer, normWeight []float32, numHeads, kvHeads, headDim int) bool {
 	if tl == nil || cache == nil || cache.len != 1 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
 		return false

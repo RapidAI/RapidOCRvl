@@ -32,6 +32,8 @@ type visionWeights struct {
 	projNormW, projNormB []float32
 	proj1W, proj1B       []float32
 	proj2W, proj2B       []float32
+	proj1Q8              *tensor.Q8Matrix
+	proj2Q8              *tensor.Q8Matrix
 	layers               []visionLayerWeights
 	basePosRows          [][]float32
 }
@@ -269,6 +271,26 @@ func (rt *Runtime) cacheVisionWeights() {
 		proj2W:    rt.w["mlp_AR.linear_2.weight"],
 		proj2B:    rt.w["mlp_AR.linear_2.bias"],
 		layers:    make([]visionLayerWeights, rt.cfg.VisionConfig.NumHiddenLayers),
+	}
+	vd := rt.cfg.VisionConfig.HiddenSize
+	_ = rt.cfg.HiddenSize
+	// Quantize vision projection weights to Q8 for 4x less memory bandwidth.
+	// Dimensions are inferred from the weight tensor length: proj1 is (vd*4) x (vd*4),
+	// proj2 is td x (vd*4). Using len() ensures correct behavior even in tests with
+	// smaller-than-production weights.
+	if len(rt.vision.proj1W) > 0 {
+		cols1 := vd * 4
+		rows1 := len(rt.vision.proj1W) / cols1
+		if rows1*cols1 == len(rt.vision.proj1W) {
+			rt.vision.proj1Q8 = tensor.QuantizeQ8Row(rt.vision.proj1W, rows1, cols1)
+		}
+	}
+	if len(rt.vision.proj2W) > 0 {
+		cols2 := vd * 4
+		rows2 := len(rt.vision.proj2W) / cols2
+		if rows2*cols2 == len(rt.vision.proj2W) {
+			rt.vision.proj2Q8 = tensor.QuantizeQ8Row(rt.vision.proj2W, rows2, cols2)
+		}
 	}
 	for i := range rt.vision.layers {
 		rt.vision.layers[i] = rt.vlw(i)
@@ -967,9 +989,17 @@ func (rt *Runtime) projectImageRows(out, x [][]float32, grid vision.Grid, start,
 		tensor.LayerNorm(merged[vd:2*vd], x[base+1], rt.vision.projNormW, rt.vision.projNormB, 1e-5)
 		tensor.LayerNorm(merged[2*vd:3*vd], x[base+grid.W], rt.vision.projNormW, rt.vision.projNormB, 1e-5)
 		tensor.LayerNorm(merged[3*vd:4*vd], x[base+grid.W+1], rt.vision.projNormW, rt.vision.projNormB, 1e-5)
-		tensor.MatVecBiasSerial(hid, merged, rt.vision.proj1W, rt.vision.proj1B, vd*4, vd*4)
+		if rt.vision.proj1Q8 != nil {
+			tensor.MatVecQ8BiasSerial(hid, merged, rt.vision.proj1Q8, rt.vision.proj1B, 0, vd*4)
+		} else {
+			tensor.MatVecBiasSerial(hid, merged, rt.vision.proj1W, rt.vision.proj1B, vd*4, vd*4)
+		}
 		tensor.GELUTanhInPlace(hid)
-		tensor.MatVecBiasSerial(out[row], hid, rt.vision.proj2W, rt.vision.proj2B, td, vd*4)
+		if rt.vision.proj2Q8 != nil {
+			tensor.MatVecQ8BiasSerial(out[row], hid, rt.vision.proj2Q8, rt.vision.proj2B, 0, td)
+		} else {
+			tensor.MatVecBiasSerial(out[row], hid, rt.vision.proj2W, rt.vision.proj2B, td, vd*4)
+		}
 		bx++
 		base += 2
 		if bx == blocksW {

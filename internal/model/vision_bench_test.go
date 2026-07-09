@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"paddleocrvl-go/internal/config"
+	"paddleocrvl-go/internal/tensor"
 	"paddleocrvl-go/internal/vision"
 )
 
@@ -167,6 +168,8 @@ func newProjectImageBenchRuntime(vd, td int) *Runtime {
 	}
 	fillBenchFloat32(rt.vision.proj1W)
 	fillBenchFloat32(rt.vision.proj2W)
+	rt.vision.proj1Q8 = tensor.QuantizeQ8Row(rt.vision.proj1W, vd*4, vd*4)
+	rt.vision.proj2Q8 = tensor.QuantizeQ8Row(rt.vision.proj2W, td, vd*4)
 	return rt
 }
 

@@ -136,6 +136,14 @@ func (v *vulkanWin) cmdCopyBufferWin(cmd, src, dst uintptr, size uint64) {
 	v.callVoid(v.cmdCopyBuffer, cmd, src, dst, 1, uintptr(unsafe.Pointer(&region)))
 }
 
+// cmdCopyBufferOffsetWin copies size bytes from src to dst at the given
+// destination offset.  Used to append a single token's k/v into the KV cache
+// buffer during chained dispatches.
+func (v *vulkanWin) cmdCopyBufferOffsetWin(cmd, src, dst uintptr, dstOffset, size uint64) {
+	region := vkBufferCopy{SrcOffset: 0, DstOffset: dstOffset, Size: size}
+	v.callVoid(v.cmdCopyBuffer, cmd, src, dst, 1, uintptr(unsafe.Pointer(&region)))
+}
+
 // uploadToDevice copies host data to a device-local buffer via a staging
 // host-visible buffer and a vkCmdCopyBuffer recorded into the given command
 // buffer.  The staging buffer is allocated from the pool and returned for
