@@ -104,6 +104,7 @@ func maxAbsFloat32AVX2(x []float32) float32
 
 // Assembly helper declarations for VNNI kernels (provided by dot_vnni_amd64.s).
 func dotQ8VNNICore(a *int8, xq *uint8, n int) int32
+func dotQ8VNNICoreZMM(a *int8, xq *uint8, n int) int32
 func dotQ8PairVNNICore(a *int8, b *int8, xq *uint8, n int) (int32, int32)
 func dotQ8TripletVNNICore(a *int8, b *int8, c *int8, xq *uint8, n int) (int32, int32, int32)
 func rowSumQ8Asm(a *int8, n int) int32
@@ -121,7 +122,7 @@ func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) floa
 	}
 	var dot int32
 	if useVNNI {
-		dot = dotQ8VNNICore(&a[0], &xq[0], n)
+		dot = dotQ8VNNICoreZMM(&a[0], &xq[0], n)
 	} else {
 		for i := 0; i < n; i++ {
 			dot += int32(a[i]) * (int32(xq[i]) - 128)

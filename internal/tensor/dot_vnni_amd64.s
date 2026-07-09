@@ -454,3 +454,94 @@ GLOBL quantClamp255<>(SB), RODATA, $4
 
 DATA quantOffset128<>+0(SB)/4, $0x43000000
 GLOBL quantOffset128<>(SB), RODATA, $4
+
+// dotQ8VNNICoreZMM(a *int8, xq *uint8, n int) int32
+// ZMM (512-bit) version of dotQ8VNNICore. Each VPDPBUSD processes 64 int8 values.
+TEXT ·dotQ8VNNICoreZMM(SB), NOSPLIT, $0-32
+	MOVQ a+0(FP), SI
+	MOVQ xq+8(FP), DI
+	MOVQ n+16(FP), CX
+
+	VPXORD Z0, Z0, Z0
+	VPXORD Z1, Z1, Z1
+	VPXORD Z2, Z2, Z2
+	VPXORD Z3, Z3, Z3
+
+	CMPQ CX, $64
+	JB zmmCoreTail
+
+zmmCoreLoop:
+	CMPQ CX, $256
+	JB zmmCoreLoop128
+	// Process 256 elements: 4 x 64 = 256
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VMOVDQU64 128(DI), Z10
+	VPDPBUSD 128(SI), Z10, Z2
+	VMOVDQU64 192(DI), Z11
+	VPDPBUSD 192(SI), Z11, Z3
+	ADDQ $256, SI
+	ADDQ $256, DI
+	SUBQ $256, CX
+	JMP zmmCoreLoop
+
+zmmCoreLoop128:
+	CMPQ CX, $128
+	JB zmmCoreLoop64
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	ADDQ $128, SI
+	ADDQ $128, DI
+	SUBQ $128, CX
+	JMP zmmCoreLoop
+
+zmmCoreLoop64:
+	CMPQ CX, $64
+	JB zmmCoreReduce
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	ADDQ $64, SI
+	ADDQ $64, DI
+	SUBQ $64, CX
+	JMP zmmCoreLoop64
+
+zmmCoreReduce:
+	// Reduce Z0-Z3 (each has 16 int32 values)
+	VPADDD Z1, Z0, Z0
+	VPADDD Z3, Z2, Z2
+	VPADDD Z2, Z0, Z0
+	// Z0 has 16 int32 values. Extract upper 256 bits to Y1, add to lower.
+	VEXTRACTI64X4 $1, Z0, Y1
+	VPADDD Y1, Y0, Y0
+	// Y0 has 8 int32 values. Extract upper 128 bits.
+	VEXTRACTI128 $1, Y0, X2
+	VPADDD X2, X0, X0
+	VPSHUFD $0x4E, X0, X1
+	VPADDD X1, X0, X0
+	VPSHUFD $0xB1, X0, X1
+	VPADDD X1, X0, X0
+	VMOVD X0, AX
+	VZEROUPPER
+	MOVL AX, ret+24(FP)
+	RET
+
+zmmCoreTail:
+	XORL AX, AX
+zmmCoreTailLoop:
+	CMPQ CX, $0
+	JE zmmCoreTailDone
+	MOVBQSX (SI), R8
+	MOVBQZX (DI), R9
+	IMULL R8, R9
+	ADDL R9, AX
+	INCQ SI
+	INCQ DI
+	DECQ CX
+	JMP zmmCoreTailLoop
+zmmCoreTailDone:
+	MOVL AX, ret+24(FP)
+	RET
