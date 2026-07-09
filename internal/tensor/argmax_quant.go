@@ -71,7 +71,8 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 		workers = q.Rows
 	}
 	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
-		xq := make([]uint8, q.Cols)
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
 		if workers <= 1 {
 			data := q.Data
