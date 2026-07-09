@@ -302,6 +302,10 @@ func VulkanLayerChainQ8Win(
 
 	// Attention descriptor set
 	attDS := attRunner.descriptorSet
+	residualInputBuf := devResidual.buffer
+	if devInputReady {
+		residualInputBuf = swiRunner.devResidual.buffer
+	}
 	attInfos := [10]vkDescriptorBufferInfo{
 		{Buffer: devOutA.buffer, Range: qBytes},
 		{Buffer: devK.buffer, Range: fullCacheBytes},
@@ -310,7 +314,7 @@ func VulkanLayerChainQ8Win(
 		{Buffer: devWData.buffer, Range: wDataBytes},
 		{Buffer: devWScale.buffer, Range: wScaleBytes},
 		{Buffer: devFinal.buffer, Range: qBytes},
-		{Buffer: devResidual.buffer, Range: qBytes},
+		{Buffer: residualInputBuf, Range: qBytes},
 		{Buffer: devLn2Weight.buffer, Range: qBytes},
 		{Buffer: devNorm.buffer, Range: qBytes},
 	}
@@ -318,9 +322,15 @@ func VulkanLayerChainQ8Win(
 	updateVulkanDescriptorBuffersWin(vk, device, attDS, attDSCache[:], attInfos[:])
 
 	// RMSNorm descriptor set
+	// When devInputReady, read input from previous layer's MLP output (swiRunner.devNorm)
+	// and write to devX. Otherwise, read+write devX (uploaded from host).
 	rmsDS := normRunner.descriptorSet
+	rmsInputBuf := devX.buffer
+	if devInputReady {
+		rmsInputBuf = swiRunner.devNorm.buffer
+	}
 	rmsInfos := [3]vkDescriptorBufferInfo{
-		{Buffer: devX.buffer, Range: xBytes},
+		{Buffer: rmsInputBuf, Range: xBytes},
 		{Buffer: devLn1Weight.buffer, Range: xBytes},
 		{Buffer: devX.buffer, Range: xBytes},
 	}
@@ -353,8 +363,12 @@ func VulkanLayerChainQ8Win(
 
 	// MLP norm descriptor set - use attRunner.devResidual as residual input
 	normDS := swiRunner.normDescriptorSet
+	mlpResidualBuf := devResidual.buffer
+	if devInputReady {
+		mlpResidualBuf = swiRunner.devResidual.buffer
+	}
 	normInfos := [4]vkDescriptorBufferInfo{
-		{Buffer: devResidual.buffer, Range: outBytes}, // residual from attention chain
+		{Buffer: mlpResidualBuf, Range: outBytes}, // residual from attention chain
 		{Buffer: devMlpOut.buffer, Range: outBytes},
 		{Buffer: devMlpNormWeight.buffer, Range: outBytes},
 		{Buffer: devMlpNorm.buffer, Range: outBytes},
@@ -373,12 +387,7 @@ func VulkanLayerChainQ8Win(
 	}
 
 	// === Upload phase (attention) ===
-	if devInputReady {
-		// Copy from previous layer's MLP output (device-local, no host round-trip)
-		vk.cmdCopyBufferOffsetWin(cmd, swiRunner.devNorm.buffer, devX.buffer, 0, xBytes)
-		vk.cmdCopyBufferOffsetWin(cmd, swiRunner.devResidual.buffer, devResidual.buffer, 0, qBytes)
-		vk.computeBarrier(cmd)
-	} else {
+	if !devInputReady {
 		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devX, rawInput[:hidden]); err != nil {
 			return fmt.Errorf("upload rawInput: %w", err)
 		}
@@ -398,11 +407,7 @@ func VulkanLayerChainQ8Win(
 			return fmt.Errorf("upload sin: %w", err)
 		}
 	}
-	if !devInputReady {
-		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devResidual, residual[:qRows]); err != nil {
-			return fmt.Errorf("upload residual: %w", err)
-		}
-	}
+
 	if ln2Upload {
 		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devLn2Weight, ln2Weight[:qRows]); err != nil {
 			return fmt.Errorf("upload ln2Weight: %w", err)
