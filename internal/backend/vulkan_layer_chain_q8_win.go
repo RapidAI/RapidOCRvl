@@ -30,6 +30,7 @@ func VulkanLayerChainQ8Win(
 	outK, outV []float32,
 	mlpGate, mlpUp, mlpDown *tensor.Q8Matrix,
 	mlpNormWeight []float32,
+	devInputReady bool,
 ) error {
 	if qA == nil || qB == nil || qC == nil || attW == nil || mlpGate == nil || mlpUp == nil || mlpDown == nil {
 		return fmt.Errorf("nil Vulkan q8 layer chain matrix")
@@ -372,8 +373,15 @@ func VulkanLayerChainQ8Win(
 	}
 
 	// === Upload phase (attention) ===
-	if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devX, rawInput[:hidden]); err != nil {
-		return fmt.Errorf("upload rawInput: %w", err)
+	if devInputReady {
+		// Copy from previous layer's MLP output (device-local, no host round-trip)
+		vk.cmdCopyBufferOffsetWin(cmd, swiRunner.devNorm.buffer, devX.buffer, 0, xBytes)
+		vk.cmdCopyBufferOffsetWin(cmd, swiRunner.devResidual.buffer, devResidual.buffer, 0, qBytes)
+		vk.computeBarrier(cmd)
+	} else {
+		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devX, rawInput[:hidden]); err != nil {
+			return fmt.Errorf("upload rawInput: %w", err)
+		}
 	}
 	if ln1Upload {
 		if err := vk.uploadFloat32ToDevice(device, cmd, qkvRunner.memProps, stagingFloat, devLn1Weight, ln1Weight[:hidden]); err != nil {
@@ -390,8 +398,10 @@ func VulkanLayerChainQ8Win(
 			return fmt.Errorf("upload sin: %w", err)
 		}
 	}
-	if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devResidual, residual[:qRows]); err != nil {
-		return fmt.Errorf("upload residual: %w", err)
+	if !devInputReady {
+		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devResidual, residual[:qRows]); err != nil {
+			return fmt.Errorf("upload residual: %w", err)
+		}
 	}
 	if ln2Upload {
 		if err := vk.uploadFloat32ToDevice(device, cmd, attRunner.memProps, stagingFloat, devLn2Weight, ln2Weight[:qRows]); err != nil {

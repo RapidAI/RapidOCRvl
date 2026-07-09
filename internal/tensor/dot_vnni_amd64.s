@@ -126,15 +126,59 @@ TEXT ·rowSumQ8Asm(SB), NOSPLIT, $0-24
 	MOVQ a+0(FP), SI
 	MOVQ n+8(FP), CX
 	XORL AX, AX
-rowSumLoop:
+	VPXOR X0, X0, X0
+	VPXOR X1, X1, X1
+
+	CMPQ CX, $32
+	JB rowSumTail
+
+rowSumLoop32:
+	CMPQ CX, $32
+	JB rowSumReduce
+	// Load 8 bytes at a time, sign-extend to 8 int16, accumulate
+	MOVQ (SI), R8
+	MOVQ R8, X2
+	VPMOVSXBW X2, X3
+	VPADDW X3, X0, X0
+	MOVQ 8(SI), R8
+	MOVQ R8, X2
+	VPMOVSXBW X2, X3
+	VPADDW X3, X1, X1
+	MOVQ 16(SI), R8
+	MOVQ R8, X2
+	VPMOVSXBW X2, X3
+	VPADDW X3, X0, X0
+	MOVQ 24(SI), R8
+	MOVQ R8, X2
+	VPMOVSXBW X2, X3
+	VPADDW X3, X1, X1
+	ADDQ $32, SI
+	SUBQ $32, CX
+	JMP rowSumLoop32
+
+rowSumReduce:
+	VPADDW X1, X0, X0
+	VPSHUFD $0x4E, X0, X1
+	VPADDW X1, X0, X0
+	VPSHUFD $0xB1, X0, X1
+	VPADDW X1, X0, X0
+	VMOVQ X0, AX
+	MOVSX AX, AX
+	MOVL AX, ret+16(FP)
+	VZEROUPPER
+	RET
+
+rowSumTail:
+	XORL AX, AX
+rowSumTailLoop:
 	CMPQ CX, $0
-	JE rowSumDone
+	JE rowSumTailDone
 	MOVBQSX (SI), R8
 	ADDL R8, AX
 	INCQ SI
 	DECQ CX
-	JMP rowSumLoop
-rowSumDone:
+	JMP rowSumTailLoop
+rowSumTailDone:
 	MOVL AX, ret+16(FP)
 	RET
 
