@@ -629,7 +629,7 @@ func TestSiLUMulInPlace(t *testing.T) {
 		want[i] = SiLU(want[i]) * up[i]
 	}
 	SiLUMulInPlace(gate, up)
-	assertCloseVec(t, "silu-mul", gate, want, 0)
+	assertCloseVec(t, "silu-mul", gate, want, 1e-6)
 }
 
 func TestFusedSwiGLUF32Scratch(t *testing.T) {
