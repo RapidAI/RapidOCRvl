@@ -578,21 +578,114 @@ func MatVecQ4AddRMSNorm(normOut, residual, x []float32, down *Q4Matrix, normWeig
 }
 
 func matVecQ4InPlaceAddSumSquaresSerial(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
-	var ss float32
 	if q.Unpacked != nil {
-		for i := start; i < end; i++ {
-			base := i * q.Cols
-			v := residual[i] + dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
-			residual[i] = v
-			out[i] = v
-			ss += v * v
-		}
-		return ss
+		return matVecQ4InPlaceAddSumSquaresUnpacked(out, residual, x, q, start, end)
 	}
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	packedCols := (q.Cols + 1) / 2
-	for i := start; i < end; i++ {
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * packedCols
+		b1 := (i + 1) * packedCols
+		b2 := (i + 2) * packedCols
+		b3 := (i + 3) * packedCols
+		b4 := (i + 4) * packedCols
+		b5 := (i + 5) * packedCols
+		b6 := (i + 6) * packedCols
+		b7 := (i + 7) * packedCols
+		v0 := residual[i] + dotQ4(q.Data[b0:b0+packedCols], x, q.Cols)*q.Scale[i]
+		v1 := residual[i+1] + dotQ4(q.Data[b1:b1+packedCols], x, q.Cols)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ4(q.Data[b2:b2+packedCols], x, q.Cols)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ4(q.Data[b3:b3+packedCols], x, q.Cols)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ4(q.Data[b4:b4+packedCols], x, q.Cols)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ4(q.Data[b5:b5+packedCols], x, q.Cols)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ4(q.Data[b6:b6+packedCols], x, q.Cols)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ4(q.Data[b7:b7+packedCols], x, q.Cols)*q.Scale[i+7]
+		residual[i] = v0
+		residual[i+1] = v1
+		residual[i+2] = v2
+		residual[i+3] = v3
+		residual[i+4] = v4
+		residual[i+5] = v5
+		residual[i+6] = v6
+		residual[i+7] = v7
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
 		base := i * packedCols
 		v := residual[i] + dotQ4(q.Data[base:base+packedCols], x, q.Cols)*q.Scale[i]
+		residual[i] = v
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ4InPlaceAddSumSquaresUnpacked(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * q.Cols
+		b1 := (i + 1) * q.Cols
+		b2 := (i + 2) * q.Cols
+		b3 := (i + 3) * q.Cols
+		b4 := (i + 4) * q.Cols
+		b5 := (i + 5) * q.Cols
+		b6 := (i + 6) * q.Cols
+		b7 := (i + 7) * q.Cols
+		v0 := residual[i] + dotQ4Unpacked(q.Unpacked[b0:b0+q.Cols], x)*q.Scale[i]
+		v1 := residual[i+1] + dotQ4Unpacked(q.Unpacked[b1:b1+q.Cols], x)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ4Unpacked(q.Unpacked[b2:b2+q.Cols], x)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ4Unpacked(q.Unpacked[b3:b3+q.Cols], x)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ4Unpacked(q.Unpacked[b4:b4+q.Cols], x)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ4Unpacked(q.Unpacked[b5:b5+q.Cols], x)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ4Unpacked(q.Unpacked[b6:b6+q.Cols], x)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ4Unpacked(q.Unpacked[b7:b7+q.Cols], x)*q.Scale[i+7]
+		residual[i] = v0
+		residual[i+1] = v1
+		residual[i+2] = v2
+		residual[i+3] = v3
+		residual[i+4] = v4
+		residual[i+5] = v5
+		residual[i+6] = v6
+		residual[i+7] = v7
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		base := i * q.Cols
+		v := residual[i] + dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
 		residual[i] = v
 		out[i] = v
 		ss += v * v
@@ -666,20 +759,97 @@ func MatVecQ4AddRMSNormOutOnly(normOut, residual, x []float32, down *Q4Matrix, n
 }
 
 func matVecQ4AddSumSquaresSerial(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
-	var ss float32
 	if q.Unpacked != nil {
-		for i := start; i < end; i++ {
-			base := i * q.Cols
-			v := residual[i] + dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
-			out[i] = v
-			ss += v * v
-		}
-		return ss
+		return matVecQ4AddSumSquaresUnpacked(out, residual, x, q, start, end)
 	}
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	packedCols := (q.Cols + 1) / 2
-	for i := start; i < end; i++ {
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * packedCols
+		b1 := (i + 1) * packedCols
+		b2 := (i + 2) * packedCols
+		b3 := (i + 3) * packedCols
+		b4 := (i + 4) * packedCols
+		b5 := (i + 5) * packedCols
+		b6 := (i + 6) * packedCols
+		b7 := (i + 7) * packedCols
+		v0 := residual[i] + dotQ4(q.Data[b0:b0+packedCols], x, q.Cols)*q.Scale[i]
+		v1 := residual[i+1] + dotQ4(q.Data[b1:b1+packedCols], x, q.Cols)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ4(q.Data[b2:b2+packedCols], x, q.Cols)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ4(q.Data[b3:b3+packedCols], x, q.Cols)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ4(q.Data[b4:b4+packedCols], x, q.Cols)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ4(q.Data[b5:b5+packedCols], x, q.Cols)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ4(q.Data[b6:b6+packedCols], x, q.Cols)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ4(q.Data[b7:b7+packedCols], x, q.Cols)*q.Scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
 		base := i * packedCols
 		v := residual[i] + dotQ4(q.Data[base:base+packedCols], x, q.Cols)*q.Scale[i]
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ4AddSumSquaresUnpacked(out, residual, x []float32, q *Q4Matrix, start, end int) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * q.Cols
+		b1 := (i + 1) * q.Cols
+		b2 := (i + 2) * q.Cols
+		b3 := (i + 3) * q.Cols
+		b4 := (i + 4) * q.Cols
+		b5 := (i + 5) * q.Cols
+		b6 := (i + 6) * q.Cols
+		b7 := (i + 7) * q.Cols
+		v0 := residual[i] + dotQ4Unpacked(q.Unpacked[b0:b0+q.Cols], x)*q.Scale[i]
+		v1 := residual[i+1] + dotQ4Unpacked(q.Unpacked[b1:b1+q.Cols], x)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ4Unpacked(q.Unpacked[b2:b2+q.Cols], x)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ4Unpacked(q.Unpacked[b3:b3+q.Cols], x)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ4Unpacked(q.Unpacked[b4:b4+q.Cols], x)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ4Unpacked(q.Unpacked[b5:b5+q.Cols], x)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ4Unpacked(q.Unpacked[b6:b6+q.Cols], x)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ4Unpacked(q.Unpacked[b7:b7+q.Cols], x)*q.Scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		base := i * q.Cols
+		v := residual[i] + dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
 		out[i] = v
 		ss += v * v
 	}
@@ -753,21 +923,114 @@ func MatVecQ6AddRMSNorm(normOut, residual, x []float32, down *Q6Matrix, normWeig
 }
 
 func matVecQ6InPlaceAddSumSquaresSerial(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
-	var ss float32
 	if q.Unpacked != nil {
-		for i := start; i < end; i++ {
-			base := i * q.Cols
-			v := residual[i] + dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
-			residual[i] = v
-			out[i] = v
-			ss += v * v
-		}
-		return ss
+		return matVecQ6InPlaceAddSumSquaresUnpacked(out, residual, x, q, start, end)
 	}
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	packedCols := PackedQ6Cols(q.Cols)
-	for i := start; i < end; i++ {
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * packedCols
+		b1 := (i + 1) * packedCols
+		b2 := (i + 2) * packedCols
+		b3 := (i + 3) * packedCols
+		b4 := (i + 4) * packedCols
+		b5 := (i + 5) * packedCols
+		b6 := (i + 6) * packedCols
+		b7 := (i + 7) * packedCols
+		v0 := residual[i] + dotQ6(q.Data[b0:b0+packedCols], x, q.Cols)*q.Scale[i]
+		v1 := residual[i+1] + dotQ6(q.Data[b1:b1+packedCols], x, q.Cols)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ6(q.Data[b2:b2+packedCols], x, q.Cols)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ6(q.Data[b3:b3+packedCols], x, q.Cols)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ6(q.Data[b4:b4+packedCols], x, q.Cols)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ6(q.Data[b5:b5+packedCols], x, q.Cols)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ6(q.Data[b6:b6+packedCols], x, q.Cols)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ6(q.Data[b7:b7+packedCols], x, q.Cols)*q.Scale[i+7]
+		residual[i] = v0
+		residual[i+1] = v1
+		residual[i+2] = v2
+		residual[i+3] = v3
+		residual[i+4] = v4
+		residual[i+5] = v5
+		residual[i+6] = v6
+		residual[i+7] = v7
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
 		base := i * packedCols
 		v := residual[i] + dotQ6(q.Data[base:base+packedCols], x, q.Cols)*q.Scale[i]
+		residual[i] = v
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ6InPlaceAddSumSquaresUnpacked(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * q.Cols
+		b1 := (i + 1) * q.Cols
+		b2 := (i + 2) * q.Cols
+		b3 := (i + 3) * q.Cols
+		b4 := (i + 4) * q.Cols
+		b5 := (i + 5) * q.Cols
+		b6 := (i + 6) * q.Cols
+		b7 := (i + 7) * q.Cols
+		v0 := residual[i] + dotQ6Unpacked(q.Unpacked[b0:b0+q.Cols], x)*q.Scale[i]
+		v1 := residual[i+1] + dotQ6Unpacked(q.Unpacked[b1:b1+q.Cols], x)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ6Unpacked(q.Unpacked[b2:b2+q.Cols], x)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ6Unpacked(q.Unpacked[b3:b3+q.Cols], x)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ6Unpacked(q.Unpacked[b4:b4+q.Cols], x)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ6Unpacked(q.Unpacked[b5:b5+q.Cols], x)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ6Unpacked(q.Unpacked[b6:b6+q.Cols], x)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ6Unpacked(q.Unpacked[b7:b7+q.Cols], x)*q.Scale[i+7]
+		residual[i] = v0
+		residual[i+1] = v1
+		residual[i+2] = v2
+		residual[i+3] = v3
+		residual[i+4] = v4
+		residual[i+5] = v5
+		residual[i+6] = v6
+		residual[i+7] = v7
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		base := i * q.Cols
+		v := residual[i] + dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
 		residual[i] = v
 		out[i] = v
 		ss += v * v
@@ -841,20 +1104,97 @@ func MatVecQ6AddRMSNormOutOnly(normOut, residual, x []float32, down *Q6Matrix, n
 }
 
 func matVecQ6AddSumSquaresSerial(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
-	var ss float32
 	if q.Unpacked != nil {
-		for i := start; i < end; i++ {
-			base := i * q.Cols
-			v := residual[i] + dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
-			out[i] = v
-			ss += v * v
-		}
-		return ss
+		return matVecQ6AddSumSquaresUnpacked(out, residual, x, q, start, end)
 	}
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
 	packedCols := PackedQ6Cols(q.Cols)
-	for i := start; i < end; i++ {
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * packedCols
+		b1 := (i + 1) * packedCols
+		b2 := (i + 2) * packedCols
+		b3 := (i + 3) * packedCols
+		b4 := (i + 4) * packedCols
+		b5 := (i + 5) * packedCols
+		b6 := (i + 6) * packedCols
+		b7 := (i + 7) * packedCols
+		v0 := residual[i] + dotQ6(q.Data[b0:b0+packedCols], x, q.Cols)*q.Scale[i]
+		v1 := residual[i+1] + dotQ6(q.Data[b1:b1+packedCols], x, q.Cols)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ6(q.Data[b2:b2+packedCols], x, q.Cols)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ6(q.Data[b3:b3+packedCols], x, q.Cols)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ6(q.Data[b4:b4+packedCols], x, q.Cols)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ6(q.Data[b5:b5+packedCols], x, q.Cols)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ6(q.Data[b6:b6+packedCols], x, q.Cols)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ6(q.Data[b7:b7+packedCols], x, q.Cols)*q.Scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
 		base := i * packedCols
 		v := residual[i] + dotQ6(q.Data[base:base+packedCols], x, q.Cols)*q.Scale[i]
+		out[i] = v
+		ss += v * v
+	}
+	return ss
+}
+
+func matVecQ6AddSumSquaresUnpacked(out, residual, x []float32, q *Q6Matrix, start, end int) float32 {
+	var s0, s1, s2, s3, s4, s5, s6, s7 float32
+	i := start
+	for ; i+7 < end; i += 8 {
+		b0 := i * q.Cols
+		b1 := (i + 1) * q.Cols
+		b2 := (i + 2) * q.Cols
+		b3 := (i + 3) * q.Cols
+		b4 := (i + 4) * q.Cols
+		b5 := (i + 5) * q.Cols
+		b6 := (i + 6) * q.Cols
+		b7 := (i + 7) * q.Cols
+		v0 := residual[i] + dotQ6Unpacked(q.Unpacked[b0:b0+q.Cols], x)*q.Scale[i]
+		v1 := residual[i+1] + dotQ6Unpacked(q.Unpacked[b1:b1+q.Cols], x)*q.Scale[i+1]
+		v2 := residual[i+2] + dotQ6Unpacked(q.Unpacked[b2:b2+q.Cols], x)*q.Scale[i+2]
+		v3 := residual[i+3] + dotQ6Unpacked(q.Unpacked[b3:b3+q.Cols], x)*q.Scale[i+3]
+		v4 := residual[i+4] + dotQ6Unpacked(q.Unpacked[b4:b4+q.Cols], x)*q.Scale[i+4]
+		v5 := residual[i+5] + dotQ6Unpacked(q.Unpacked[b5:b5+q.Cols], x)*q.Scale[i+5]
+		v6 := residual[i+6] + dotQ6Unpacked(q.Unpacked[b6:b6+q.Cols], x)*q.Scale[i+6]
+		v7 := residual[i+7] + dotQ6Unpacked(q.Unpacked[b7:b7+q.Cols], x)*q.Scale[i+7]
+		out[i] = v0
+		out[i+1] = v1
+		out[i+2] = v2
+		out[i+3] = v3
+		out[i+4] = v4
+		out[i+5] = v5
+		out[i+6] = v6
+		out[i+7] = v7
+		s0 += v0 * v0
+		s1 += v1 * v1
+		s2 += v2 * v2
+		s3 += v3 * v3
+		s4 += v4 * v4
+		s5 += v5 * v5
+		s6 += v6 * v6
+		s7 += v7 * v7
+	}
+	ss := (s0 + s1) + (s2 + s3) + (s4 + s5) + (s6 + s7)
+	for ; i < end; i++ {
+		base := i * q.Cols
+		v := residual[i] + dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x)*q.Scale[i]
 		out[i] = v
 		ss += v * v
 	}
