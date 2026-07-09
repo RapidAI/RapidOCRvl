@@ -738,8 +738,8 @@ func matVecQ8SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q8M
 				defer putInt32Scratch(scratchA)
 				defer putInt32Scratch(scratchB)
 				dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &scratchA[0], &scratchB[0], batchSize, cols)
-				finalizeDotQ8VNNI(&scratchA[0], &gRowSum[start], &gScale[start], &out[start], batchSize, scaleX)
-				finalizeDotQ8VNNI(&scratchB[0], &uRowSum[start], &uScale[start], &tmpU[start], batchSize, scaleX)
+				finalizeDotQ8PairVNNI(&scratchA[0], &gRowSum[start], &gScale[start], &out[start],
+					&scratchB[0], &uRowSum[start], &uScale[start], &tmpU[start], batchSize, scaleX)
 				SiLUMulInPlace(out[start:end], tmpU[start:end])
 				return
 			}

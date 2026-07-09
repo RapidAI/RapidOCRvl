@@ -1091,3 +1091,103 @@ finTail:
 
 finRet:
 	RET
+
+// finalizeDotQ8PairVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32,
+//   dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32, n int, scaleX float32)
+// Computes outA[i] = float32(dotsA[i] - 128*rowSumA[i]) * scaleX * scaleA[i]
+// and   outB[i] = float32(dotsB[i] - 128*rowSumB[i]) * scaleX * scaleB[i]
+// Processes 8 elements per iteration using YMM registers.
+TEXT ·finalizeDotQ8PairVNNI(SB), NOSPLIT, $0-80
+	MOVQ dotsA_base+0(FP), SI
+	MOVQ rowSumA_base+8(FP), DI
+	MOVQ scaleA_base+16(FP), DX
+	MOVQ outA_base+24(FP), CX
+	MOVQ dotsB_base+32(FP), R8
+	MOVQ rowSumB_base+40(FP), R10
+	MOVQ scaleB_base+48(FP), R11
+	MOVQ outB_base+56(FP), R12
+	MOVQ n+64(FP), R9
+	VBROADCASTSS scaleX+72(FP), Y1
+	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+
+	CMPQ R9, $8
+	JB finPairTail
+
+finPairLoop:
+	CMPQ R9, $8
+	JB finPairDone
+	// Process A: outA = (dotsA - 128*rowSumA) * scaleX * scaleA
+	VMOVDQU (SI), Y0         // 8 int32 dotsA
+	VMOVDQU (DI), Y3         // 8 int32 rowSumA
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3        // 128 * rowSumA
+	VSUBPS Y3, Y0, Y0        // dotsA - 128*rowSumA
+	VMOVUPS (DX), Y4         // scaleA
+	VMULPS Y1, Y0, Y0        // * scaleX
+	VMULPS Y4, Y0, Y0        // * scaleA
+	VMOVUPS Y0, (CX)         // store outA
+
+	// Process B: outB = (dotsB - 128*rowSumB) * scaleX * scaleB
+	VMOVDQU (R8), Y0         // 8 int32 dotsB
+	VMOVDQU (R10), Y3        // 8 int32 rowSumB
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3        // 128 * rowSumB
+	VSUBPS Y3, Y0, Y0        // dotsB - 128*rowSumB
+	VMOVUPS (R11), Y5        // scaleB
+	VMULPS Y1, Y0, Y0        // * scaleX
+	VMULPS Y5, Y0, Y0        // * scaleB
+	VMOVUPS Y0, (R12)        // store outB
+
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $32, CX
+	ADDQ $32, R8
+	ADDQ $32, R10
+	ADDQ $32, R11
+	ADDQ $32, R12
+	SUBQ $8, R9
+	JMP finPairLoop
+
+finPairDone:
+	VZEROUPPER
+finPairTail:
+	CMPQ R9, $0
+	JE finPairRet
+	// Scalar tail for A
+	MOVL (SI), AX
+	MOVL (DI), R13
+	IMULL $128, R13
+	SUBL R13, AX
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+72(FP), X0, X0
+	MOVSS (DX), X1
+	VMULSS X1, X0, X0
+	MOVSS X0, (CX)
+	// Scalar tail for B
+	MOVL (R8), AX
+	MOVL (R10), R13
+	IMULL $128, R13
+	SUBL R13, AX
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+72(FP), X0, X0
+	MOVSS (R11), X1
+	VMULSS X1, X0, X0
+	MOVSS X0, (R12)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	ADDQ $4, R10
+	ADDQ $4, R11
+	ADDQ $4, R12
+	DECQ R9
+	JMP finPairTail
+
+finPairRet:
+	RET

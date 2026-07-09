@@ -111,6 +111,7 @@ func dotQ8VNNICoreMultiRowZMM(a *int8, xq *uint8, out *int32, rows int, cols int
 func dotQ8PairVNNICoreMultiRowZMM(a *int8, b *int8, xq *uint8, outA *int32, outB *int32, rows int, cols int)
 func dotQ8TripletVNNICoreMultiRowZMM(a *int8, b *int8, c *int8, xq *uint8, outA *int32, outB *int32, outC *int32, rows int, cols int)
 func finalizeDotQ8VNNI(dots *int32, rowSum *int32, scale *float32, out *float32, n int, scaleX float32)
+func finalizeDotQ8PairVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32, dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32, n int, scaleX float32)
 func rowSumQ8Asm(a *int8, n int) int32
 func quantizeXForVNNIAsm(x_base *float32, xq_base *uint8, n int, inv float32)
 
