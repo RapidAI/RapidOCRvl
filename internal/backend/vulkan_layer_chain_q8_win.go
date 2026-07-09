@@ -617,33 +617,55 @@ func VulkanLayerChainQ8Win(
 	vk.callVoid(vk.cmdPushConstants, cmd, swiRunner.normPipelineLayout, vkShaderStageComputeBit, 0, uintptr(8), uintptr(unsafe.Pointer(&mlpPC[0])))
 	vk.callVoid(vk.cmdDispatch, cmd, 1, 1, 1)
 
-	// === Readback phase ===
+	// === Readback phase (batched barriers) ===
 	readbackNorm := &swiRunner.readbackNorm
 	readbackResidual := &swiRunner.readbackResidual
 	readbackK := &attRunner.readbackK
 	readbackV := &attRunner.readbackV
 
+	// Ensure host buffers are sized
 	if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackNorm, outBytes); err != nil {
 		return fmt.Errorf("readback mlp norm: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devMlpNorm, readbackNorm, outBytes)
-
 	if readResidual {
 		if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackResidual, outBytes); err != nil {
 			return fmt.Errorf("readback mlp residual: %w", err)
 		}
-		vk.readbackFromDevice(cmd, devMlpResidual, readbackResidual, outBytes)
 	}
-
 	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackK, uint64(kvRows)*4); err != nil {
 		return fmt.Errorf("readback k: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devOutB, readbackK, uint64(kvRows)*4)
-
 	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackV, uint64(kvRows)*4); err != nil {
 		return fmt.Errorf("readback v: %w", err)
 	}
-	vk.readbackFromDevice(cmd, devOutC, readbackV, uint64(kvRows)*4)
+
+	// Single compute->transfer barrier before all copies
+	devBarrier := vkMemoryBarrier{
+		SType:         vkStructureTypeMemoryBarrier,
+		SrcAccessMask: vkAccessShaderWriteBit,
+		DstAccessMask: vkAccessTransferReadBit,
+	}
+	vk.callVoid(vk.cmdPipelineBarrier, cmd,
+		vkPipelineStageComputeShaderBit, vkPipelineStageTransferBit,
+		0, 1, uintptr(unsafe.Pointer(&devBarrier)), 0, 0, 0, 0)
+
+	// All copies (no barriers between them)
+	vk.cmdCopyBufferWin(cmd, devMlpNorm.buffer, readbackNorm.buffer, outBytes)
+	if readResidual {
+		vk.cmdCopyBufferWin(cmd, devMlpResidual.buffer, readbackResidual.buffer, outBytes)
+	}
+	vk.cmdCopyBufferWin(cmd, devOutB.buffer, readbackK.buffer, uint64(kvRows)*4)
+	vk.cmdCopyBufferWin(cmd, devOutC.buffer, readbackV.buffer, uint64(kvRows)*4)
+
+	// Single transfer->host barrier after all copies
+	hostBarrier := vkMemoryBarrier{
+		SType:         vkStructureTypeMemoryBarrier,
+		SrcAccessMask: vkAccessTransferWriteBit,
+		DstAccessMask: 0,
+	}
+	vk.callVoid(vk.cmdPipelineBarrier, cmd,
+		vkPipelineStageTransferBit, vkPipelineStageHostBit,
+		0, 1, uintptr(unsafe.Pointer(&hostBarrier)), 0, 0, 0, 0)
 
 	if res := vk.call(vk.endCommandBuffer, cmd); res != vkSuccess {
 		return fmt.Errorf("vkEndCommandBuffer layer chain: %d", int32(res))
