@@ -1137,12 +1137,12 @@ func SoftmaxInPlace(x []float32) {
 	case 2:
 		a, b := x[0], x[1]
 		if a >= b {
-			e := float32(math.Exp(float64(b - a)))
+			e := FastExpF32(b - a)
 			inv := 1 / (1 + e)
 			x[0] = inv
 			x[1] = e * inv
 		} else {
-			e := float32(math.Exp(float64(a - b)))
+			e := FastExpF32(a - b)
 			inv := 1 / (1 + e)
 			x[0] = e * inv
 			x[1] = inv
@@ -1151,9 +1151,9 @@ func SoftmaxInPlace(x []float32) {
 	case 3:
 		a, b, c := x[0], x[1], x[2]
 		m := max32(max32(a, b), c)
-		e0 := float32(math.Exp(float64(a - m)))
-		e1 := float32(math.Exp(float64(b - m)))
-		e2 := float32(math.Exp(float64(c - m)))
+		e0 := FastExpF32(a - m)
+		e1 := FastExpF32(b - m)
+		e2 := FastExpF32(c - m)
 		inv := 1 / (e0 + e1 + e2)
 		x[0] = e0 * inv
 		x[1] = e1 * inv
@@ -1162,10 +1162,10 @@ func SoftmaxInPlace(x []float32) {
 	case 4:
 		a, b, c, d := x[0], x[1], x[2], x[3]
 		m := max32(max32(a, b), max32(c, d))
-		e0 := float32(math.Exp(float64(a - m)))
-		e1 := float32(math.Exp(float64(b - m)))
-		e2 := float32(math.Exp(float64(c - m)))
-		e3 := float32(math.Exp(float64(d - m)))
+		e0 := FastExpF32(a - m)
+		e1 := FastExpF32(b - m)
+		e2 := FastExpF32(c - m)
+		e3 := FastExpF32(d - m)
 		inv := 1 / ((e0 + e1) + (e2 + e3))
 		x[0] = e0 * inv
 		x[1] = e1 * inv
@@ -1175,11 +1175,11 @@ func SoftmaxInPlace(x []float32) {
 	case 5:
 		a0, a1, a2, a3, a4 := x[0], x[1], x[2], x[3], x[4]
 		m := max32(max32(max32(a0, a1), max32(a2, a3)), a4)
-		e0 := float32(math.Exp(float64(a0 - m)))
-		e1 := float32(math.Exp(float64(a1 - m)))
-		e2 := float32(math.Exp(float64(a2 - m)))
-		e3 := float32(math.Exp(float64(a3 - m)))
-		e4 := float32(math.Exp(float64(a4 - m)))
+		e0 := FastExpF32(a0 - m)
+		e1 := FastExpF32(a1 - m)
+		e2 := FastExpF32(a2 - m)
+		e3 := FastExpF32(a3 - m)
+		e4 := FastExpF32(a4 - m)
 		inv := 1 / ((e0 + e1) + (e2 + e3) + e4)
 		x[0] = e0 * inv
 		x[1] = e1 * inv
@@ -1191,12 +1191,12 @@ func SoftmaxInPlace(x []float32) {
 		a0, a1, a2, a3 := x[0], x[1], x[2], x[3]
 		a4, a5 := x[4], x[5]
 		m := max32(max32(max32(a0, a1), max32(a2, a3)), max32(a4, a5))
-		e0 := float32(math.Exp(float64(a0 - m)))
-		e1 := float32(math.Exp(float64(a1 - m)))
-		e2 := float32(math.Exp(float64(a2 - m)))
-		e3 := float32(math.Exp(float64(a3 - m)))
-		e4 := float32(math.Exp(float64(a4 - m)))
-		e5 := float32(math.Exp(float64(a5 - m)))
+		e0 := FastExpF32(a0 - m)
+		e1 := FastExpF32(a1 - m)
+		e2 := FastExpF32(a2 - m)
+		e3 := FastExpF32(a3 - m)
+		e4 := FastExpF32(a4 - m)
+		e5 := FastExpF32(a5 - m)
 		inv := 1 / ((e0 + e1) + (e2 + e3) + (e4 + e5))
 		x[0] = e0 * inv
 		x[1] = e1 * inv
@@ -1209,13 +1209,13 @@ func SoftmaxInPlace(x []float32) {
 		a0, a1, a2, a3 := x[0], x[1], x[2], x[3]
 		a4, a5, a6 := x[4], x[5], x[6]
 		m := max32(max32(max32(a0, a1), max32(a2, a3)), max32(max32(a4, a5), a6))
-		e0 := float32(math.Exp(float64(a0 - m)))
-		e1 := float32(math.Exp(float64(a1 - m)))
-		e2 := float32(math.Exp(float64(a2 - m)))
-		e3 := float32(math.Exp(float64(a3 - m)))
-		e4 := float32(math.Exp(float64(a4 - m)))
-		e5 := float32(math.Exp(float64(a5 - m)))
-		e6 := float32(math.Exp(float64(a6 - m)))
+		e0 := FastExpF32(a0 - m)
+		e1 := FastExpF32(a1 - m)
+		e2 := FastExpF32(a2 - m)
+		e3 := FastExpF32(a3 - m)
+		e4 := FastExpF32(a4 - m)
+		e5 := FastExpF32(a5 - m)
+		e6 := FastExpF32(a6 - m)
 		inv := 1 / ((e0 + e1) + (e2 + e3) + (e4 + e5) + e6)
 		x[0] = e0 * inv
 		x[1] = e1 * inv
@@ -1229,14 +1229,14 @@ func SoftmaxInPlace(x []float32) {
 		a0, a1, a2, a3 := x[0], x[1], x[2], x[3]
 		a4, a5, a6, a7 := x[4], x[5], x[6], x[7]
 		m := max32(max32(max32(a0, a1), max32(a2, a3)), max32(max32(a4, a5), max32(a6, a7)))
-		e0 := float32(math.Exp(float64(a0 - m)))
-		e1 := float32(math.Exp(float64(a1 - m)))
-		e2 := float32(math.Exp(float64(a2 - m)))
-		e3 := float32(math.Exp(float64(a3 - m)))
-		e4 := float32(math.Exp(float64(a4 - m)))
-		e5 := float32(math.Exp(float64(a5 - m)))
-		e6 := float32(math.Exp(float64(a6 - m)))
-		e7 := float32(math.Exp(float64(a7 - m)))
+		e0 := FastExpF32(a0 - m)
+		e1 := FastExpF32(a1 - m)
+		e2 := FastExpF32(a2 - m)
+		e3 := FastExpF32(a3 - m)
+		e4 := FastExpF32(a4 - m)
+		e5 := FastExpF32(a5 - m)
+		e6 := FastExpF32(a6 - m)
+		e7 := FastExpF32(a7 - m)
 		inv := 1 / ((e0 + e1) + (e2 + e3) + (e4 + e5) + (e6 + e7))
 		x[0] = e0 * inv
 		x[1] = e1 * inv

@@ -1,7 +1,5 @@
 package tensor
 
-import "math"
-
 // WeightedSum2 computes dst[i] = a0*x0[i] + a1*x1[i].
 func WeightedSum2(dst, x0, x1 []float32, a0, a1 float32) {
 	if useDotFMA && len(dst) >= 8 {
@@ -211,7 +209,7 @@ func ScaleInPlace(dst []float32, scale float32) {
 }
 
 // ExpVec replaces x[i] with exp(x[i] - m) and returns the sum of all exp values.
-// Uses AVX2 vectorized exp for the generic path (n >= 8), scalar math.Exp fallback otherwise.
+// Uses AVX2 vectorized exp for the generic path (n >= 8), scalar FastExpF32 fallback otherwise.
 func ExpVec(x []float32, m float32) float32 {
 	if useDotFMA && len(x) >= 8 {
 		return expF32VecFMA(x, m)
@@ -221,7 +219,7 @@ func ExpVec(x []float32, m float32) float32 {
 	}
 	var sum float32
 	for i := range x {
-		e := float32(math.Exp(float64(x[i] - m)))
+		e := FastExpF32(x[i] - m)
 		x[i] = e
 		sum += e
 	}
