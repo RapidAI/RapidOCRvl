@@ -129,47 +129,40 @@ func VulkanChainedSwiGLUDownAddRMSNormQ8(
 	defer vk.destroyDeviceBuffer(device, devX)
 
 	// Device-local weight buffers
-	devGateData, err := vk.newDeviceBuffer(device, runner.memProps, gateBytes)
+	devGateData, gateDataUpload, err := vk.getOrCreateDeviceInt8Weight(device, runner.memProps, gate.Data[:gateLen], gateBytes, runner.deviceInt8WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer gateData: %w", err)
+		return fmt.Errorf("cached device buffer gateData: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devGateData)
 
-	devUpData, err := vk.newDeviceBuffer(device, runner.memProps, upBytes)
+	devUpData, upDataUpload, err := vk.getOrCreateDeviceInt8Weight(device, runner.memProps, up.Data[:upLen], upBytes, runner.deviceInt8WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer upData: %w", err)
+		return fmt.Errorf("cached device buffer upData: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devUpData)
 
-	devDownData, err := vk.newDeviceBuffer(device, runner.memProps, downBytes)
+	devDownData, downDataUpload, err := vk.getOrCreateDeviceInt8Weight(device, runner.memProps, down.Data[:downLen], downBytes, runner.deviceInt8WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer downData: %w", err)
+		return fmt.Errorf("cached device buffer downData: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devDownData)
 
-	devGateScale, err := vk.newDeviceBuffer(device, runner.memProps, gateScaleBytes)
+	devGateScale, gateScaleUpload, err := vk.getOrCreateDeviceFloat32Weight(device, runner.memProps, gate.Scale[:gate.Rows], gateScaleBytes, runner.deviceFloat32WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer gateScale: %w", err)
+		return fmt.Errorf("cached device buffer gateScale: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devGateScale)
 
-	devUpScale, err := vk.newDeviceBuffer(device, runner.memProps, upScaleBytes)
+	devUpScale, upScaleUpload, err := vk.getOrCreateDeviceFloat32Weight(device, runner.memProps, up.Scale[:up.Rows], upScaleBytes, runner.deviceFloat32WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer upScale: %w", err)
+		return fmt.Errorf("cached device buffer upScale: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devUpScale)
 
-	devDownScale, err := vk.newDeviceBuffer(device, runner.memProps, downScaleBytes)
+	devDownScale, downScaleUpload, err := vk.getOrCreateDeviceFloat32Weight(device, runner.memProps, down.Scale[:down.Rows], downScaleBytes, runner.deviceFloat32WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer downScale: %w", err)
+		return fmt.Errorf("cached device buffer downScale: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devDownScale)
 
-	devNormWeight, err := vk.newDeviceBuffer(device, runner.memProps, outBytes)
+	devNormWeight, normWeightUpload, err := vk.getOrCreateDeviceFloat32Weight(device, runner.memProps, normWeight[:outRows], outBytes, runner.deviceFloat32WeightCache)
 	if err != nil {
-		return fmt.Errorf("device buffer normWeight: %w", err)
+		return fmt.Errorf("cached device buffer normWeight: %w", err)
 	}
-	defer vk.destroyDeviceBuffer(device, devNormWeight)
 
 	// --- Staging host buffers ---
 	maxFloatBytes := xBytes
@@ -339,26 +332,40 @@ func VulkanChainedSwiGLUDownAddRMSNormQ8(
 	if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devResidual, residual[:outRows]); err != nil {
 		return fmt.Errorf("upload residual: %w", err)
 	}
-	if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devNormWeight, normWeight[:outRows]); err != nil {
-		return fmt.Errorf("upload normWeight: %w", err)
+	if normWeightUpload {
+		if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devNormWeight, normWeight[:outRows]); err != nil {
+			return fmt.Errorf("upload normWeight: %w", err)
+		}
 	}
-	if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devGateScale, gate.Scale[:gate.Rows]); err != nil {
-		return fmt.Errorf("upload gateScale: %w", err)
+	if gateScaleUpload {
+		if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devGateScale, gate.Scale[:gate.Rows]); err != nil {
+			return fmt.Errorf("upload gateScale: %w", err)
+		}
 	}
-	if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devUpScale, up.Scale[:up.Rows]); err != nil {
-		return fmt.Errorf("upload upScale: %w", err)
+	if upScaleUpload {
+		if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devUpScale, up.Scale[:up.Rows]); err != nil {
+			return fmt.Errorf("upload upScale: %w", err)
+		}
 	}
-	if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devDownScale, down.Scale[:down.Rows]); err != nil {
-		return fmt.Errorf("upload downScale: %w", err)
+	if downScaleUpload {
+		if err := vk.uploadFloat32ToDevice(device, cmd, runner.memProps, &stagingFloat, devDownScale, down.Scale[:down.Rows]); err != nil {
+			return fmt.Errorf("upload downScale: %w", err)
+		}
 	}
-	if err := vk.uploadBytesToDevice(device, cmd, runner.memProps, &stagingBytes, devGateData, unsafe.Slice((*byte)(unsafe.Pointer(&gate.Data[0])), gateLen)); err != nil {
-		return fmt.Errorf("upload gateData: %w", err)
+	if gateDataUpload {
+		if err := vk.uploadBytesToDevice(device, cmd, runner.memProps, &stagingBytes, devGateData, unsafe.Slice((*byte)(unsafe.Pointer(&gate.Data[0])), gateLen)); err != nil {
+			return fmt.Errorf("upload gateData: %w", err)
+		}
 	}
-	if err := vk.uploadBytesToDevice(device, cmd, runner.memProps, &stagingBytes, devUpData, unsafe.Slice((*byte)(unsafe.Pointer(&up.Data[0])), upLen)); err != nil {
-		return fmt.Errorf("upload upData: %w", err)
+	if upDataUpload {
+		if err := vk.uploadBytesToDevice(device, cmd, runner.memProps, &stagingBytes, devUpData, unsafe.Slice((*byte)(unsafe.Pointer(&up.Data[0])), upLen)); err != nil {
+			return fmt.Errorf("upload upData: %w", err)
+		}
 	}
-	if err := vk.uploadBytesToDevice(device, cmd, runner.memProps, &stagingBytes, devDownData, unsafe.Slice((*byte)(unsafe.Pointer(&down.Data[0])), downLen)); err != nil {
-		return fmt.Errorf("upload downData: %w", err)
+	if downDataUpload {
+		if err := vk.uploadBytesToDevice(device, cmd, runner.memProps, &stagingBytes, devDownData, unsafe.Slice((*byte)(unsafe.Pointer(&down.Data[0])), downLen)); err != nil {
+			return fmt.Errorf("upload downData: %w", err)
+		}
 	}
 
 	// === Compute phase ===
