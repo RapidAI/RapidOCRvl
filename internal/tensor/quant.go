@@ -1417,9 +1417,23 @@ func fusedMatVec3Q6EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q6Mat
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData, cData := a.Unpacked, b.Unpacked, c.Unpacked
+		aScale, bScale, cScale := a.Scale, b.Scale, c.Scale
+		aRS, bRS, cRS := a.RowSum, b.RowSum, c.RowSum
+		cols := a.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB, dotC := dotQ8TripletVNNICore(&aData[base], &bData[base], &cData[base], &xq[0], cols)
+				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
+				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+				outC[r] = float32(dotC-128*cRS[r]) * scaleX * cScale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
 			base := r * a.Cols
-			av, bv, cv := dotQ8TripletVNNI(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], c.Unpacked[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			av, bv, cv := dotQ8TripletVNNI(aData[base:base+a.Cols], bData[base:base+b.Cols], cData[base:base+c.Cols], xq, scaleX, aRS[r], bRS[r], cRS[r], aScale[r], bScale[r], cScale[r])
 			outA[r] = av
 			outB[r] = bv
 			outC[r] = cv
@@ -1454,22 +1468,51 @@ func fusedMatVec3Q6Serial(outA, outB, outC, x []float32, a, b, c *Q6Matrix, star
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData, cData := a.Unpacked, b.Unpacked, c.Unpacked
+		aScale, bScale, cScale := a.Scale, b.Scale, c.Scale
+		aRS, bRS, cRS := a.RowSum, b.RowSum, c.RowSum
+		aCols := a.Cols
+		bCols := b.Cols
+		cCols := c.Cols
+		if useVNNI {
+			for r := start; r < aEnd; r++ {
+				base := r * aCols
+				dot := dotQ8VNNICoreZMM(&aData[base], &xq[0], aCols)
+				outA[r] = float32(dot-128*aRS[r]) * scaleX * aScale[r]
+			}
+			bStart := max(start, a.Rows)
+			bEnd := min(end, splitB)
+			for r := bStart; r < bEnd; r++ {
+				br := r - a.Rows
+				base := br * bCols
+				dot := dotQ8VNNICoreZMM(&bData[base], &xq[0], bCols)
+				outB[br] = float32(dot-128*bRS[br]) * scaleX * bScale[br]
+			}
+			cStart := max(start, splitB)
+			for r := cStart; r < end; r++ {
+				cr := r - splitB
+				base := cr * cCols
+				dot := dotQ8VNNICoreZMM(&cData[base], &xq[0], cCols)
+				outC[cr] = float32(dot-128*cRS[cr]) * scaleX * cScale[cr]
+			}
+			return
+		}
 		for r := start; r < aEnd; r++ {
 			base := r * a.Cols
-			outA[r] = dotQ8VNNI(a.Unpacked[base:base+a.Cols], xq, scaleX, a.Scale[r], a.RowSum[r])
+			outA[r] = dotQ8VNNI(aData[base:base+a.Cols], xq, scaleX, aScale[r], aRS[r])
 		}
 		bStart := max(start, a.Rows)
 		bEnd := min(end, splitB)
 		for r := bStart; r < bEnd; r++ {
 			br := r - a.Rows
 			base := br * b.Cols
-			outB[br] = dotQ8VNNI(b.Unpacked[base:base+b.Cols], xq, scaleX, b.Scale[br], b.RowSum[br])
+			outB[br] = dotQ8VNNI(bData[base:base+b.Cols], xq, scaleX, bScale[br], bRS[br])
 		}
 		cStart := max(start, splitB)
 		for r := cStart; r < end; r++ {
 			cr := r - splitB
 			base := cr * c.Cols
-			outC[cr] = dotQ8VNNI(c.Unpacked[base:base+c.Cols], xq, scaleX, c.Scale[cr], c.RowSum[cr])
+			outC[cr] = dotQ8VNNI(cData[base:base+c.Cols], xq, scaleX, cScale[cr], cRS[cr])
 		}
 		return
 	}
@@ -1603,9 +1646,23 @@ func fusedMatVec3Q4EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q4Mat
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData, cData := a.Unpacked, b.Unpacked, c.Unpacked
+		aScale, bScale, cScale := a.Scale, b.Scale, c.Scale
+		aRS, bRS, cRS := a.RowSum, b.RowSum, c.RowSum
+		cols := a.Cols
+		if useVNNI {
+			for r := start; r < end; r++ {
+				base := r * cols
+				dotA, dotB, dotC := dotQ8TripletVNNICore(&aData[base], &bData[base], &cData[base], &xq[0], cols)
+				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
+				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+				outC[r] = float32(dotC-128*cRS[r]) * scaleX * cScale[r]
+			}
+			return
+		}
 		for r := start; r < end; r++ {
 			base := r * a.Cols
-			av, bv, cv := dotQ8TripletVNNI(a.Unpacked[base:base+a.Cols], b.Unpacked[base:base+b.Cols], c.Unpacked[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			av, bv, cv := dotQ8TripletVNNI(aData[base:base+a.Cols], bData[base:base+b.Cols], cData[base:base+c.Cols], xq, scaleX, aRS[r], bRS[r], cRS[r], aScale[r], bScale[r], cScale[r])
 			outA[r] = av
 			outB[r] = bv
 			outC[r] = cv
@@ -1640,22 +1697,51 @@ func fusedMatVec3Q4Serial(outA, outB, outC, x []float32, a, b, c *Q4Matrix, star
 		xq := getVNNIScratch(a.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		aData, bData, cData := a.Unpacked, b.Unpacked, c.Unpacked
+		aScale, bScale, cScale := a.Scale, b.Scale, c.Scale
+		aRS, bRS, cRS := a.RowSum, b.RowSum, c.RowSum
+		aCols := a.Cols
+		bCols := b.Cols
+		cCols := c.Cols
+		if useVNNI {
+			for r := start; r < aEnd; r++ {
+				base := r * aCols
+				dot := dotQ8VNNICoreZMM(&aData[base], &xq[0], aCols)
+				outA[r] = float32(dot-128*aRS[r]) * scaleX * aScale[r]
+			}
+			bStart := max(start, a.Rows)
+			bEnd := min(end, splitB)
+			for r := bStart; r < bEnd; r++ {
+				br := r - a.Rows
+				base := br * bCols
+				dot := dotQ8VNNICoreZMM(&bData[base], &xq[0], bCols)
+				outB[br] = float32(dot-128*bRS[br]) * scaleX * bScale[br]
+			}
+			cStart := max(start, splitB)
+			for r := cStart; r < end; r++ {
+				cr := r - splitB
+				base := cr * cCols
+				dot := dotQ8VNNICoreZMM(&cData[base], &xq[0], cCols)
+				outC[cr] = float32(dot-128*cRS[cr]) * scaleX * cScale[cr]
+			}
+			return
+		}
 		for r := start; r < aEnd; r++ {
 			base := r * a.Cols
-			outA[r] = dotQ8VNNI(a.Unpacked[base:base+a.Cols], xq, scaleX, a.Scale[r], a.RowSum[r])
+			outA[r] = dotQ8VNNI(aData[base:base+a.Cols], xq, scaleX, aScale[r], aRS[r])
 		}
 		bStart := max(start, a.Rows)
 		bEnd := min(end, splitB)
 		for r := bStart; r < bEnd; r++ {
 			br := r - a.Rows
 			base := br * b.Cols
-			outB[br] = dotQ8VNNI(b.Unpacked[base:base+b.Cols], xq, scaleX, b.Scale[br], b.RowSum[br])
+			outB[br] = dotQ8VNNI(bData[base:base+b.Cols], xq, scaleX, bScale[br], bRS[br])
 		}
 		cStart := max(start, splitB)
 		for r := cStart; r < end; r++ {
 			cr := r - splitB
 			base := cr * c.Cols
-			outC[cr] = dotQ8VNNI(c.Unpacked[base:base+c.Cols], xq, scaleX, c.Scale[cr], c.RowSum[cr])
+			outC[cr] = dotQ8VNNI(cData[base:base+c.Cols], xq, scaleX, cScale[cr], cRS[cr])
 		}
 		return
 	}
