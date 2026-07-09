@@ -816,11 +816,11 @@ func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) 
 			defer putInt32Scratch(sA)
 			defer putInt32Scratch(sB)
 			dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				g := float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
-				u := float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
-				out[start+r] = SiLU(g) * u
-			}
+			tmpG := getFloat32Scratch(nRows)
+			defer putFloat32Scratch(tmpG)
+			finalizeDotQ8PairVNNI(&sA[0], &gRS[start], &gScale[start], &out[start],
+				&sB[0], &uRS[start], &uScale[start], &tmpG[0], nRows, scaleX)
+			SiLUMulInPlace(out[start:end], tmpG[:nRows])
 			return
 		}
 		for r := start; r < end; r++ {
@@ -897,11 +897,11 @@ func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4M
 			defer putInt32Scratch(sA)
 			defer putInt32Scratch(sB)
 			dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				g := float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
-				u := float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
-				out[start+r] = SiLU(g) * u
-			}
+			tmpG := getFloat32Scratch(nRows)
+			defer putFloat32Scratch(tmpG)
+			finalizeDotQ8PairVNNI(&sA[0], &gRS[start], &gScale[start], &out[start],
+				&sB[0], &uRS[start], &uScale[start], &tmpG[0], nRows, scaleX)
+			SiLUMulInPlace(out[start:end], tmpG[:nRows])
 			return
 		}
 		for r := start; r < end; r++ {
@@ -974,11 +974,11 @@ func matVecQ6SwiGLUSerial(out, x []float32, gate, up *Q6Matrix, start, end int) 
 			defer putInt32Scratch(sA)
 			defer putInt32Scratch(sB)
 			dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				g := float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
-				u := float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
-				out[start+r] = SiLU(g) * u
-			}
+			tmpG := getFloat32Scratch(nRows)
+			defer putFloat32Scratch(tmpG)
+			finalizeDotQ8PairVNNI(&sA[0], &gRS[start], &gScale[start], &out[start],
+				&sB[0], &uRS[start], &uScale[start], &tmpG[0], nRows, scaleX)
+			SiLUMulInPlace(out[start:end], tmpG[:nRows])
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1368,10 +1368,8 @@ func matVecQ4PairSerial(outA, outB, x []float32, a, b *Q4Matrix, start, end int)
 			defer putInt32Scratch(sA)
 			defer putInt32Scratch(sB)
 			dotQ8PairVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
-				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
-			}
+			finalizeDotQ8PairVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+				&sB[0], &bRS[start], &bScale[start], &outB[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1439,10 +1437,8 @@ func matVecQ6PairSerial(outA, outB, x []float32, a, b *Q6Matrix, start, end int)
 			defer putInt32Scratch(sA)
 			defer putInt32Scratch(sB)
 			dotQ8PairVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
-				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
-			}
+			finalizeDotQ8PairVNNI(&sA[0], &aRS[start], &aScale[start], &outA[start],
+				&sB[0], &bRS[start], &bScale[start], &outB[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
@@ -1993,6 +1989,26 @@ func getInt32Scratch(n int) []int32 {
 func putInt32Scratch(buf []int32) {
 	select {
 	case int32ScratchPool <- buf:
+	default:
+	}
+}
+
+var float32ScratchPool = make(chan []float32, 32)
+
+func getFloat32Scratch(n int) []float32 {
+	select {
+	case buf := <-float32ScratchPool:
+		if cap(buf) >= n {
+			return buf[:n]
+		}
+	default:
+	}
+	return make([]float32, n)
+}
+
+func putFloat32Scratch(buf []float32) {
+	select {
+	case float32ScratchPool <- buf:
 	default:
 	}
 }
