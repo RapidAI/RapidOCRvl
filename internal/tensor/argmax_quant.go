@@ -51,7 +51,7 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 		return bestToken, bestScore
 	}
 	chunk := (q.Rows + workers - 1) / workers
-	results := make([]partial, workers)
+	var resultsArr [16]partial; results := resultsArr[:workers]
 	var wg sync.WaitGroup
 	for wi := 0; wi < workers; wi++ {
 		start := wi * chunk
@@ -201,7 +201,7 @@ func matVecArgmaxUnpackedParallel(rows, cols int, data []int8, scale []float32, 
 		return bestToken, bestScore
 	}
 	chunk := (rows + workers - 1) / workers
-	results := make([]partial, workers)
+	var resultsArr [16]partial; results := resultsArr[:workers]
 	var wg sync.WaitGroup
 	for wi := 0; wi < workers; wi++ {
 		start := wi * chunk
