@@ -3893,13 +3893,7 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 		rt.vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
 		return nil, true
 	}
-	// Q8 path: RMSNorm + fused Q8 QKV+MRoPE + attention + Q8 output proj + AddRMSNorm in one submit.
-	// rawInput = h (pre-norm), ln1Weight = tl.w.ln1. Skips the separate rmsNormMaybeVulkan call.
-	if hasRoPE && tl.q8.q != nil &&
-		rt.vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, h, tl.w.ln1, cache, tl, ropeCos, ropeSin, normWeight, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
-		return nil, true
-	}
-	qkvHasRoPE := false
+qkvHasRoPE := false
 	if hasRoPE {
 		qkvHasRoPE = rt.fusedQKVMRoPE(q, k, v, x, tl, qRows, kvRows, c.HiddenSize, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim, ropeCos, ropeSin)
 	}
@@ -4130,11 +4124,11 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNorm(normOut, residual, x [
 	}
 	qRows := numHeads * headDim
 	kvRows := kvHeads * headDim
-	hidden := len(rawInput)
+	hidden := len(x)
 	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
 		return false
 	}
-	if len(normOut) < qRows || len(residual) < qRows || len(rawInput) < hidden || len(ln1Weight) < hidden || len(normWeight) < qRows {
+	if len(normOut) < qRows || len(residual) < qRows || len(x) < hidden || len(normWeight) < qRows {
 		return false
 	}
 	if !f32MatVecWeightsReady(tl.w.q, qRows, hidden) || !f32MatVecWeightsReady(tl.w.k, kvRows, hidden) || !f32MatVecWeightsReady(tl.w.v, kvRows, hidden) || !f32MatVecWeightsReady(tl.w.o, qRows, qRows) {
@@ -4176,7 +4170,7 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, r
 	}
 	qRows := numHeads * headDim
 	kvRows := kvHeads * headDim
-	hidden := len(x)
+	hidden := len(rawInput)
 	if hidden <= 0 || qRows <= 0 || kvRows <= 0 {
 		return false
 	}
