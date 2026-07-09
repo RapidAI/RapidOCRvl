@@ -16,11 +16,27 @@ func MatVecArgmaxQ8(x []float32, q *Q8Matrix) (int, float32) {
 		xq := getVNNIScratch(q.Cols)
 		defer putVNNIScratch(xq)
 		scaleX := quantizeXForVNNI(x, xq)
+		data := q.Data
+		scale := q.Scale
+		rowSum := q.RowSum
+		cols := q.Cols
 		bestToken := 0
 		bestScore := float32(0)
+		if useVNNI {
+			for r := 0; r < q.Rows; r++ {
+				base := r * cols
+				dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+				score := float32(dot-128*rowSum[r]) * scaleX * scale[r]
+				if r == 0 || score > bestScore {
+					bestToken = r
+					bestScore = score
+				}
+			}
+			return bestToken, bestScore
+		}
 		for r := 0; r < q.Rows; r++ {
 			base := r * q.Cols
-			score := dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+			score := dotQ8VNNI(data[base:base+q.Cols], xq, scaleX, scale[r], rowSum[r])
 			if r == 0 || score > bestScore {
 				bestToken = r
 				bestScore = score
@@ -57,11 +73,27 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 		xq := make([]uint8, q.Cols)
 		scaleX := quantizeXForVNNI(x, xq)
 		if workers <= 1 {
+			data := q.Data
+			scale := q.Scale
+			rowSum := q.RowSum
+			cols := q.Cols
 			bestToken := 0
 			bestScore := float32(0)
+			if useVNNI {
+				for r := 0; r < q.Rows; r++ {
+					base := r * cols
+					dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+					score := float32(dot-128*rowSum[r]) * scaleX * scale[r]
+					if r == 0 || score > bestScore {
+						bestToken = r
+						bestScore = score
+					}
+				}
+				return bestToken, bestScore
+			}
 			for r := 0; r < q.Rows; r++ {
 				base := r * q.Cols
-				score := dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
+				score := dotQ8VNNI(data[base:base+q.Cols], xq, scaleX, scale[r], rowSum[r])
 				if r == 0 || score > bestScore {
 					bestToken = r
 					bestScore = score
@@ -85,14 +117,30 @@ func matVecArgmaxQ8Parallel(x []float32, q *Q8Matrix) (int, float32) {
 			wg.Add(1)
 			go func(slot, start, end int) {
 				defer wg.Done()
+				data := q.Data
+				scale := q.Scale
+				rowSum := q.RowSum
+				cols := q.Cols
 				bestToken := start
 				bestScore := float32(0)
-				for r := start; r < end; r++ {
-					base := r * q.Cols
-					score := dotQ8VNNI(q.Data[base:base+q.Cols], xq, scaleX, q.Scale[r], q.RowSum[r])
-					if r == start || score > bestScore {
-						bestToken = r
-						bestScore = score
+				if useVNNI {
+					for r := start; r < end; r++ {
+						base := r * cols
+						dot := dotQ8VNNICoreZMM(&data[base], &xq[0], cols)
+						score := float32(dot-128*rowSum[r]) * scaleX * scale[r]
+						if r == start || score > bestScore {
+							bestToken = r
+							bestScore = score
+						}
+					}
+				} else {
+					for r := start; r < end; r++ {
+						base := r * q.Cols
+						score := dotQ8VNNI(data[base:base+q.Cols], xq, scaleX, scale[r], rowSum[r])
+						if r == start || score > bestScore {
+							bestToken = r
+							bestScore = score
+						}
 					}
 				}
 				results[slot] = partial{bestToken, bestScore}
