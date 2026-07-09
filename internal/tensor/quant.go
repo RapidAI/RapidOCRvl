@@ -798,6 +798,27 @@ func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) 
 
 func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4Matrix, start, end int) {
 	batchSize := end - start
+	if useVNNI && gate.Unpacked != nil && up.Unpacked != nil && gate.Cols >= 32 && gate.RowSum != nil && up.RowSum != nil {
+		xq := getVNNIScratch(gate.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+			for r := start; r < end; r++ {
+				base := r * gate.Cols
+				g, u := dotQ8PairVNNI(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+				out[r] = g
+				tmpU[r] = u
+			}
+			SiLUMulInPlace(out[start:end], tmpU[start:end])
+			return
+		}
+		for r := start; r < end; r++ {
+			base := r * gate.Cols
+			g, u := dotQ8PairVNNI(gate.Unpacked[base:base+gate.Cols], up.Unpacked[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+			out[r] = SiLU(g) * u
+		}
+		return
+	}
 	if useDotQ4AVX2 && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
 		if gate.Unpacked != nil && up.Unpacked != nil {
 			for r := start; r < end; r++ {
