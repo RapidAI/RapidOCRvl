@@ -7110,8 +7110,6 @@ func applyMRoPE(x []float32, heads, dim int, pos ropePos, theta float64) {
 
 func invSqrt(n int) float32 { return float32(1 / math.Sqrt(float64(n))) }
 
-func sqrt(x float64) float64 { return pow(x, 0.5) }
-
 func pow(x, y float64) float64 {
 	return math.Pow(x, y)
 }
