@@ -5902,29 +5902,26 @@ TEXT ·quantizeQ8RowAVX2(SB), NOSPLIT, $0-52
 	MOVQ w_base+0(FP), SI
 	MOVQ w_len+8(FP), CX
 	MOVQ data_base+24(FP), DI
-	VBROADCASTSS inv+48(FP), Y1
-	VBROADCASTSS q8Clamp127<>(SB), Y4   // 127.0
-	VBROADCASTSS q8ClampNeg127<>(SB), Y5 // -127.0
-
-	CMPQ CX, $8
+	VBROADCASTSS inv+48(FP), Z1
+	VBROADCASTSS q8Clamp127<>(SB), Z4   // 127.0
+	VBROADCASTSS q8ClampNeg127<>(SB), Z5 // -127.0
+	CMPQ CX, $16
 	JB q8qTail
-
 q8qLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB q8qDone
-	VMOVUPS (SI), Y0
-	VMULPS Y1, Y0, Y0          // w * inv
-	VROUNDPS $8, Y0, Y0        // round to nearest, ties to even
-	VMINPS Y4, Y0, Y0          // clamp max 127
-	VMAXPS Y5, Y0, Y0          // clamp min -127
-	VCVTPS2DQ Y0, Y0           // float32 -> int32 (8 values in Y0)
-	VPMOVDB Y0, X0             // pack 8 int32 -> 8 uint8 (low 64 bits)
-	VMOVQ X0, (DI)            // store 8 bytes
-	ADDQ $32, SI
-	ADDQ $8, DI
-	SUBQ $8, CX
+	VMOVUPS (SI), Z0
+	VMULPS Z1, Z0, Z0          // w * inv
+	VRNDSCALEPS $8, Z0, Z0     // round to nearest
+	VMINPS Z4, Z0, Z0          // clamp max 127
+	VMAXPS Z5, Z0, Z0          // clamp min -127
+	VCVTPS2DQ Z0, Z0           // float32 -> int32 (16 values)
+	VPMOVDB Z0, X0             // pack 16 int32 -> 16 uint8
+	VMOVDQU X0, (DI)           // store 16 bytes
+	ADDQ $64, SI
+	ADDQ $16, DI
+	SUBQ $16, CX
 	JMP q8qLoop
-
 q8qDone:
 	VZEROUPPER
 q8qTail:
