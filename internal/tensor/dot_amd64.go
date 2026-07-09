@@ -122,7 +122,7 @@ func dotQ8VNNI(a []int8, xq []uint8, scaleX, scaleW float32, rowSumW int32) floa
 	}
 	var dot int32
 	if useVNNI {
-		dot = dotQ8VNNICoreZMM(&a[0], &xq[0], n) - 128*rowSumW
+		dot = dotQ8VNNICoreZMM(&a[0], &xq[0], n)
 	} else {
 		for i := 0; i < n; i++ {
 			dot += int32(a[i]) * (int32(xq[i]) - 128)
@@ -142,8 +142,6 @@ func dotQ8PairVNNI(a, b []int8, xq []uint8, scaleX float32, rowSumWA, rowSumWB i
 	var dotA, dotB int32
 	if useVNNI {
 		dotA, dotB = dotQ8PairVNNICore(&a[0], &b[0], &xq[0], n)
-		dotA -= 128 * rowSumWA
-		dotB -= 128 * rowSumWB
 	} else {
 		for i := 0; i < n; i++ {
 			dotA += int32(a[i]) * (int32(xq[i]) - 128)
@@ -166,9 +164,6 @@ func dotQ8TripletVNNI(a, b, c []int8, xq []uint8, scaleX float32, rowSumWA, rowS
 	var dotA, dotB, dotC int32
 	if useVNNI {
 		dotA, dotB, dotC = dotQ8TripletVNNICore(&a[0], &b[0], &c[0], &xq[0], n)
-		dotA -= 128 * rowSumWA
-		dotB -= 128 * rowSumWB
-		dotC -= 128 * rowSumWC
 	} else {
 		for i := 0; i < n; i++ {
 			dotA += int32(a[i]) * (int32(xq[i]) - 128)
