@@ -199,6 +199,7 @@ const (
 	vulkanOpChainedRMSNormQKVMRoPEQ8
 	vulkanOpChainedQKVAttentionOutAddRMSNormF32
 	vulkanOpChainedQKVAttentionOutAddRMSNormQ8
+	vulkanOpChainedSwiGLUDownAddRMSNormQ8
 )
 
 var vulkanOpNames = [...]string{
@@ -288,6 +289,7 @@ var vulkanOpNames = [...]string{
 	vulkanOpChainedRMSNormQKVMRoPEQ8:            "chained_rmsnorm_qkv_mrope_q8",
 	vulkanOpChainedQKVAttentionOutAddRMSNormF32: "chained_qkv_attention_out_norm_f32",
 	vulkanOpChainedQKVAttentionOutAddRMSNormQ8: "chained_qkv_attention_out_norm_q8",
+	vulkanOpChainedSwiGLUDownAddRMSNormQ8: "chained_swiglu_down_norm_q8",
 }
 
 type vulkanPlanCache struct {
@@ -4209,6 +4211,31 @@ func (rt *Runtime) vulkanChainedQKVAttentionOutAddRMSNormQ8(normOut, residual, r
 	return false
 }
 
+// vulkanChainedSwiGLUDownAddRMSNormQ8 chains SwiGLU(gate,up) + Down + AddRMSNorm
+// in a single command buffer with device-local intermediate buffers.
+func (rt *Runtime) vulkanChainedSwiGLUDownAddRMSNormQ8(normOut, residual, x []float32, tl *textLayer, normWeight []float32, readResidual bool) bool {
+	if !rt.vulkanOpEnabled(vulkanOpChainedSwiGLUDownAddRMSNormQ8) || !rt.vulkanOpEnabled(vulkanOpSwiGLUDownAddRMSNormQ8) || tl == nil {
+		return false
+	}
+	if tl.q8.gate == nil || tl.q8.up == nil || tl.q8.down == nil {
+		return false
+	}
+	c := rt.cfg
+	useVulkan := fusedSwiGLUWork(c.IntermediateSize, c.HiddenSize, c.HiddenSize) >= vulkanMatVecMinWork()
+	if !useVulkan || c.RMSNormEps != 1e-6 {
+		return false
+	}
+	if !q8SwiGLUDownShapeOK(normOut, x, tl.q8.gate, tl.q8.up, tl.q8.down, c.IntermediateSize, c.HiddenSize, c.HiddenSize) {
+		return false
+	}
+	if err := backend.VulkanChainedSwiGLUDownAddRMSNormQ8(normOut, residual, x, tl.q8.gate, tl.q8.up, tl.q8.down, normWeight); err == nil {
+		return true
+	} else {
+		rt.disableVulkanOp(vulkanOpChainedSwiGLUDownAddRMSNormQ8, err)
+	}
+	return false
+}
+
 func (rt *Runtime) vulkanTextFirstTokenValueOutAddRMSNorm(normOut, residual []float32, cache *kvCache, tl *textLayer, normWeight []float32, numHeads, kvHeads, headDim int) bool {
 	if tl == nil || cache == nil || cache.len != 1 || numHeads <= 0 || kvHeads <= 0 || headDim <= 0 || headDim > 256 {
 		return false
@@ -5686,6 +5713,10 @@ func (rt *Runtime) mlpAddRMSNormMaybeVulkan(x []float32, tl *textLayer, sc *laye
 		return false
 	}
 	if tl.q8.gate != nil && tl.q8.up != nil && tl.q8.down != nil {
+		// Try device-local chained SwiGLU+Down+AddRMSNorm first
+		if rt.vulkanChainedSwiGLUDownAddRMSNormQ8(normOut, residual, x, tl, normWeight, readResidual) {
+			return true
+		}
 		op := vulkanOpSwiGLUDownAddRMSNormOutOnlyQ8
 		if readResidual {
 			op = vulkanOpSwiGLUDownAddRMSNormQ8
