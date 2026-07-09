@@ -460,3 +460,125 @@ func (b *vulkanCommandBatchWin) getDeviceBuffer(size uint64) (vkDeviceBufferWin,
 func (b *vulkanCommandBatchWin) returnDeviceBuffer(buf vkDeviceBufferWin) {
 	b.pool.put(buf)
 }
+
+// vulkanCachedDeviceInt8BufferWin caches device-local buffers for int8 weight data.
+// Weights are uploaded once and reused across layers/tokens.
+type vulkanCachedDeviceInt8BufferWin struct {
+	buffer      vkDeviceBufferWin
+	length      int
+	fingerprint uint64
+}
+
+// vulkanCachedDeviceFloat32BufferWin caches device-local buffers for float32 weight data.
+type vulkanCachedDeviceFloat32BufferWin struct {
+	buffer      vkDeviceBufferWin
+	length      int
+	fingerprint uint64
+}
+
+// ensureDeviceInt8Weight allocates or reuses a device-local buffer for int8 weight data.
+// On first call (cache miss), uploads via staging into the command buffer.
+// On subsequent calls (cache hit), returns the existing device buffer — no upload needed.
+func (v *vulkanWin) ensureDeviceInt8Weight(
+	device, cmd uintptr,
+	memProps vkPhysicalDeviceMemoryProperties,
+	data []int8, size uint64,
+	cache map[uintptr]vulkanCachedDeviceInt8BufferWin,
+	staging *vkHostBufferWin,
+) (vkDeviceBufferWin, error) {
+	key := uintptr(unsafe.Pointer(&data[0]))
+	fingerprint := fingerprintInt8ForVulkanCache(data)
+	if cached, ok := cache[key]; ok && cached.buffer.size >= size && cached.length == len(data) {
+		if cached.fingerprint == fingerprint {
+			return cached.buffer, nil // cache hit — no upload
+		}
+	}
+	// Cache miss: allocate device buffer and upload
+	devBuf, err := v.newDeviceBuffer(device, memProps, size)
+	if err != nil {
+		return vkDeviceBufferWin{}, err
+	}
+	// Upload via staging into the command buffer
+	dataBytes := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data))
+	if err := v.uploadBytesToDevice(device, cmd, memProps, staging, devBuf, dataBytes); err != nil {
+		v.destroyDeviceBuffer(device, devBuf)
+		return vkDeviceBufferWin{}, err
+	}
+	cache[key] = vulkanCachedDeviceInt8BufferWin{buffer: devBuf, length: len(data), fingerprint: fingerprint}
+	return devBuf, nil
+}
+
+// ensureDeviceFloat32Weight allocates or reuses a device-local buffer for float32 weight data.
+func (v *vulkanWin) ensureDeviceFloat32Weight(
+	device, cmd uintptr,
+	memProps vkPhysicalDeviceMemoryProperties,
+	data []float32, size uint64,
+	cache map[uintptr]vulkanCachedDeviceFloat32BufferWin,
+	staging *vkHostBufferWin,
+) (vkDeviceBufferWin, error) {
+	key := float32SliceKey(data)
+	fingerprint := fingerprintFloat32ForVulkanCache(data)
+	if cached, ok := cache[key]; ok && cached.buffer.size >= size && cached.length == len(data) {
+		if cached.fingerprint == fingerprint {
+			return cached.buffer, nil // cache hit — no upload
+		}
+	}
+	// Cache miss: allocate device buffer and upload
+	devBuf, err := v.newDeviceBuffer(device, memProps, size)
+	if err != nil {
+		return vkDeviceBufferWin{}, err
+	}
+	if err := v.uploadFloat32ToDevice(device, cmd, memProps, staging, devBuf, data); err != nil {
+		v.destroyDeviceBuffer(device, devBuf)
+		return vkDeviceBufferWin{}, err
+	}
+	cache[key] = vulkanCachedDeviceFloat32BufferWin{buffer: devBuf, length: len(data), fingerprint: fingerprint}
+	return devBuf, nil
+}
+
+
+// getOrCreateDeviceInt8Weight returns a cached device buffer for int8 weights,
+// or allocates a new one. Does NOT upload — caller must upload if needed.
+func (v *vulkanWin) getOrCreateDeviceInt8Weight(
+	device uintptr,
+	memProps vkPhysicalDeviceMemoryProperties,
+	data []int8, size uint64,
+	cache map[uintptr]vulkanCachedDeviceInt8BufferWin,
+) (vkDeviceBufferWin, bool, error) {
+	key := uintptr(unsafe.Pointer(&data[0]))
+	fingerprint := fingerprintInt8ForVulkanCache(data)
+	if cached, ok := cache[key]; ok && cached.buffer.size >= size && cached.length == len(data) {
+		if cached.fingerprint == fingerprint {
+			return cached.buffer, false, nil // cache hit — no upload needed
+		}
+	}
+	// Cache miss: allocate new device buffer
+	devBuf, err := v.newDeviceBuffer(device, memProps, size)
+	if err != nil {
+		return vkDeviceBufferWin{}, false, err
+	}
+	cache[key] = vulkanCachedDeviceInt8BufferWin{buffer: devBuf, length: len(data), fingerprint: fingerprint}
+	return devBuf, true, nil // needs upload
+}
+
+// getOrCreateDeviceFloat32Weight returns a cached device buffer for float32 weights.
+func (v *vulkanWin) getOrCreateDeviceFloat32Weight(
+	device uintptr,
+	memProps vkPhysicalDeviceMemoryProperties,
+	data []float32, size uint64,
+	cache map[uintptr]vulkanCachedDeviceFloat32BufferWin,
+) (vkDeviceBufferWin, bool, error) {
+	key := float32SliceKey(data)
+	fingerprint := fingerprintFloat32ForVulkanCache(data)
+	if cached, ok := cache[key]; ok && cached.buffer.size >= size && cached.length == len(data) {
+		if cached.fingerprint == fingerprint {
+			return cached.buffer, false, nil
+		}
+	}
+	devBuf, err := v.newDeviceBuffer(device, memProps, size)
+	if err != nil {
+		return vkDeviceBufferWin{}, false, err
+	}
+	cache[key] = vulkanCachedDeviceFloat32BufferWin{buffer: devBuf, length: len(data), fingerprint: fingerprint}
+	return devBuf, true, nil
+}

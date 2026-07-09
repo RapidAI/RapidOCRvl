@@ -898,6 +898,8 @@ type vulkanFusedMatVec3Q8WinRunner struct {
 	commandCols     int
 	commandPacked   int
 	sharedDevice bool
+	deviceInt8WeightCache   map[uintptr]vulkanCachedDeviceInt8BufferWin
+	deviceFloat32WeightCache map[uintptr]vulkanCachedDeviceFloat32BufferWin
 	mu          sync.Mutex
 }
 
@@ -1628,6 +1630,8 @@ type vulkanSwiGLUDownQ8WinRunner struct {
 	commandRows         int
 	commandCols         int
 	commandOutRows      int
+	deviceInt8WeightCache   map[uintptr]vulkanCachedDeviceInt8BufferWin
+	deviceFloat32WeightCache map[uintptr]vulkanCachedDeviceFloat32BufferWin
 	sharedDevice bool
 	mu          sync.Mutex
 }

@@ -543,6 +543,8 @@ type vulkanTextAttentionF32WinRunner struct {
 	valueCacheUploaded     int
 	valueCacheKVDim        int
 	descriptorCache        [10]vulkanDescriptorBindingWin
+	deviceInt8WeightCache   map[uintptr]vulkanCachedDeviceInt8BufferWin
+	deviceFloat32WeightCache map[uintptr]vulkanCachedDeviceFloat32BufferWin
 	commandRecorded        bool
 	commandKind            int
 	commandCacheLen        int
