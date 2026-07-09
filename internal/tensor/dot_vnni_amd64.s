@@ -466,14 +466,42 @@ TEXT ·dotQ8VNNICoreZMM(SB), NOSPLIT, $0-32
 	VPXORD Z1, Z1, Z1
 	VPXORD Z2, Z2, Z2
 	VPXORD Z3, Z3, Z3
+	VPXORD Z4, Z4, Z4
+	VPXORD Z5, Z5, Z5
+	VPXORD Z6, Z6, Z6
+	VPXORD Z7, Z7, Z7
 
 	CMPQ CX, $64
 	JB zmmCoreTail
 
 zmmCoreLoop:
+	CMPQ CX, $512
+	JB zmmCoreLoop256
+	// Process 512 elements: 8 x 64 = 512, 8 independent accumulators
+	VMOVDQU64 (DI), Z8
+	VPDPBUSD (SI), Z8, Z0
+	VMOVDQU64 64(DI), Z9
+	VPDPBUSD 64(SI), Z9, Z1
+	VMOVDQU64 128(DI), Z10
+	VPDPBUSD 128(SI), Z10, Z2
+	VMOVDQU64 192(DI), Z11
+	VPDPBUSD 192(SI), Z11, Z3
+	VMOVDQU64 256(DI), Z12
+	VPDPBUSD 256(SI), Z12, Z4
+	VMOVDQU64 320(DI), Z13
+	VPDPBUSD 320(SI), Z13, Z5
+	VMOVDQU64 384(DI), Z14
+	VPDPBUSD 384(SI), Z14, Z6
+	VMOVDQU64 448(DI), Z15
+	VPDPBUSD 448(SI), Z15, Z7
+	ADDQ $512, SI
+	ADDQ $512, DI
+	SUBQ $512, CX
+	JMP zmmCoreLoop
+
+zmmCoreLoop256:
 	CMPQ CX, $256
 	JB zmmCoreLoop128
-	// Process 256 elements: 4 x 64 = 256
 	VMOVDQU64 (DI), Z8
 	VPDPBUSD (SI), Z8, Z0
 	VMOVDQU64 64(DI), Z9
@@ -510,10 +538,14 @@ zmmCoreLoop64:
 	JMP zmmCoreLoop64
 
 zmmCoreReduce:
-	// Reduce Z0-Z3 (each has 16 int32 values)
+	// Reduce Z0-Z7 (each has 16 int32 values)
 	VPADDD Z1, Z0, Z0
 	VPADDD Z3, Z2, Z2
+	VPADDD Z5, Z4, Z4
+	VPADDD Z7, Z6, Z6
 	VPADDD Z2, Z0, Z0
+	VPADDD Z6, Z4, Z4
+	VPADDD Z4, Z0, Z0
 	// Z0 has 16 int32 values. Extract upper 256 bits to Y1, add to lower.
 	VEXTRACTI64X4 $1, Z0, Y1
 	VPADDD Y1, Y0, Y0
