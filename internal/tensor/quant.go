@@ -707,6 +707,27 @@ func matVecQ8SwiGLUScratch(out, x []float32, gate, up *Q8Matrix, tmpU []float32)
 
 func matVecQ8SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q8Matrix, start, end int) {
 	batchSize := end - start
+	if useVNNI && gate.Cols >= 32 && gate.RowSum != nil && up.RowSum != nil {
+		xq := getVNNIScratch(gate.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		if batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
+			for r := start; r < end; r++ {
+				base := r * gate.Cols
+				g, u := dotQ8PairVNNI(gate.Data[base:base+gate.Cols], up.Data[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+				out[r] = g
+				tmpU[r] = u
+			}
+			SiLUMulInPlace(out[start:end], tmpU[start:end])
+			return
+		}
+		for r := start; r < end; r++ {
+			base := r * gate.Cols
+			g, u := dotQ8PairVNNI(gate.Data[base:base+gate.Cols], up.Data[base:base+up.Cols], xq, scaleX, gate.RowSum[r], up.RowSum[r], gate.Scale[r], up.Scale[r])
+			out[r] = SiLU(g) * u
+		}
+		return
+	}
 	if useDotQ8AVX2 && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
 		for r := start; r < end; r++ {
 			base := r * gate.Cols
@@ -916,6 +937,19 @@ func fusedMatVec3Q8Parallel(outA, outB, outC, x []float32, a, b, c *Q8Matrix, to
 }
 
 func fusedMatVec3Q8EqualRowsBiasSerial(outA, outB, outC, x []float32, a, b, c *Q8Matrix, ba, bb, bc []float32, start, end int) {
+	if useVNNI && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv, cv := dotQ8TripletVNNI(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			outA[r] = av + ba[r]
+			outB[r] = bv + bb[r]
+			outC[r] = cv + bc[r]
+		}
+		return
+	}
 	for r := start; r < end; r++ {
 		base := r * a.Cols
 		av, bv, cv := dotQ8Triplet(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], x)
@@ -926,6 +960,19 @@ func fusedMatVec3Q8EqualRowsBiasSerial(outA, outB, outC, x []float32, a, b, c *Q
 }
 
 func fusedMatVec3Q8EqualRowsSerial(outA, outB, outC, x []float32, a, b, c *Q8Matrix, start, end int) {
+	if useVNNI && a.Cols >= 32 && a.RowSum != nil && b.RowSum != nil && c.RowSum != nil {
+		xq := getVNNIScratch(a.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		for r := start; r < end; r++ {
+			base := r * a.Cols
+			av, bv, cv := dotQ8TripletVNNI(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], xq, scaleX, a.RowSum[r], b.RowSum[r], c.RowSum[r], a.Scale[r], b.Scale[r], c.Scale[r])
+			outA[r] = av
+			outB[r] = bv
+			outC[r] = cv
+		}
+		return
+	}
 	for r := start; r < end; r++ {
 		base := r * a.Cols
 		av, bv, cv := dotQ8Triplet(a.Data[base:base+a.Cols], b.Data[base:base+b.Cols], c.Data[base:base+c.Cols], x)
