@@ -3504,9 +3504,14 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 				// For Q8 weights, skip separate RMSNorm - the Q8 chain does it inline.
 				q8ChainActive := hasRoPE && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8)
 				if q8ChainActive {
-					// Q8 chain will do RMSNorm internally; pass raw hidden + ln1 weight
-					att, normDone := rt.attentionWithNorm(h, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln1, sc.norm)
-					if !normDone {
+					// Q8 chain does RMSNorm(rawInput, ln1) + QKV + attention + output + AddRMSNorm(residual, ln2)
+					// all in one submit with device-local buffers. No separate RMSNorm needed.
+					if rt.vulkanChainedQKVAttentionOutAddRMSNormQ8(sc.norm, h, h, tl.w.ln1, &caches[li], tl, ropeCos, ropeSin, tl.w.ln2, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+						// chain handled everything including AddRMSNorm
+					} else {
+						// fallback: separate RMSNorm + attention
+						rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+						att, _ := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
 						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 					}
 				} else {
@@ -3519,9 +3524,6 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 					if !normDone {
 						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 					}
-				}
-				if !normDone {
-					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 				}
 			}
 		} else {
@@ -3536,9 +3538,14 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 				// For Q8 weights, skip separate RMSNorm - the Q8 chain does it inline.
 				q8ChainActive := hasRoPE && tl.q8.q != nil && rt.vulkanOpEnabled(vulkanOpChainedQKVAttentionOutAddRMSNormQ8)
 				if q8ChainActive {
-					// Q8 chain will do RMSNorm internally; pass raw hidden + ln1 weight
-					att, normDone := rt.attentionWithNorm(h, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln1, sc.norm)
-					if !normDone {
+					// Q8 chain does RMSNorm(rawInput, ln1) + QKV + attention + output + AddRMSNorm(residual, ln2)
+					// all in one submit with device-local buffers. No separate RMSNorm needed.
+					if rt.vulkanChainedQKVAttentionOutAddRMSNormQ8(sc.norm, h, h, tl.w.ln1, &caches[li], tl, ropeCos, ropeSin, tl.w.ln2, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+						// chain handled everything including AddRMSNorm
+					} else {
+						// fallback: separate RMSNorm + attention
+						rt.rmsNormMaybeVulkan(sc.norm, h, tl.w.ln1, float32(c.RMSNormEps))
+						att, _ := rt.attentionWithNorm(sc.norm, &caches[li], tl, sc, hasRoPE, ropeCos, ropeSin, h, tl.w.ln2, sc.norm)
 						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 					}
 				} else {
@@ -3551,9 +3558,6 @@ func (rt *Runtime) forwardEmbeddingForSampling(embedding []float32, pos ropePos,
 					if !normDone {
 						rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 					}
-				}
-				if !normDone {
-					rt.addRMSNormMaybeVulkan(sc.norm, h, att, tl.w.ln2, float32(c.RMSNormEps))
 				}
 			}
 		}
