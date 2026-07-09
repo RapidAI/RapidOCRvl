@@ -5778,61 +5778,53 @@ siluFmaDone:
 TEXT ·geluTanhFMA(SB), NOSPLIT, $0-24
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
-
-	CMPQ CX, $8
+	VBROADCASTSS geluC<>(SB), Z11
+	VBROADCASTSS geluK<>(SB), Z12
+	VBROADCASTSS geluHalf<>(SB), Z13
+	VBROADCASTSS geluTwo<>(SB), Z14
+	VBROADCASTSS geluOne<>(SB), Z15
+	CMPQ CX, $16
 	JB geluFmaTail
-
-	VBROADCASTSS geluC<>(SB), Y11
-	VBROADCASTSS geluK<>(SB), Y12
-	VBROADCASTSS geluHalf<>(SB), Y13
-	VBROADCASTSS geluTwo<>(SB), Y14
-	VBROADCASTSS geluOne<>(SB), Y15
-
 geluFmaLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB geluFmaReduce
-
-	VMOVUPS (SI), Y0             // Y0 = x
-	VMULPS Y0, Y0, Y1            // Y1 = x^2
-	VMULPS Y0, Y1, Y2            // Y2 = x^3
-	VMULPS gelu2ckLog2e<>(SB), Y2, Y3 // Y3 = 2ckL2e * x^3
-	// Y4 = 2cL2e*x + 2ckL2e*x^3 via FMA: Y4 = Y3 + Y0 * gelu2cLog2e
-	// VFMADD231PS Y4, Y0, [gelu2cLog2e] needs Y4 pre-loaded with Y3
-	VMOVUPS Y3, Y4
-	VMOVUPS gelu2cLog2e<>(SB), Y10
-	VFMADD231PS Y0, Y10, Y4          // Y4 = t = Y3 + x * 2cL2e
-	VROUNDPS $8, Y4, Y5
-	VSUBPS Y5, Y4, Y6
-	VMULPS Y6, Y6, Y4              // Y4 = f^2
-	VMOVUPS expOne<>(SB), Y7       // Y7 = 1
-	VMOVUPS expC1<>(SB), Y10        // Y10 = c1
-	VFMADD231PS Y6, Y10, Y7          // Y7 = A = 1 + c1*f
-	VMOVUPS expC2<>(SB), Y1        // Y1 = c2
-	VMOVUPS expC3<>(SB), Y10        // Y10 = c3
-	VFMADD231PS Y6, Y10, Y1          // Y1 = B = c2 + c3*f
-	VMOVUPS expC4<>(SB), Y2        // Y2 = c4
-	VMOVUPS expC5<>(SB), Y10        // Y10 = c5
-	VFMADD231PS Y6, Y10, Y2          // Y2 = C = c4 + c5*f
-	VFMADD231PS Y4, Y2, Y1          // Y1 = B2 = B + C*f^2
-	VFMADD231PS Y4, Y1, Y7          // Y7 = poly = A + f^2*B2
-	VCVTPS2DQ Y5, Y5
-	VPADDD expInt127<>(SB), Y5, Y5
-	VPSLLD $23, Y5, Y5
-	VMULPS Y5, Y7, Y8
-	VSUBPS Y15, Y8, Y9
-	VADDPS Y15, Y8, Y1
-	VDIVPS Y1, Y9, Y9
-	VADDPS Y15, Y9, Y9
-	VMULPS Y0, Y9, Y9
-	VMULPS Y13, Y9, Y9
-	VMOVUPS Y9, (SI)
-	ADDQ $32, SI
-	SUBQ $8, CX
+	VMOVUPS (SI), Z0             // Z0 = x
+	VMULPS Z0, Z0, Z1            // Z1 = x^2
+	VMULPS Z0, Z1, Z2            // Z2 = x^3
+	VMULPS gelu2ckLog2e<>(SB), Z2, Z3 // Z3 = 2ckL2e * x^3
+	VMOVUPS Z3, Z4
+	VMOVUPS gelu2cLog2e<>(SB), Z10
+	VFMADD231PS Z0, Z10, Z4          // Z4 = t = Z3 + x * 2cL2e
+	VRNDSCALEPS $8, Z4, Z5
+	VSUBPS Z5, Z4, Z6
+	VMULPS Z6, Z6, Z4              // Z4 = f^2
+	VMOVUPS expOne<>(SB), Z7       // Z7 = 1
+	VMOVUPS expC1<>(SB), Z10        // Z10 = c1
+	VFMADD231PS Z6, Z10, Z7          // Z7 = A = 1 + c1*f
+	VMOVUPS expC2<>(SB), Z1        // Z1 = c2
+	VMOVUPS expC3<>(SB), Z10        // Z10 = c3
+	VFMADD231PS Z6, Z10, Z1          // Z1 = B = c2 + c3*f
+	VMOVUPS expC4<>(SB), Z2        // Z2 = c4
+	VMOVUPS expC5<>(SB), Z10        // Z10 = c5
+	VFMADD231PS Z6, Z10, Z2          // Z2 = C = c4 + c5*f
+	VFMADD231PS Z4, Z2, Z1          // Z1 = B2 = B + C*f^2
+	VFMADD231PS Z4, Z1, Z7          // Z7 = poly = A + f^2*B2
+	VCVTPS2DQ Z5, Z5
+	VPADDD expInt127<>(SB), Z5, Z5
+	VPSLLD $23, Z5, Z5
+	VMULPS Z5, Z7, Z8
+	VSUBPS Z15, Z8, Z9
+	VADDPS Z15, Z8, Z1
+	VDIVPS Z1, Z9, Z9
+	VADDPS Z15, Z9, Z9
+	VMULPS Z0, Z9, Z9
+	VMULPS Z13, Z9, Z9
+	VMOVUPS Z9, (SI)
+	ADDQ $64, SI
+	SUBQ $16, CX
 	JMP geluFmaLoop
-
 geluFmaReduce:
 	VZEROUPPER
-
 geluFmaTail:
 	CMPQ CX, $0
 	JE geluFmaDone
@@ -5879,12 +5871,8 @@ geluFmaTail:
 	ADDQ $4, SI
 	DECQ CX
 	JMP geluFmaTail
-
 geluFmaDone:
 	RET
-// quantizeQ8RowAVX2: quantizes float32 row to int8 using AVX2.
-// Processes 8 values per iteration: w[i]*inv, round, clamp [-127,127], pack to int8.
-// Args: w_base+0(FP), w_len+8(FP), data_base+24(FP), inv+48(FP)
 TEXT ·quantizeQ8RowAVX2(SB), NOSPLIT, $0-52
 	MOVQ w_base+0(FP), SI
 	MOVQ w_len+8(FP), CX
