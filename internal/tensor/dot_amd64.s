@@ -5786,39 +5786,35 @@ TEXT ·quantizeQ4RowAVX2(SB), NOSPLIT, $0-52
 	MOVQ w_base+0(FP), SI
 	MOVQ w_len+8(FP), CX
 	MOVQ data_base+24(FP), DI
-	VBROADCASTSS inv+48(FP), Y1
-	VBROADCASTSS q4Clamp7<>(SB), Y4     // 7.0
-	VBROADCASTSS q4ClampNeg7<>(SB), Y5  // -7.0
-	VPCMPEQD Y6, Y6, Y6
-	VPSRLW $8, Y6, Y6                    // mask to clear high nibble of each byte
-
-	CMPQ CX, $8
+	VBROADCASTSS inv+48(FP), Z1
+	VBROADCASTSS q4Clamp7<>(SB), Z4
+	VBROADCASTSS q4ClampNeg7<>(SB), Z5
+	VPTERNLOGD $0xFF, Z6, Z6, Z6
+	VPSRLW $8, Z6, Z6
+	CMPQ CX, $16
 	JB q4qTail
-
 q4qLoop:
-	CMPQ CX, $8
+	CMPQ CX, $16
 	JB q4qDone
-	VMOVUPS (SI), Y0
-	VMULPS Y1, Y0, Y0          // w * inv
-	VROUNDPS $8, Y0, Y0        // round to nearest
-	VMINPS Y4, Y0, Y0          // clamp max 7
-	VMAXPS Y5, Y0, Y0          // clamp min -7
-	VCVTPS2DQ Y0, Y0           // float32 -> int32
-	VPADDD q4Add8<>(SB), Y0, Y0 // +8 -> [0,15]
-	VPACKSSWB Y0, Y0, Y0       // int32 -> int8 (low 16 bytes = 8 values)
-	// Now X0 has 8 bytes, each [0,15]
-	// Pack pairs: byte[i] | byte[i+1]<<4
-	VPSLLW $4, X0, X2          // shift left by 4 (odd positions)
-	VPAND X6, X0, X0           // mask even positions to low nibble
-	VPOR X2, X0, X0            // combine
-	// Now we have 4 packed bytes in low half of X0
-	VMOVQ X0, AX               // get 8 bytes (we only need 4)
-	MOVL AX, (DI)              // store 4 bytes
-	ADDQ $32, SI
+	VMOVUPS (SI), Z0
+	VMULPS Z1, Z0, Z0
+	VRNDSCALEPS $8, Z0, Z0
+	VMINPS Z4, Z0, Z0
+	VMAXPS Z5, Z0, Z0
+	VCVTPS2DQ Z0, Z0
+	VPADDD q4Add8Z<>(SB), Z0, Z0
+	VPMOVDB Z0, X0
+	VPSLLW $4, Y0, Y2
+	VPAND Y6, Y0, Y0
+	VPOR Y2, Y0, Y0
+	VPSRLDQ $8, Y0, Y2
+	VPOR Y2, Y0, Y0
+	VMOVQ X0, AX
+	MOVL AX, (DI)
+	ADDQ $64, SI
 	ADDQ $4, DI
-	SUBQ $8, CX
+	SUBQ $16, CX
 	JMP q4qLoop
-
 q4qDone:
 	VZEROUPPER
 q4qTail:
@@ -5830,15 +5826,12 @@ q4qTail:
 	VMINSS X4, X0, X0
 	VMAXSS X5, X0, X0
 	VCVTPS2DQ X0, X0
-	// Add 8, clamp to [0,15], pack
 	MOVD X0, AX
 	ADDL $8, AX
 	CMPL AX, $15
 	JLE q4qTail2
 	MOVL $15, AX
 q4qTail2:
-	// Now AX has nibble value [0,15]
-	// If we have a pair, combine; else store single
 	CMPQ CX, $2
 	JB q4qSingle
 	MOVSS 4(SI), X0
@@ -5866,7 +5859,6 @@ q4qSingle:
 	INCQ DI
 	DECQ CX
 	JMP q4qTail
-
 q4qRet:
 	VZEROUPPER
 	RET
@@ -5879,6 +5871,25 @@ GLOBL q4ClampNeg7<>(SB), RODATA, $4
 
 DATA q4Add8<>+0(SB)/4, $0x00000008
 GLOBL q4Add8<>(SB), RODATA, $4
+
+// q4Add8Z: 16 x int32 = 8, for ZMM VPMOVDB pack path
+DATA q4Add8Z<>+0(SB)/4, $0x00000008
+DATA q4Add8Z<>+4(SB)/4, $0x00000008
+DATA q4Add8Z<>+8(SB)/4, $0x00000008
+DATA q4Add8Z<>+12(SB)/4, $0x00000008
+DATA q4Add8Z<>+16(SB)/4, $0x00000008
+DATA q4Add8Z<>+20(SB)/4, $0x00000008
+DATA q4Add8Z<>+24(SB)/4, $0x00000008
+DATA q4Add8Z<>+28(SB)/4, $0x00000008
+DATA q4Add8Z<>+32(SB)/4, $0x00000008
+DATA q4Add8Z<>+36(SB)/4, $0x00000008
+DATA q4Add8Z<>+40(SB)/4, $0x00000008
+DATA q4Add8Z<>+44(SB)/4, $0x00000008
+DATA q4Add8Z<>+48(SB)/4, $0x00000008
+DATA q4Add8Z<>+52(SB)/4, $0x00000008
+DATA q4Add8Z<>+56(SB)/4, $0x00000008
+DATA q4Add8Z<>+60(SB)/4, $0x00000008
+GLOBL q4Add8Z<>(SB), RODATA, $64
 // quantizeQ6RowAVX2: quantizes 8 float32 to 6 packed bytes (8 x 6-bit values).
 // Only processes groups of 8. Returns the number of values processed (always multiple of 8).
 // The Go caller handles the tail.
