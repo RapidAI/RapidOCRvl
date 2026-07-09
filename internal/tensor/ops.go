@@ -826,7 +826,7 @@ func AddRMSNorm(out, dst, add, weight []float32, eps float32) {
 	} else {
 		ss = addInPlaceSumSquaresScalar(dst, add)
 	}
-	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
+	scale := fastRsqrtF32(ss/float32(n)+eps)
 	if useDotFMA && n >= 8 {
 		mulScaleFMA(out, dst, weight, scale)
 		return
@@ -859,7 +859,7 @@ func AddLayerNorm(out, dst, add, weight, bias []float32, eps float32) {
 	} else {
 		variance = sumSquaresCenteredScalar(dst, mean)
 	}
-	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
+	scale := fastRsqrtF32(variance/float32(n)+eps)
 	if useDotFMA && n >= 8 {
 		affineNormFMA(out, dst, weight, bias, mean, scale)
 		return
@@ -928,7 +928,7 @@ func RMSNorm(out, x, weight []float32, eps float32) {
 	} else {
 		ss = sumSquaresScalar(x)
 	}
-	scale := float32(1 / math.Sqrt(float64(ss)/float64(n)+float64(eps)))
+	scale := fastRsqrtF32(ss/float32(n)+eps)
 	if useDotFMA && n >= 8 {
 		mulScaleFMA(out, x, weight, scale)
 		return
@@ -982,7 +982,7 @@ func LayerNorm(out, x, weight, bias []float32, eps float32) {
 	} else {
 		variance = sumSquaresCenteredScalar(x, mean)
 	}
-	scale := float32(1 / math.Sqrt(float64(variance)/float64(n)+float64(eps)))
+	scale := fastRsqrtF32(variance/float32(n)+eps)
 	if useDotFMA && n >= 8 {
 		affineNormFMA(out, x, weight, bias, mean, scale)
 		return
@@ -1299,6 +1299,22 @@ func max32(a, b float32) float32 {
 	}
 	return a
 }
+
+// fastRsqrtF32 computes 1/sqrt(x) using the bit-manipulation initial guess
+// followed by two Newton-Raphson refinements, yielding full float32 precision.
+func fastRsqrtF32(x float32) float32 {
+	if x == 0 {
+		return float32(math.Inf(1))
+	}
+	half := x * 0.5
+	bits := math.Float32bits(x)
+	i := uint32(0x5f3759df) - (bits >> 1)
+	y := math.Float32frombits(i)
+	y = y * (1.5 - half*y*y)
+	y = y * (1.5 - half*y*y)
+	return y
+}
+
 
 func Argmax(x []float32) int {
 	n := len(x)
