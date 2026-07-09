@@ -3691,6 +3691,31 @@ func (rt *Runtime) attentionChainedQKV(sc *layerScratch, cache *kvCache, tl *tex
 
 // attentionWithNormPostQKV runs the attention + output + AddRMSNorm portion
 // of attentionWithNorm, assuming QKV has already been computed and cached.
+// matVecOutAddRMSNormCPU tries the CPU fused matvec+AddRMSNorm for the attention
+// output projection. Returns true if fused, false if caller should use separate calls.
+func (rt *Runtime) matVecOutAddRMSNormCPU(normOut, residual, headOut []float32, tl *textLayer, hiddenSize, qRows int, normWeight []float32, eps float32) bool {
+	if len(normOut) < hiddenSize || len(residual) < hiddenSize || len(normWeight) < hiddenSize {
+		return false
+	}
+	if tl.q8.o != nil {
+		tensor.MatVecQ8AddRMSNorm(normOut, residual, headOut, tl.q8.o, normWeight, eps)
+		return true
+	}
+	if tl.q4.o != nil {
+		tensor.MatVecQ4AddRMSNormOutOnly(normOut, residual, headOut, tl.q4.o, normWeight, eps)
+		return true
+	}
+	if tl.q6.o != nil {
+		tensor.MatVecQ6AddRMSNormOutOnly(normOut, residual, headOut, tl.q6.o, normWeight, eps)
+		return true
+	}
+	if tl.w.o != nil {
+		tensor.MatVecAddRMSNorm(normOut, residual, headOut, tl.w.o, hiddenSize, qRows, normWeight, eps)
+		return true
+	}
+	return false
+}
+
 func (rt *Runtime) attentionWithNormPostQKV(x []float32, cache *kvCache, tl *textLayer, sc *layerScratch, hasRoPE bool, ropeCos, ropeSin, residual, normWeight, normOut []float32) ([]float32, bool) {
 	c := rt.cfg
 	qRows := c.NumAttentionHeads * c.HeadDim
@@ -3730,6 +3755,9 @@ func (rt *Runtime) attentionWithNormPostQKV(x []float32, cache *kvCache, tl *tex
 		return sc.att[:c.HiddenSize], false
 	}
 	if rt.vulkanTextCacheAttention(headOut, q, cache, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		if rt.matVecOutAddRMSNormCPU(normOut, residual, headOut, tl, c.HiddenSize, qRows, normWeight, float32(c.RMSNormEps)) {
+			return nil, true
+		}
 		out := sc.att[:c.HiddenSize]
 		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
 		return out, false
@@ -3747,6 +3775,9 @@ func (rt *Runtime) attentionWithNormPostQKV(x []float32, cache *kvCache, tl *tex
 				}
 				cacheAttentionSmall(dst, q[h*c.HeadDim:(h+1)*c.HeadDim], cache, kvh, c.HeadDim, scale)
 			}
+		}
+		if rt.matVecOutAddRMSNormCPU(normOut, residual, headOut, tl, c.HiddenSize, qRows, normWeight, float32(c.RMSNormEps)) {
+			return nil, true
 		}
 		out := sc.att[:c.HiddenSize]
 		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
@@ -3915,6 +3946,9 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 		return sc.att[:c.HiddenSize], false
 	}
 	if rt.vulkanTextCacheAttention(headOut, q, cache, c.NumAttentionHeads, c.NumKeyValueHeads, c.HeadDim) {
+		if rt.matVecOutAddRMSNormCPU(normOut, residual, headOut, tl, c.HiddenSize, qRows, normWeight, float32(c.RMSNormEps)) {
+			return nil, true
+		}
 		out := sc.att[:c.HiddenSize]
 		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)
 		return out, false
@@ -3932,6 +3966,9 @@ func (rt *Runtime) attentionWithNorm(x []float32, cache *kvCache, tl *textLayer,
 				}
 				cacheAttentionSmall(dst, q[h*c.HeadDim:(h+1)*c.HeadDim], cache, kvh, c.HeadDim, scale)
 			}
+		}
+		if rt.matVecOutAddRMSNormCPU(normOut, residual, headOut, tl, c.HiddenSize, qRows, normWeight, float32(c.RMSNormEps)) {
+			return nil, true
 		}
 		out := sc.att[:c.HiddenSize]
 		rt.matVecMaybeQuant(out, headOut, tl.w.o, tl.q8.o, tl.q6.o, tl.q4.o, c.HiddenSize, qRows)

@@ -1627,7 +1627,9 @@ func TestAttentionWithNormCacheFallbackMatchesCPU(t *testing.T) {
 	cpu := &Runtime{cfg: cfg}
 	cpuScratch := newScratch()
 	cpuCache := newCache()
-	wantAtt, wantNormDone := cpu.attentionWithNorm(x, cpuCache, tl, cpuScratch, false, nil, nil, residual, normWeight, cpuScratch.norm)
+	cpuResidual := make([]float32, len(residual))
+	copy(cpuResidual, residual)
+	wantAtt, wantNormDone := cpu.attentionWithNorm(x, cpuCache, tl, cpuScratch, false, nil, nil, cpuResidual, normWeight, cpuScratch.norm)
 
 	rt := &Runtime{backend: "vulkan", cfg: cfg}
 	rt.disableVulkanOp(vulkanOpTextAttentionOutAddRMSNormF32)
@@ -1635,15 +1637,21 @@ func TestAttentionWithNormCacheFallbackMatchesCPU(t *testing.T) {
 	rt.disableVulkanOp(vulkanOpTextAttentionF32)
 	gotScratch := newScratch()
 	gotCache := newCache()
-	gotAtt, gotNormDone := rt.attentionWithNorm(x, gotCache, tl, gotScratch, false, nil, nil, residual, normWeight, gotScratch.norm)
+	gotResidual := make([]float32, len(residual))
+	copy(gotResidual, residual)
+	gotAtt, gotNormDone := rt.attentionWithNorm(x, gotCache, tl, gotScratch, false, nil, nil, gotResidual, normWeight, gotScratch.norm)
 
-	if gotNormDone || wantNormDone {
-		t.Fatalf("normDone got=%v want=%v, fused path should be disabled", gotNormDone, wantNormDone)
+	if gotNormDone != wantNormDone {
+		t.Fatalf("normDone got=%v want=%v", gotNormDone, wantNormDone)
 	}
-	assertCloseSliceTol(t, "att", gotAtt, wantAtt, 1e-5)
+	if !gotNormDone {
+		assertCloseSliceTol(t, "att", gotAtt, wantAtt, 1e-5)
+		assertCloseSliceTol(t, "normOutUnchanged", gotScratch.norm, []float32{0, 0, 0, 0}, 0)
+	} else {
+		assertCloseSliceTol(t, "normOut", gotScratch.norm, cpuScratch.norm, 1e-5)
+	}
 	assertCloseSliceTol(t, "cacheK", gotCache.k, cpuCache.k, 1e-5)
 	assertCloseSliceTol(t, "cacheV", gotCache.v, cpuCache.v, 1e-5)
-	assertCloseSliceTol(t, "normOutUnchanged", gotScratch.norm, []float32{0, 0, 0, 0}, 0)
 	if gotCache.len != 2 {
 		t.Fatalf("cache len=%d want 2", gotCache.len)
 	}
