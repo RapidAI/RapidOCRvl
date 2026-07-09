@@ -17,6 +17,7 @@ func addInPlaceSumSquaresAVX(dst, x []float32) float32
 func addSumSquaresAVX(out, dst, add []float32) float32
 func addSumSquaresFMA(out, dst, add []float32) float32
 func addScaledAVX(dst, x []float32, scale float32)
+func addScaledFMA(dst, x []float32, scale float32)
 func scaleInPlaceAVX(dst []float32, scale float32)
 func mulScaleAVX(out, x, weight []float32, scale float32)
 func affineNormAVX(out, x, weight, bias []float32, mean, scale float32)

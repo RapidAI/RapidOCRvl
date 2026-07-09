@@ -33,6 +33,9 @@ func addSumSquaresFMA(out, dst, add []float32) float32 {
 func addScaledAVX(dst, x []float32, scale float32) {
 	addScaledScalar(dst, x, scale)
 }
+func addScaledFMA(dst, x []float32, scale float32) {
+	addScaledScalar(dst, x, scale)
+}
 
 func scaleInPlaceAVX(dst []float32, scale float32) {
 	scaleInPlaceScalar(dst, scale)

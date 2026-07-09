@@ -484,6 +484,67 @@ addScaledTail:
 addScaledDone:
 	RET
 
+
+// addScaledFMA: FMA version of addScaledAVX. dst[i] += scale * x[i].
+// Fuses VMULPS+VADDPS into VFMADD231PS.
+TEXT ·addScaledFMA(SB), NOSPLIT, $0-52
+	MOVQ dst_base+0(FP), SI
+	MOVQ dst_len+8(FP), CX
+	MOVQ x_base+24(FP), DI
+	VBROADCASTSS scale+48(FP), Y1
+
+	CMPQ CX, $8
+	JB addScaledFmaTail
+
+addScaledFmaLoop32:
+	CMPQ CX, $32
+	JB addScaledFmaLoop
+	VMOVUPS (SI), Y0
+	VFMADD231PS (DI), Y1, Y0
+	VMOVUPS Y0, (SI)
+	VMOVUPS 32(SI), Y0
+	VFMADD231PS 32(DI), Y1, Y0
+	VMOVUPS Y0, 32(SI)
+	VMOVUPS 64(SI), Y0
+	VFMADD231PS 64(DI), Y1, Y0
+	VMOVUPS Y0, 64(SI)
+	VMOVUPS 96(SI), Y0
+	VFMADD231PS 96(DI), Y1, Y0
+	VMOVUPS Y0, 96(SI)
+	ADDQ $128, SI
+	ADDQ $128, DI
+	SUBQ $32, CX
+	JMP addScaledFmaLoop32
+
+addScaledFmaLoop:
+	CMPQ CX, $8
+	JB addScaledFmaDoneVec
+	VMOVUPS (SI), Y0
+	VFMADD231PS (DI), Y1, Y0
+	VMOVUPS Y0, (SI)
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP addScaledFmaLoop
+
+addScaledFmaDoneVec:
+	VZEROUPPER
+
+addScaledFmaTail:
+	CMPQ CX, $0
+	JE addScaledFmaDone
+	MOVSS (DI), X0
+	MULSS scale+48(FP), X0
+	ADDSS (SI), X0
+	MOVSS X0, (SI)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	DECQ CX
+	JMP addScaledFmaTail
+
+addScaledFmaDone:
+	RET
+
 TEXT ·scaleInPlaceAVX(SB), NOSPLIT, $0-28
 	MOVQ dst_base+0(FP), SI
 	MOVQ dst_len+8(FP), CX

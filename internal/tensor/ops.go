@@ -747,6 +747,10 @@ func dotF32QuadScalar(a, b, c, d, x []float32) (float32, float32, float32, float
 }
 
 func AddScaled(dst, x []float32, scale float32) {
+	if useDotFMA && len(dst) >= 8 {
+		addScaledFMA(dst, x, scale)
+		return
+	}
 	if useDotF32AVX && len(dst) >= 8 {
 		addScaledAVX(dst, x, scale)
 		return
