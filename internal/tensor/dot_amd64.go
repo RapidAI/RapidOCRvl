@@ -117,6 +117,9 @@ func finalizeDotQ8PairVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *
 
 
 //go:noescape
+func finalizeDotQ8BiasVNNI(dots *int32, rowSum *int32, scale *float32, out *float32, bias *float32, n int, scaleX float32)
+
+//go:noescape
 func finalizeAddSumSquaresInPlaceVNNI(dots *int32, rowSum *int32, scale *float32, out *float32, residual *float32, n int, scaleX float32) float32
 
 //go:noescape

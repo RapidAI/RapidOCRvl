@@ -1365,3 +1365,70 @@ ssOutTail:
 
 ssOutRetTail:
 	RET
+
+// finalizeDotQ8BiasVNNI(dots *int32, rowSum *int32, scale *float32, out *float32, bias *float32, n int, scaleX float32)
+// Computes out[i] = float32(dots[i] - 128*rowSum[i]) * scaleX * scale[i] + bias[i]
+// Processes 8 elements per iteration using YMM registers.
+TEXT ·finalizeDotQ8BiasVNNI(SB), NOSPLIT, $0-52
+	MOVQ dots_base+0(FP), SI
+	MOVQ rowSum_base+8(FP), DI
+	MOVQ scale_base+16(FP), DX
+	MOVQ out_base+24(FP), CX
+	MOVQ bias_base+32(FP), R8
+	MOVQ n+40(FP), R9
+	VBROADCASTSS scaleX+48(FP), Y1
+	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+
+	CMPQ R9, $8
+	JB finBiasTail
+
+finBiasLoop:
+	CMPQ R9, $8
+	JB finBiasDone
+	VMOVDQU (SI), Y0        // 8 int32 dots
+	VMOVDQU (DI), Y3        // 8 int32 rowSum
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3       // 128 * rowSum
+	VSUBPS Y3, Y0, Y0       // dot - 128*rowSum
+	VMOVUPS (DX), Y4        // scale[i..i+7]
+	VMULPS Y1, Y0, Y0       // * scaleX
+	VMULPS Y4, Y0, Y0      // * scale[i]
+	VMOVUPS (R8), Y5        // bias[i..i+7]
+	VADDPS Y5, Y0, Y0       // + bias
+	VMOVUPS Y0, (CX)        // store result
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $32, CX
+	ADDQ $32, R8
+	SUBQ $8, R9
+	JMP finBiasLoop
+
+finBiasDone:
+	VZEROUPPER
+finBiasTail:
+	CMPQ R9, $0
+	JE finBiasRet
+	MOVL (SI), AX           // dot (int32)
+	MOVL (DI), R10           // rowSum (int32)
+	IMULL $128, R10           // 128 * rowSum
+	SUBL R10, AX              // dot - 128*rowSum
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0         // to float32
+	VMULSS scaleX+48(FP), X0, X0  // * scaleX
+	MOVSS (DX), X1           // scale[i]
+	VMULSS X1, X0, X0        // * scale[i]
+	MOVSS (R8), X2           // bias[i]
+	VADDSS X2, X0, X0        // + bias
+	MOVSS X0, (CX)           // store
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	DECQ R9
+	JMP finBiasTail
+
+finBiasRet:
+	RET

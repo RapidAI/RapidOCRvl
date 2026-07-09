@@ -1320,9 +1320,7 @@ func matVecQ8BiasSerial(out, x []float32, q *Q8Matrix, bias []float32, start, en
 			scratch := getInt32Scratch(nRows)
 			defer putInt32Scratch(scratch)
 			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
-			for r := 0; r < nRows; r++ {
-				out[start+r] = float32(scratch[r]-128*rowSum[start+r])*scaleX*scale[start+r] + bias[start+r]
-			}
+			finalizeDotQ8BiasVNNI(&scratch[0], &rowSum[start], &scale[start], &out[start], &bias[start], nRows, scaleX)
 			return
 		}
 		for r := start; r < end; r++ {
