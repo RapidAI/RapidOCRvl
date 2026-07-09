@@ -1191,3 +1191,177 @@ finPairTail:
 
 finPairRet:
 	RET
+
+// finalizeAddSumSquaresInPlaceVNNI(dots *int32, rowSum *int32, scale *float32,
+//   out *float32, residual *float32, n int, scaleX float32) float32
+// Computes v = residual[i] + float32(dots[i] - 128*rowSum[i]) * scaleX * scale[i]
+// Stores v to both out[i] and residual[i].
+// Returns sum of v*v.
+// Processes 8 elements per iteration using YMM registers.
+TEXT ·finalizeAddSumSquaresInPlaceVNNI(SB), NOSPLIT, $0-60
+	MOVQ dots_base+0(FP), SI
+	MOVQ rowSum_base+8(FP), DI
+	MOVQ scale_base+16(FP), DX
+	MOVQ out_base+24(FP), CX
+	MOVQ residual_base+32(FP), R8
+	MOVQ n+40(FP), R9
+	VBROADCASTSS scaleX+48(FP), Y1
+	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+	VXORPS Y6, Y6, Y6                  // sum-of-squares accumulator
+
+	CMPQ R9, $8
+	JB ssInPlaceTail
+
+ssInPlaceLoop:
+	CMPQ R9, $8
+	JB ssInPlaceDone
+	VMOVDQU (SI), Y0         // 8 int32 dots
+	VMOVDQU (DI), Y3         // 8 int32 rowSum
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3        // 128 * rowSum
+	VSUBPS Y3, Y0, Y0        // dots - 128*rowSum
+	VMOVUPS (DX), Y4         // scale
+	VMULPS Y1, Y0, Y0        // * scaleX
+	VMULPS Y4, Y0, Y0        // * scale
+	VMOVUPS (R8), Y5         // residual
+	VADDPS Y5, Y0, Y0        // v = residual + result
+	VMOVUPS Y0, (CX)         // store out
+	VMOVUPS Y0, (R8)         // store residual
+	VMULPS Y0, Y0, Y3        // v * v
+	VADDPS Y3, Y6, Y6        // accumulate
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $32, CX
+	ADDQ $32, R8
+	SUBQ $8, R9
+	JMP ssInPlaceLoop
+
+ssInPlaceDone:
+	// Horizontal sum Y6 -> X0
+	VEXTRACTF128 $1, Y6, X7
+	VADDPS X6, X7, X7
+	VMOVHLPS X6, X7, X3      // high 64 bits
+	VADDPS X3, X7, X7
+	VSHUFPS $1, X7, X7, X3   // element 1
+	VADDSS X3, X7, X0        // X0 = total sum
+	VZEROUPPER
+	MOVSS X0, ret+56(FP)
+	RET
+
+ssInPlaceTail:
+	CMPQ R9, $0
+	JE ssInPlaceRetTail
+	MOVL (SI), AX
+	MOVL (DI), R13
+	IMULL $128, R13
+	SUBL R13, AX
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+48(FP), X0, X0
+	MOVSS (DX), X1
+	VMULSS X1, X0, X0        // result
+	MOVSS (R8), X1           // residual
+	VADDSS X1, X0, X0        // v = residual + result
+	MOVSS X0, (CX)           // store out
+	MOVSS X0, (R8)           // store residual
+	VMULSS X0, X0, X1        // v*v
+	MOVSS ret+56(FP), X3     // current sum
+	VADDSS X1, X3, X3
+	MOVSS X3, ret+56(FP)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	DECQ R9
+	JMP ssInPlaceTail
+
+ssInPlaceRetTail:
+	RET
+
+// finalizeAddSumSquaresOutOnlyVNNI(dots *int32, rowSum *int32, scale *float32,
+//   out *float32, residual *float32, n int, scaleX float32) float32
+// Computes v = residual[i] + float32(dots[i] - 128*rowSum[i]) * scaleX * scale[i]
+// Stores v to out[i] only (does NOT modify residual).
+// Returns sum of v*v.
+TEXT ·finalizeAddSumSquaresOutOnlyVNNI(SB), NOSPLIT, $0-60
+	MOVQ dots_base+0(FP), SI
+	MOVQ rowSum_base+8(FP), DI
+	MOVQ scale_base+16(FP), DX
+	MOVQ out_base+24(FP), CX
+	MOVQ residual_base+32(FP), R8
+	MOVQ n+40(FP), R9
+	VBROADCASTSS scaleX+48(FP), Y1
+	VBROADCASTSS offset128<>(SB), Y2   // 128.0
+	VXORPS Y6, Y6, Y6                  // sum-of-squares accumulator
+
+	CMPQ R9, $8
+	JB ssOutTail
+
+ssOutLoop:
+	CMPQ R9, $8
+	JB ssOutDone
+	VMOVDQU (SI), Y0         // 8 int32 dots
+	VMOVDQU (DI), Y3         // 8 int32 rowSum
+	VCVTDQ2PS Y0, Y0
+	VCVTDQ2PS Y3, Y3
+	VMULPS Y2, Y3, Y3        // 128 * rowSum
+	VSUBPS Y3, Y0, Y0        // dots - 128*rowSum
+	VMOVUPS (DX), Y4         // scale
+	VMULPS Y1, Y0, Y0        // * scaleX
+	VMULPS Y4, Y0, Y0        // * scale
+	VMOVUPS (R8), Y5         // residual
+	VADDPS Y5, Y0, Y0        // v = residual + result
+	VMOVUPS Y0, (CX)         // store out only
+	VMULPS Y0, Y0, Y3        // v * v
+	VADDPS Y3, Y6, Y6        // accumulate
+	ADDQ $32, SI
+	ADDQ $32, DI
+	ADDQ $32, DX
+	ADDQ $32, CX
+	ADDQ $32, R8
+	SUBQ $8, R9
+	JMP ssOutLoop
+
+ssOutDone:
+	VEXTRACTF128 $1, Y6, X7
+	VADDPS X6, X7, X7
+	VMOVHLPS X6, X7, X3
+	VADDPS X3, X7, X7
+	VSHUFPS $1, X7, X7, X3
+	VADDSS X3, X7, X0
+	VZEROUPPER
+	MOVSS X0, ret+56(FP)
+	RET
+
+ssOutTail:
+	CMPQ R9, $0
+	JE ssOutRetTail
+	MOVL (SI), AX
+	MOVL (DI), R13
+	IMULL $128, R13
+	SUBL R13, AX
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+48(FP), X0, X0
+	MOVSS (DX), X1
+	VMULSS X1, X0, X0        // result
+	MOVSS (R8), X1           // residual
+	VADDSS X1, X0, X0        // v = residual + result
+	MOVSS X0, (CX)           // store out only
+	VMULSS X0, X0, X1        // v*v
+	MOVSS ret+56(FP), X3     // current sum
+	VADDSS X1, X3, X3
+	MOVSS X3, ret+56(FP)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	DECQ R9
+	JMP ssOutTail
+
+ssOutRetTail:
+	RET
