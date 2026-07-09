@@ -1276,16 +1276,12 @@ func max32(a, b float32) float32 {
 // fastRsqrtF32 computes 1/sqrt(x) using the bit-manipulation initial guess
 // followed by two Newton-Raphson refinements, yielding full float32 precision.
 func fastRsqrtF32(x float32) float32 {
-	if x == 0 {
-		return float32(math.Inf(1))
-	}
 	half := x * 0.5
-	bits := math.Float32bits(x)
-	i := uint32(0x5f3759df) - (bits >> 1)
-	y := math.Float32frombits(i)
+	b := *(*uint32)(unsafe.Pointer(&x))
+	i := 0x5f3759df - (b >> 1)
+	y := *(*float32)(unsafe.Pointer(&i))
 	y = y * (1.5 - half*y*y)
-	y = y * (1.5 - half*y*y)
-	return y
+	return y * (1.5 - half*y*y)
 }
 
 
