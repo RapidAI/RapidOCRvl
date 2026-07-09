@@ -812,12 +812,16 @@ func matVecQ4SwiGLUSerial(out, x []float32, gate, up *Q4Matrix, start, end int) 
 		uRS := up.RowSum
 		cols := gate.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
-				g := float32(dotA-128*gRS[r]) * scaleX * gScale[r]
-				u := float32(dotB-128*uRS[r]) * scaleX * uScale[r]
-				out[r] = SiLU(g) * u
+			nRows := end - start
+			sA := getInt32Scratch(nRows)
+			sB := getInt32Scratch(nRows)
+			defer putInt32Scratch(sA)
+			defer putInt32Scratch(sB)
+			dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				g := float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
+				u := float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
+				out[start+r] = SiLU(g) * u
 			}
 			return
 		}
@@ -859,11 +863,15 @@ func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4M
 				gRS := gate.RowSum
 				uRS := up.RowSum
 				cols := gate.Cols
-				for r := start; r < end; r++ {
-					base := r * cols
-					dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
-					out[r] = float32(dotA-128*gRS[r]) * scaleX * gScale[r]
-					tmpU[r] = float32(dotB-128*uRS[r]) * scaleX * uScale[r]
+				nRows := end - start
+				sA := getInt32Scratch(nRows)
+				sB := getInt32Scratch(nRows)
+				defer putInt32Scratch(sA)
+				defer putInt32Scratch(sB)
+				dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+				for r := 0; r < nRows; r++ {
+					out[start+r] = float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
+					tmpU[start+r] = float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
 				}
 				SiLUMulInPlace(out[start:end], tmpU[start:end])
 				return
@@ -885,12 +893,16 @@ func matVecQ4SwiGLUSerialBatched(out, tmpU []float32, x []float32, gate, up *Q4M
 			gRS := gate.RowSum
 			uRS := up.RowSum
 			cols := gate.Cols
-			for r := start; r < end; r++ {
-				base := r * cols
-				dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
-				g := float32(dotA-128*gRS[r]) * scaleX * gScale[r]
-				u := float32(dotB-128*uRS[r]) * scaleX * uScale[r]
-				out[r] = SiLU(g) * u
+			nRows := end - start
+			sA := getInt32Scratch(nRows)
+			sB := getInt32Scratch(nRows)
+			defer putInt32Scratch(sA)
+			defer putInt32Scratch(sB)
+			dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				g := float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
+				u := float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
+				out[start+r] = SiLU(g) * u
 			}
 			return
 		}
@@ -958,12 +970,16 @@ func matVecQ6SwiGLUSerial(out, x []float32, gate, up *Q6Matrix, start, end int) 
 		uRS := up.RowSum
 		cols := gate.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dotA, dotB := dotQ8PairVNNICore(&gData[base], &uData[base], &xq[0], cols)
-				g := float32(dotA-128*gRS[r]) * scaleX * gScale[r]
-				u := float32(dotB-128*uRS[r]) * scaleX * uScale[r]
-				out[r] = SiLU(g) * u
+			nRows := end - start
+			sA := getInt32Scratch(nRows)
+			sB := getInt32Scratch(nRows)
+			defer putInt32Scratch(sA)
+			defer putInt32Scratch(sB)
+			dotQ8PairVNNICoreMultiRowZMM(&gData[start*cols], &uData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				g := float32(sA[r]-128*gRS[start+r]) * scaleX * gScale[start+r]
+				u := float32(sB[r]-128*uRS[start+r]) * scaleX * uScale[start+r]
+				out[start+r] = SiLU(g) * u
 			}
 			return
 		}
@@ -1348,11 +1364,15 @@ func matVecQ4PairSerial(outA, outB, x []float32, a, b *Q4Matrix, start, end int)
 		aRS, bRS := a.RowSum, b.RowSum
 		cols := a.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dotA, dotB := dotQ8PairVNNICore(&aData[base], &bData[base], &xq[0], cols)
-				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
-				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+			nRows := end - start
+			sA := getInt32Scratch(nRows)
+			sB := getInt32Scratch(nRows)
+			defer putInt32Scratch(sA)
+			defer putInt32Scratch(sB)
+			dotQ8PairVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
+				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
 			}
 			return
 		}
@@ -1415,11 +1435,15 @@ func matVecQ6PairSerial(outA, outB, x []float32, a, b *Q6Matrix, start, end int)
 		aRS, bRS := a.RowSum, b.RowSum
 		cols := a.Cols
 		if useVNNI {
-			for r := start; r < end; r++ {
-				base := r * cols
-				dotA, dotB := dotQ8PairVNNICore(&aData[base], &bData[base], &xq[0], cols)
-				outA[r] = float32(dotA-128*aRS[r]) * scaleX * aScale[r]
-				outB[r] = float32(dotB-128*bRS[r]) * scaleX * bScale[r]
+			nRows := end - start
+			sA := getInt32Scratch(nRows)
+			sB := getInt32Scratch(nRows)
+			defer putInt32Scratch(sA)
+			defer putInt32Scratch(sB)
+			dotQ8PairVNNICoreMultiRowZMM(&aData[start*cols], &bData[start*cols], &xq[0], &sA[0], &sB[0], nRows, cols)
+			for r := 0; r < nRows; r++ {
+				outA[start+r] = float32(sA[r]-128*aRS[start+r]) * scaleX * aScale[start+r]
+				outB[start+r] = float32(sB[r]-128*bRS[start+r]) * scaleX * bScale[start+r]
 			}
 			return
 		}
