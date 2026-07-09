@@ -1700,3 +1700,29 @@ func BenchmarkSiLUMulInPlace8192(b *testing.B) {
 		SiLUMulInPlace(gate, up)
 	}
 }
+func BenchmarkSwiGLUSeparateMatVecs(b *testing.B) {
+	// SwiGLU using 2 separate MatVecQ8 calls + SiLUMulInPlace
+	// vs FusedSwiGLUQ8Scratch which uses dotQ8Pair
+	hidden, inter := 2048, 8192
+	x := make([]float32, hidden)
+	gateW := make([]float32, inter*hidden)
+	upW := make([]float32, inter*hidden)
+	downW := make([]float32, hidden*inter)
+	out := make([]float32, hidden)
+	tmpG := make([]float32, inter)
+	tmpU := make([]float32, inter)
+	fillBench(x)
+	fillBench(gateW)
+	fillBench(upW)
+	fillBench(downW)
+	gate := QuantizeQ8Row(gateW, inter, hidden)
+	up := QuantizeQ8Row(upW, inter, hidden)
+	down := QuantizeQ8Row(downW, hidden, inter)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		MatVecQ8(tmpG, x, gate)
+		MatVecQ8(tmpU, x, up)
+		SiLUMulInPlace(tmpG, tmpU)
+		MatVecQ8(out, tmpG, down)
+	}
+}
