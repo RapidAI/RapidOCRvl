@@ -7019,8 +7019,257 @@ maxF32v2Done:
 	MOVSS X0, ret+24(FP)
 	RET
 
+// expScaledVecFMA: fuses out[i] = exp(x[i]*scale + bias) into a single pass.
+// Same polynomial as expF32VecFMA but reads from x (SI), writes to out (DI),
+// and uses VFMADD213PS for scale*x+bias instead of a separate scalar pass.
+// Frame: out_base+0(FP), out_len+8(FP), x_base+24(FP), x_len+32(FP), scale+48(FP), bias+52(FP), ret+56(FP)
+TEXT ·expScaledVecFMA(SB), NOSPLIT, $0-64
+	MOVQ out_base+0(FP), DI
+	MOVQ out_len+8(FP), CX
+	MOVQ x_base+24(FP), SI
+	VBROADCASTSS scale+48(FP), Y14
+	VBROADCASTSS bias+52(FP), Y15
+	VBROADCASTSS expLog2e<>(SB), Y0
+	VBROADCASTSS expC1<>(SB), Y1
+	VBROADCASTSS expC2<>(SB), Y2
+	VBROADCASTSS expC3<>(SB), Y3
+	VBROADCASTSS expC4<>(SB), Y4
+	VBROADCASTSS expC5<>(SB), Y5
+	VBROADCASTSS expOne<>(SB), Y7
+	VBROADCASTSS expInt127<>(SB), Y6
+	VXORPS Y8, Y8, Y8
+	CMPQ CX, $8
+	JB expScaledTail
+expScaledLoop:
+	CMPQ CX, $8
+	JB expScaledDone
+	VMOVUPS (SI), Y10
+	VBROADCASTSS scale+48(FP), Y14
+	VBROADCASTSS bias+52(FP), Y15
+	VMULPS Y14, Y10, Y10
+	VADDPS Y15, Y10, Y10
+	VMULPS Y0, Y10, Y11
+	VROUNDPS $8, Y11, Y12
+	VSUBPS Y12, Y11, Y13
+	VMULPS Y13, Y13, Y10
+	VORPS Y7, Y7, Y14
+	VFMADD231PS Y13, Y1, Y14
+	VORPS Y2, Y2, Y11
+	VFMADD231PS Y13, Y3, Y11
+	VORPS Y4, Y4, Y9
+	VFMADD231PS Y13, Y5, Y9
+	VFMADD231PS Y10, Y9, Y11
+	VFMADD231PS Y10, Y11, Y14
+	VCVTPS2DQ Y12, Y12
+	VPADDD Y6, Y12, Y12
+	VPSLLD $23, Y12, Y12
+	VMULPS Y12, Y14, Y10
+	VMOVUPS Y10, (DI)
+	VADDPS Y10, Y8, Y8
+	ADDQ $32, SI
+	ADDQ $32, DI
+	SUBQ $8, CX
+	JMP expScaledLoop
+expScaledDone:
+	VEXTRACTF128 $1, Y8, X2
+	VADDPS X8, X2, X2
+	VHADDPS X2, X2, X2
+	VHADDPS X2, X2, X2
+	VZEROUPPER
+	MOVSS X2, ret+56(FP)
+	RET
+expScaledTail:
+	VEXTRACTF128 $1, Y8, X2
+	VADDPS X8, X2, X2
+	VHADDPS X2, X2, X2
+	VHADDPS X2, X2, X2
+	MOVSS X2, X8
+	VZEROUPPER
+expScaledTailLoop:
+	CMPQ CX, $0
+	JE expScaledTailDone
+	MOVSS (SI), X0
+	MOVSS scale+48(FP), X3
+	MOVSS bias+52(FP), X4
+	MULSS X3, X0
+	ADDSS X4, X0
+	MULSS expLog2e<>(SB), X0
+	ROUNDSS $8, X0, X1
+	SUBSS X1, X0
+	MOVSS X0, X3
+	MULSS X3, X3
+	MOVSS X3, X5
+	MOVSS X0, X6
+	MULSS expC1<>(SB), X6
+	ADDSS expOne<>(SB), X6
+	MOVSS X0, X7
+	MULSS expC3<>(SB), X7
+	ADDSS expC2<>(SB), X7
+	MULSS expC5<>(SB), X0
+	ADDSS expC4<>(SB), X0
+	MULSS X3, X0
+	ADDSS X7, X0
+	MULSS X3, X0
+	ADDSS X6, X0
+	VCVTPS2DQ X1, X1
+	LEAQ expInt127<>(SB), R8
+	VPADDD (R8), X1, X1
+	VPSLLD $23, X1, X1
+	MULSS X1, X0
+	MOVSS X0, (DI)
+	ADDSS X0, X8
+	ADDQ $4, SI
+	ADDQ $4, DI
+	DECQ CX
+	JMP expScaledTailLoop
+expScaledTailDone:
+	MOVSS X8, ret+56(FP)
+	RET
 DATA maxF32NegInf<>+0(SB)/4, $0xFF800000
 GLOBL maxF32NegInf<>(SB), RODATA, $4
+
+// argmaxF32AVX2: returns (index, value) of the maximum element.
+// Two-pass: SIMD max via VMAXPS, then SIMD equality scan to find first index.
+// Frame: x_base+0(FP), x_len+8(FP), ret_idx+24(FP), ret_val+32(FP)
+TEXT ·argmaxF32AVX2(SB), NOSPLIT, $0-40
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+
+	// Phase 1: find max value using VMAXPS
+	LEAQ maxF32NegInf<>(SB), AX
+	VBROADCASTSS (AX), Y0
+	VXORPS Y2, Y2, Y2
+	VXORPS Y4, Y4, Y4
+	VXORPS Y6, Y6, Y6
+	CMPQ CX, $8
+	JB argmaxF32MaxTail
+
+argmaxF32MaxLoop64:
+	CMPQ CX, $64
+	JB argmaxF32MaxLoop32
+	VMAXPS (SI), Y0, Y0
+	VMAXPS 32(SI), Y2, Y2
+	VMAXPS 64(SI), Y4, Y4
+	VMAXPS 96(SI), Y6, Y6
+	VMAXPS 128(SI), Y0, Y0
+	VMAXPS 160(SI), Y2, Y2
+	VMAXPS 192(SI), Y4, Y4
+	VMAXPS 224(SI), Y6, Y6
+	ADDQ $256, SI
+	SUBQ $64, CX
+	JMP argmaxF32MaxLoop64
+
+argmaxF32MaxLoop32:
+	CMPQ CX, $32
+	JB argmaxF32MaxLoop8
+	VMAXPS (SI), Y0, Y0
+	VMAXPS 32(SI), Y2, Y2
+	VMAXPS 64(SI), Y4, Y4
+	VMAXPS 96(SI), Y6, Y6
+	ADDQ $128, SI
+	SUBQ $32, CX
+	JMP argmaxF32MaxLoop32
+
+argmaxF32MaxLoop8:
+	CMPQ CX, $8
+	JB argmaxF32MaxReduce
+	VMAXPS (SI), Y0, Y0
+	ADDQ $32, SI
+	SUBQ $8, CX
+	JMP argmaxF32MaxLoop8
+
+argmaxF32MaxTail:
+	// n < 8: reduce what we have (Y0 has max), then scan scalar
+	VEXTRACTF128 $1, Y0, X2
+	VMAXPS X2, X0, X0
+	VSHUFPS $0x4E, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VSHUFPS $0xB1, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VZEROUPPER
+	MOVSS X0, ret_val+32(FP)
+	// Scalar tail scan
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	XORQ R9, R9
+argmaxF32MaxTailLoop:
+	CMPQ CX, $0
+	JE argmaxF32MaxTailDone
+	MOVSS (SI), X2
+	UCOMISS X0, X2
+	JE argmaxF32MaxTailDone
+	ADDQ $4, SI
+	DECQ CX
+	ADDQ $1, R9
+	JMP argmaxF32MaxTailLoop
+argmaxF32MaxTailDone:
+	MOVQ R9, ret_idx+24(FP)
+	RET
+
+argmaxF32MaxReduce:
+	VMAXPS Y2, Y0, Y0
+	VMAXPS Y4, Y0, Y0
+	VMAXPS Y6, Y0, Y0
+	VEXTRACTF128 $1, Y0, X2
+	VMAXPS X2, X0, X0
+	VSHUFPS $0x4E, X0, X0, X1
+	VMAXPS X1, X0, X0
+	VSHUFPS $0xB1, X0, X0, X1
+	VMAXPS X1, X0, X0
+	// X0[0] = max value. Broadcast to Y1 for comparison
+	VPERMILPS $0, X0, X1
+	VZEROUPPER
+	// Save max value to ret_val
+	MOVSS X0, ret_val+32(FP)
+
+	// Phase 2: find first index where x[i] == maxVal
+	MOVQ x_base+0(FP), SI
+	MOVQ x_len+8(FP), CX
+	XORQ R9, R9            // base index counter
+	VBROADCASTSS X1, Y2    // broadcast maxVal for comparison
+
+argmaxF32IdxLoop:
+	CMPQ CX, $8
+	JB argmaxF32IdxTail
+	VMOVUPS (SI), Y3
+	VCMPPS $0, Y3, Y2, Y4   // mask: lanes where x[i] == maxVal (imm=0 = EQ_OQ)
+	VMOVMSKPS Y4, R8       // extract mask to integer
+	TESTL R8, R8
+	JNE argmaxF32IdxFound
+	ADDQ $32, SI
+	SUBQ $8, CX
+	ADDQ $8, R9
+	JMP argmaxF32IdxLoop
+
+argmaxF32IdxFound:
+	// R8 has bitmask of matching lanes. Find lowest set bit.
+	BSFL R8, AX            // AX = bit position of first match (0-7)
+	ADDQ R9, AX            // add base index
+	MOVQ AX, ret_idx+24(FP)
+	VZEROUPPER
+	RET
+
+argmaxF32IdxTail:
+	VZEROUPPER
+	// Scalar tail scan
+	MOVSS X0, X1           // X1 = maxVal
+argmaxF32IdxTailLoop:
+	CMPQ CX, $0
+	JE argmaxF32IdxNotFound
+	MOVSS (SI), X2
+	UCOMISS X1, X2
+	JE argmaxF32IdxTailDone
+	ADDQ $4, SI
+	DECQ CX
+	ADDQ $1, R9
+	JMP argmaxF32IdxTailLoop
+argmaxF32IdxNotFound:
+	MOVQ R9, ret_idx+24(FP)
+	RET
+argmaxF32IdxTailDone:
+	MOVQ R9, ret_idx+24(FP)
+	RET
+
 // maxAbsFloat32AVX2: improved max(abs(x)) with 4 independent accumulators
 TEXT ·maxAbsFloat32AVX2(SB), NOSPLIT, $32-28
 	MOVQ x_base+0(FP), SI

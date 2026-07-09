@@ -84,6 +84,13 @@ func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32)
 
 func maxF32AVX2(x []float32) float32
 
+// argmaxF32AVX2 returns (index, value) of the maximum element in x using a single-pass SIMD scan.
+func argmaxF32AVX2(x []float32) (int, float32)
+
+// expScaledVecFMA computes out[i] = exp(x[i]*scale + bias) and returns the sum of all out values.
+// Fuses the scale*bias multiply-add into the exp polynomial, avoiding a separate pass.
+func expScaledVecFMA(out, x []float32, scale, bias float32) float32
+
 func sumSquaresF32FMA(x []float32) float32
 
 func mulScaleFMA(out, x, weight []float32, scale float32)

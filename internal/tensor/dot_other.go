@@ -364,6 +364,36 @@ func weightedSumAdd2FMA(dst, x0, x1 []float32, a0, a1 float32) { weightedSumAdd2
 
 func maxF32AVX2(x []float32) float32 { return maxF32AVX(x) }
 
+func argmaxF32AVX2(x []float32) (int, float32) {
+	if len(x) == 0 {
+		return 0, 0
+	}
+	best := 0
+	bestVal := x[0]
+	for i := 1; i < len(x); i++ {
+		if x[i] > bestVal {
+			best = i
+			bestVal = x[i]
+		}
+	}
+	return best, bestVal
+}
+
+func expScaledVecFMA(out, x []float32, scale, bias float32) float32 {
+	n := len(x)
+	if len(out) < n {
+		n = len(out)
+	}
+	var sum float32
+	for i := 0; i < n; i++ {
+		v := x[i]*scale + bias
+		e := FastExpF32(v)
+		out[i] = e
+		sum += e
+	}
+	return sum
+}
+
 
 func sumSquaresF32FMA(x []float32) float32 { return sumSquaresF32AVX(x) }
 

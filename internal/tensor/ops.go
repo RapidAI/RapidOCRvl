@@ -1305,14 +1305,9 @@ func Argmax(x []float32) int {
 		return 0
 	}
 	if useDotF32AVX && n >= 8 {
-		// Use AVX to find the max value, then scalar scan for first index
-		bestVal := maxF32AVX2(x)
-		for i := 0; i < n; i++ {
-			if x[i] == bestVal {
-				return i
-			}
-		}
-		return 0
+		// Single-pass SIMD argmax: tracks both max value and index in one scan
+		idx, _ := argmaxF32AVX2(x)
+		return idx
 	}
 	best := 0
 	bestVal := x[0]

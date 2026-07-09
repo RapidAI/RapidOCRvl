@@ -316,11 +316,13 @@ func ExpScaledVec(out, x []float32, scale, bias float32) float32 {
 	if n == 0 {
 		return 0
 	}
-	// Compute scaled+offset values into out, then use ExpVec
+	// Fused path: scale*x+bias + exp in a single pass (avoids a separate scalar multiply loop)
+	if useDotFMA && n >= 8 {
+		return expScaledVecFMA(out[:n], x[:n], scale, bias)
+	}
+	// Fallback: scalar multiply then vectorized exp
 	for i := 0; i < n; i++ {
 		out[i] = x[i]*scale + bias
 	}
-	// ExpVec computes out[i] = exp(out[i] - 0) = exp(out[i]) and returns sum
-	// But we want exp(out[i]) not exp(out[i]-m). So use m=0.
 	return ExpVec(out[:n], 0)
 }
