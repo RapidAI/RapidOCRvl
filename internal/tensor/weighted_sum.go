@@ -284,3 +284,43 @@ func RoPEPairAxis(q, k []float32, start, axisLen int, cosTable, sinTable []float
 		k1[i] = kb*cs + ka*sn
 	}
 }
+
+
+// Max returns the maximum value in x. Uses AVX2 when available.
+func Max(x []float32) float32 {
+	if useDotF32AVX && len(x) >= 8 {
+		return maxF32AVX2(x)
+	}
+	if len(x) == 0 {
+		return float32(0)
+	}
+	m := x[0]
+	for _, v := range x[1:] {
+		if v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+// MaxInPlace finds the maximum value in x. Same as Max but exported for model use.
+func MaxInPlace(x []float32) float32 {
+	return Max(x)
+}
+
+
+// ExpScaledVec fills out[i] = exp(x[i]*scale + bias) and returns the sum of all out values.
+// Uses AVX2+FMA vectorized exp when available.
+func ExpScaledVec(out, x []float32, scale, bias float32) float32 {
+	n := min(len(out), len(x))
+	if n == 0 {
+		return 0
+	}
+	// Compute scaled+offset values into out, then use ExpVec
+	for i := 0; i < n; i++ {
+		out[i] = x[i]*scale + bias
+	}
+	// ExpVec computes out[i] = exp(out[i] - 0) = exp(out[i]) and returns sum
+	// But we want exp(out[i]) not exp(out[i]-m). So use m=0.
+	return ExpVec(out[:n], 0)
+}

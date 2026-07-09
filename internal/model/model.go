@@ -2240,26 +2240,13 @@ func sampleFullLogitsScratch(logits []float32, temp float32, rng float64RNG, scr
 		}
 		return len(logits) - 1
 	}
-	var sum float32
-	i := 0
-	for ; i+3 < len(logits); i += 4 {
-		w0 := tensor.FastExpF32(logits[i]*invTemp - maxScore)
-		w1 := tensor.FastExpF32(logits[i+1]*invTemp - maxScore)
-		w2 := tensor.FastExpF32(logits[i+2]*invTemp - maxScore)
-		w3 := tensor.FastExpF32(logits[i+3]*invTemp - maxScore)
-		sum += w0
-		weights[i] = sum
-		sum += w1
-		weights[i+1] = sum
-		sum += w2
-		weights[i+2] = sum
-		sum += w3
-		weights[i+3] = sum
-	}
-	for ; i < len(logits); i++ {
-		w := tensor.FastExpF32(logits[i]*invTemp - maxScore)
-		sum += w
-		weights[i] = sum
+	// Vectorized exp: weights[i] = exp(logits[i]*invTemp - maxScore)
+	sum := tensor.ExpScaledVec(weights, logits, invTemp, -maxScore)
+	// Build cumulative sum for sampling
+	var cs float32
+	for i := 0; i < len(logits); i++ {
+		cs += weights[i]
+		weights[i] = cs
 	}
 	pick := float32(rng.Float64()) * sum
 	if idx := pickCumulativeFloat32(weights, pick); idx >= 0 {
@@ -2302,26 +2289,13 @@ func sampleFullLogitsTemp1Scratch(logits []float32, rng float64RNG, scratch *gen
 		}
 		return len(logits) - 1
 	}
-	var sum float32
-	i := 0
-	for ; i+3 < len(logits); i += 4 {
-		w0 := tensor.FastExpF32(logits[i] - maxScore)
-		w1 := tensor.FastExpF32(logits[i+1] - maxScore)
-		w2 := tensor.FastExpF32(logits[i+2] - maxScore)
-		w3 := tensor.FastExpF32(logits[i+3] - maxScore)
-		sum += w0
-		weights[i] = sum
-		sum += w1
-		weights[i+1] = sum
-		sum += w2
-		weights[i+2] = sum
-		sum += w3
-		weights[i+3] = sum
-	}
-	for ; i < len(logits); i++ {
-		w := tensor.FastExpF32(logits[i] - maxScore)
-		sum += w
-		weights[i] = sum
+	// Vectorized exp: weights[i] = exp(logits[i] - maxScore)
+	sum := tensor.ExpScaledVec(weights, logits, 1, -maxScore)
+	// Build cumulative sum for sampling
+	var cs float32
+	for i := 0; i < len(logits); i++ {
+		cs += weights[i]
+		weights[i] = cs
 	}
 	pick := float32(rng.Float64()) * sum
 	if idx := pickCumulativeFloat32(weights, pick); idx >= 0 {
@@ -2486,25 +2460,7 @@ func pickWeightedRawFloat32(weights []float32, pick float32) int {
 }
 
 func maxLogit(logits []float32) float32 {
-	m := float32(math.Inf(-1))
-	i := 0
-	n := len(logits)
-	var m0, m1, m2, m3, m4, m5, m6, m7 = m, m, m, m, m, m, m, m
-	for ; i+7 < n; i += 8 {
-		m0 = max32Local(m0, logits[i])
-		m1 = max32Local(m1, logits[i+1])
-		m2 = max32Local(m2, logits[i+2])
-		m3 = max32Local(m3, logits[i+3])
-		m4 = max32Local(m4, logits[i+4])
-		m5 = max32Local(m5, logits[i+5])
-		m6 = max32Local(m6, logits[i+6])
-		m7 = max32Local(m7, logits[i+7])
-	}
-	m = max32Local(max32Local(max32Local(m0, m1), max32Local(m2, m3)), max32Local(max32Local(m4, m5), max32Local(m6, m7)))
-	for ; i < n; i++ {
-		m = max32Local(m, logits[i])
-	}
-	return m
+	return tensor.Max(logits)
 }
 
 func max32Local(a, b float32) float32 {
