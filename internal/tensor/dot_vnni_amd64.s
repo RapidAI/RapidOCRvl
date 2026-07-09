@@ -1205,47 +1205,49 @@ TEXT ·finalizeAddSumSquaresInPlaceVNNI(SB), NOSPLIT, $0-60
 	MOVQ out_base+24(FP), CX
 	MOVQ residual_base+32(FP), R8
 	MOVQ n+40(FP), R9
-	VBROADCASTSS scaleX+48(FP), Y1
-	VBROADCASTSS offset128<>(SB), Y2   // 128.0
-	VXORPS Y6, Y6, Y6                  // sum-of-squares accumulator
+	VBROADCASTSS scaleX+48(FP), Z1
+	VBROADCASTSS offset128<>(SB), Z2   // 128.0
+	VXORPS Z6, Z6, Z6                  // sum-of-squares accumulator
 
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB ssInPlaceTail
 
 ssInPlaceLoop:
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB ssInPlaceDone
-	VMOVDQU (SI), Y0         // 8 int32 dots
-	VMOVDQU (DI), Y3         // 8 int32 rowSum
-	VCVTDQ2PS Y0, Y0
-	VCVTDQ2PS Y3, Y3
-	VMULPS Y2, Y3, Y3        // 128 * rowSum
-	VSUBPS Y3, Y0, Y0        // dots - 128*rowSum
-	VMOVUPS (DX), Y4         // scale
-	VMULPS Y1, Y0, Y0        // * scaleX
-	VMULPS Y4, Y0, Y0        // * scale
-	VMOVUPS (R8), Y5         // residual
-	VADDPS Y5, Y0, Y0        // v = residual + result
-	VMOVUPS Y0, (CX)         // store out
-	VMOVUPS Y0, (R8)         // store residual
-	VMULPS Y0, Y0, Y3        // v * v
-	VADDPS Y3, Y6, Y6        // accumulate
-	ADDQ $32, SI
-	ADDQ $32, DI
-	ADDQ $32, DX
-	ADDQ $32, CX
-	ADDQ $32, R8
-	SUBQ $8, R9
+	VMOVDQU64 (SI), Z0         // 16 int32 dots
+	VMOVDQU64 (DI), Z3         // 16 int32 rowSum
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z3, Z3
+	VMULPS Z2, Z3, Z3        // 128 * rowSum
+	VSUBPS Z3, Z0, Z0        // dots - 128*rowSum
+	VMOVUPS (DX), Z4         // scale
+	VMULPS Z1, Z0, Z0        // * scaleX
+	VMULPS Z4, Z0, Z0        // * scale
+	VMOVUPS (R8), Z5         // residual
+	VADDPS Z5, Z0, Z0        // v = residual + result
+	VMOVUPS Z0, (CX)         // store out
+	VMOVUPS Z0, (R8)         // store residual
+	VMULPS Z0, Z0, Z3        // v * v
+	VADDPS Z3, Z6, Z6        // accumulate
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, DX
+	ADDQ $64, CX
+	ADDQ $64, R8
+	SUBQ $16, R9
 	JMP ssInPlaceLoop
 
 ssInPlaceDone:
-	// Horizontal sum Y6 -> X0
-	VEXTRACTF128 $1, Y6, X7
-	VADDPS X6, X7, X7
-	VMOVHLPS X6, X7, X3      // high 64 bits
+	// Horizontal sum Z6 -> X0
+	VEXTRACTF64X4 $1, Z6, Y7
+	VADDPS Y6, Y7, Y7
+	VEXTRACTF128 $1, Y7, X3
 	VADDPS X3, X7, X7
-	VSHUFPS $1, X7, X7, X3   // element 1
-	VADDSS X3, X7, X0        // X0 = total sum
+	VMOVHLPS X7, X7, X3
+	VADDPS X3, X7, X7
+	VSHUFPS $1, X7, X7, X3
+	VADDSS X3, X7, X0
 	VZEROUPPER
 	MOVSS X0, ret+56(FP)
 	RET
@@ -1293,42 +1295,44 @@ TEXT ·finalizeAddSumSquaresOutOnlyVNNI(SB), NOSPLIT, $0-60
 	MOVQ out_base+24(FP), CX
 	MOVQ residual_base+32(FP), R8
 	MOVQ n+40(FP), R9
-	VBROADCASTSS scaleX+48(FP), Y1
-	VBROADCASTSS offset128<>(SB), Y2   // 128.0
-	VXORPS Y6, Y6, Y6                  // sum-of-squares accumulator
+	VBROADCASTSS scaleX+48(FP), Z1
+	VBROADCASTSS offset128<>(SB), Z2   // 128.0
+	VXORPS Z6, Z6, Z6                  // sum-of-squares accumulator
 
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB ssOutTail
 
 ssOutLoop:
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB ssOutDone
-	VMOVDQU (SI), Y0         // 8 int32 dots
-	VMOVDQU (DI), Y3         // 8 int32 rowSum
-	VCVTDQ2PS Y0, Y0
-	VCVTDQ2PS Y3, Y3
-	VMULPS Y2, Y3, Y3        // 128 * rowSum
-	VSUBPS Y3, Y0, Y0        // dots - 128*rowSum
-	VMOVUPS (DX), Y4         // scale
-	VMULPS Y1, Y0, Y0        // * scaleX
-	VMULPS Y4, Y0, Y0        // * scale
-	VMOVUPS (R8), Y5         // residual
-	VADDPS Y5, Y0, Y0        // v = residual + result
-	VMOVUPS Y0, (CX)         // store out only
-	VMULPS Y0, Y0, Y3        // v * v
-	VADDPS Y3, Y6, Y6        // accumulate
-	ADDQ $32, SI
-	ADDQ $32, DI
-	ADDQ $32, DX
-	ADDQ $32, CX
-	ADDQ $32, R8
-	SUBQ $8, R9
+	VMOVDQU64 (SI), Z0         // 16 int32 dots
+	VMOVDQU64 (DI), Z3         // 16 int32 rowSum
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z3, Z3
+	VMULPS Z2, Z3, Z3        // 128 * rowSum
+	VSUBPS Z3, Z0, Z0        // dots - 128*rowSum
+	VMOVUPS (DX), Z4         // scale
+	VMULPS Z1, Z0, Z0        // * scaleX
+	VMULPS Z4, Z0, Z0        // * scale
+	VMOVUPS (R8), Z5         // residual
+	VADDPS Z5, Z0, Z0        // v = residual + result
+	VMOVUPS Z0, (CX)         // store out only
+	VMULPS Z0, Z0, Z3        // v * v
+	VADDPS Z3, Z6, Z6        // accumulate
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, DX
+	ADDQ $64, CX
+	ADDQ $64, R8
+	SUBQ $16, R9
 	JMP ssOutLoop
 
 ssOutDone:
-	VEXTRACTF128 $1, Y6, X7
-	VADDPS X6, X7, X7
-	VMOVHLPS X6, X7, X3
+	VEXTRACTF64X4 $1, Z6, Y7
+	VADDPS Y6, Y7, Y7
+	VEXTRACTF128 $1, Y7, X3
+	VADDPS X3, X7, X7
+	VMOVHLPS X7, X7, X3
 	VADDPS X3, X7, X7
 	VSHUFPS $1, X7, X7, X3
 	VADDSS X3, X7, X0
