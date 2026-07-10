@@ -8,7 +8,7 @@ var useDotF32AVX = cpu.X86.HasAVX
 var useDotQ8AVX2 = cpu.X86.HasAVX2
 var useDotQ4AVX2 = cpu.X86.HasAVX2
 var useDotQ6AVX2 = false // Q6 AVX2 is slower than Go scalar+LUT
-var useDotFMA = cpu.X86.HasFMA
+var useDotFMA = false // FMA kernels (dot_fma_amd64.s) skip the <16 tail; disable until fixed
 var useVNNI = cpu.X86.HasAVX512VNNI // VPDPBUSD via EVEX encoding
 
 func addAVX(out, a, b []float32)

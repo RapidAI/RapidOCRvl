@@ -605,7 +605,7 @@ func parallelForMax(n, maxWorkers int, fn func(start, end int)) {
 }
 
 func dotF32(a, b []float32) float32 {
-	if useDotFMA && len(a) >= 8 {
+	if useDotFMA && len(a) >= 8 && len(a)%16 == 0 {
 		return dotF32FMA(a, b)
 	}
 	if useDotF32AVX && len(a) >= 8 {
@@ -704,7 +704,7 @@ func Dot(a, b []float32) float32 {
 }
 
 func dotF32Pair(a, b, x []float32) (float32, float32) {
-	if useDotFMA && len(x) >= 8 {
+	if useDotFMA && len(x) >= 8 && len(x)%16 == 0 {
 		return dotF32PairFMA(a, b, x)
 	}
 	if useDotF32AVX && len(x) >= 8 {
@@ -740,7 +740,7 @@ func dotF32PairScalar(a, b, x []float32) (float32, float32) {
 }
 
 func dotF32Triplet(a, b, c, x []float32) (float32, float32, float32) {
-	if useDotFMA && len(x) >= 8 {
+	if useDotFMA && len(x) >= 8 && len(x)%16 == 0 {
 		return dotF32TripletFMA(a, b, c, x)
 	}
 	if useDotF32AVX && len(x) >= 8 {
@@ -782,7 +782,7 @@ func dotF32TripletScalar(a, b, c, x []float32) (float32, float32, float32) {
 }
 
 func dotF32Quad(a, b, c, d, x []float32) (float32, float32, float32, float32) {
-	if useDotFMA && len(a) >= 8 {
+	if useDotFMA && len(a) >= 8 && len(a)%16 == 0 {
 		return dotF32QuadFMA(a, b, c, d, x)
 	}
 	if useDotF32AVX && len(a) >= 8 {
