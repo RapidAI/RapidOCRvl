@@ -1574,120 +1574,195 @@ finTriRet:
 // Returns (argmax_index, max_score).
 // Strategy: process 8 elements at a time. Track 8 candidate (value, index) pairs.
 // At the end, scalar-reduce the 8 candidates to find the overall best.
+// argmaxQ8VNNI: ZMM load+compute, YMM compare+update. 16 elements/iteration.
 TEXT ·argmaxQ8VNNI(SB), NOSPLIT, $0-48
 	MOVQ dots_base+0(FP), SI
 	MOVQ rowSum_base+8(FP), DI
 	MOVQ scale_base+16(FP), DX
 	MOVQ n+24(FP), R9
 	VBROADCASTSS scaleX+32(FP), Y1
-	VBROADCASTSS offset128<>(SB), Y2   // 128.0
-	VXORPS Y3, Y3, Y3                  // best values = 0 (8 lanes)
-	VXORPS Y4, Y4, Y4                  // best indices = 0 (8 lanes, int32)
-	MOVQ $0, R10                       // global offset
+	VBROADCASTSS offset128<>(SB), Y2
+	VXORPS Y3, Y3, Y3
+	VXORPS Y4, Y4, Y4
+	VXORPS Y13, Y13, Y13    // best values for high 8
+	VXORPS Y14, Y14, Y14    // best indices for high 8
+	MOVQ $0, R10
 
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB argmaxTail
 
 argmaxLoop:
-	CMPQ R9, $8
+	CMPQ R9, $16
 	JB argmaxReduce
-	// Compute scores for 8 elements
-	VMOVDQU (SI), Y0
-	VMOVDQU (DI), Y5
-	VCVTDQ2PS Y0, Y0
-	VCVTDQ2PS Y5, Y5
-	VMULPS Y2, Y5, Y5        // 128 * rowSum
-	VSUBPS Y5, Y0, Y0        // dot - 128*rowSum
-	VMOVUPS (DX), Y6         // scale
-	VMULPS Y1, Y0, Y0        // * scaleX
-	VMULPS Y6, Y0, Y0        // Y0 = scores
-
-	// Build index vector: [R10, R10+1, ..., R10+7]
+	VMOVDQU64 (SI), Z0
+	VMOVDQU64 (DI), Z5
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z5, Z5
+	VMULPS Z2, Z5, Z5
+	VSUBPS Z5, Z0, Z0
+	VMOVUPS (DX), Z6       // 16 scales
+	VMULPS Z1, Z0, Z0
+	VMULPS Z6, Z0, Z0     // Z0 = 16 scores
 	MOVQ R10, AX
-	MOVD AX, X3
-	VPBROADCASTD X3, Y7      // broadcast offset
-	VPADDD argmaxIdxVec<>(SB), Y7, Y7  // [offset+0, ..., offset+7]
+	MOVD AX, X7
+	VPBROADCASTD X7, Z7
+	VPADDD argmaxIdxVec16<>(SB), Z7, Z7
 
-	// Where score > best: update best value and index
-	VCMPPS $1, Y0, Y3, Y8      // mask: score > best
-	VANDPS Y8, Y0, Y9      // new values where mask
-	VPANDN Y8, Y3, Y10     // old values where !mask
-	VORPS Y9, Y10, Y3      // best values updated
-	VANDPS Y8, Y7, Y9      // new indices where mask
+	VEXTRACTF64X4 $0, Z0, Y0    // low 8 scores
+	VEXTRACTF64X4 $0, Z7, Y15   // low 8 new indices
+	VCMPPS $1, Y0, Y3, Y8
+	VANDPS Y8, Y0, Y9
+	VPANDN Y8, Y3, Y10
+	VORPS Y9, Y10, Y3
+	VPAND Y8, Y15, Y9      // wait, VPAND works on int, but indices are int32 in float reg
+	VANDPS Y8, Y15, Y9     // new indices where mask (using VANDPS, bit-level)
 	VPANDN Y8, Y4, Y10     // old indices where !mask
-	VORPS Y9, Y10, Y4      // best indices updated
+	VORPS Y9, Y10, Y4
 
-	ADDQ $32, SI
-	ADDQ $32, DI
-	ADDQ $32, DX
-	ADDQ $8, R10
-	SUBQ $8, R9
+	VEXTRACTF64X4 $1, Z0, Y0    // high 8 scores
+	VEXTRACTF64X4 $1, Z7, Y15   // high 8 new indices
+	VCMPPS $1, Y0, Y13, Y8
+	VANDPS Y8, Y0, Y9
+	VPANDN Y8, Y13, Y10
+	VORPS Y9, Y10, Y13
+	VANDPS Y8, Y15, Y9
+	VPANDN Y8, Y14, Y10
+	VORPS Y9, Y10, Y14
+
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, DX
+	ADDQ $16, R10
+	SUBQ $16, R9
 	JMP argmaxLoop
 
 argmaxReduce:
-	// Y3 = 8 best values, Y4 = 8 best indices
-	// Scalar reduction: extract and compare
-	VMOVD X4, R8             // index[0]
-	MOVSS X3, X0             // value[0] as scalar
-	
-	VPSHUFD $0x55, X4, X5    // index[1]
-	VPSHUFD $0x55, X3, X1    // value[1]
-	UCOMISS X0, X1
-	JAE reduce2
-	MOVSS X1, X0
-	MOVQ R8, AX
-	MOVQ X5, R8
-	
-reduce2:
-	VPSHUFD $0xAA, X4, X5    // index[2]
-	VPSHUFD $0xAA, X3, X1    // value[2]
-	UCOMISS X0, X1
-	JAE reduce3
-	MOVSS X1, X0
-	MOVQ X5, R8
-	
-reduce3:
-	VPSHUFD $0xFF, X4, X5    // index[3]
-	VPSHUFD $0xFF, X3, X1    // value[3]
-	UCOMISS X0, X1
-	JAE reduce4
-	MOVSS X1, X0
-	MOVQ X5, R8
-	
-reduce4:
-	VEXTRACTI128 $1, Y4, X4  // upper half indices
-	VEXTRACTF128 $1, Y3, X3  // upper half values
-	MOVSS X3, X1             // value[4]
-	UCOMISS X0, X1
-	JAE reduce5
-	MOVSS X1, X0
-	MOVD X4, R8
-	
-reduce5:
+	VMOVD X4, R8
+	MOVSS X3, X0
+
 	VPSHUFD $0x55, X4, X5
 	VPSHUFD $0x55, X3, X1
 	UCOMISS X0, X1
-	JAE reduce6
+	JAE argmaxR2
 	MOVSS X1, X0
+	MOVQ R8, AX
 	MOVQ X5, R8
-	
-reduce6:
+
+argmaxR2:
 	VPSHUFD $0xAA, X4, X5
 	VPSHUFD $0xAA, X3, X1
 	UCOMISS X0, X1
-	JAE reduce7
+	JAE argmaxR3
 	MOVSS X1, X0
 	MOVQ X5, R8
-	
-reduce7:
+
+argmaxR3:
 	VPSHUFD $0xFF, X4, X5
 	VPSHUFD $0xFF, X3, X1
 	UCOMISS X0, X1
-	JAE reduceDone
+	JAE argmaxR4
 	MOVSS X1, X0
 	MOVQ X5, R8
-	
-reduceDone:
+
+argmaxR4:
+	VEXTRACTI128 $1, Y4, X4
+	VEXTRACTF128 $1, Y3, X3
+	MOVSS X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR5
+	MOVSS X1, X0
+	MOVD X4, R8
+
+argmaxR5:
+	VPSHUFD $0x55, X4, X5
+	VPSHUFD $0x55, X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR6
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR6:
+	VPSHUFD $0xAA, X4, X5
+	VPSHUFD $0xAA, X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR7
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR7:
+	VPSHUFD $0xFF, X4, X5
+	VPSHUFD $0xFF, X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR8
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR8:
+	VMOVD X14, AX
+	MOVSS X13, X1
+	UCOMISS X0, X1
+	JAE argmaxR9
+	MOVSS X1, X0
+	MOVQ AX, R8
+
+argmaxR9:
+	VPSHUFD $0x55, X14, X5
+	VPSHUFD $0x55, X13, X1
+	UCOMISS X0, X1
+	JAE argmaxR10
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR10:
+	VPSHUFD $0xAA, X14, X5
+	VPSHUFD $0xAA, X13, X1
+	UCOMISS X0, X1
+	JAE argmaxR11
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR11:
+	VPSHUFD $0xFF, X14, X5
+	VPSHUFD $0xFF, X13, X1
+	UCOMISS X0, X1
+	JAE argmaxR12
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR12:
+	VEXTRACTI128 $1, Y14, X4
+	VEXTRACTF128 $1, Y13, X3
+	MOVSS X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR13
+	MOVSS X1, X0
+	MOVD X4, R8
+
+argmaxR13:
+	VPSHUFD $0x55, X4, X5
+	VPSHUFD $0x55, X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR14
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR14:
+	VPSHUFD $0xAA, X4, X5
+	VPSHUFD $0xAA, X3, X1
+	UCOMISS X0, X1
+	JAE argmaxR15
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxR15:
+	VPSHUFD $0xFF, X4, X5
+	VPSHUFD $0xFF, X3, X1
+	UCOMISS X0, X1
+	JAE argmaxRDone
+	MOVSS X1, X0
+	MOVQ X5, R8
+
+argmaxRDone:
 	MOVQ R8, ret_idx+40(FP)
 	MOVSS X0, ret_val+48(FP)
 	VZEROUPPER
@@ -1696,7 +1771,6 @@ reduceDone:
 argmaxTail:
 	CMPQ R9, $0
 	JE argmaxTailDone
-	// Scalar tail: compare each element against best X3[0]
 	MOVL (SI), AX
 	MOVL (DI), BP
 	IMULL $128, BP
@@ -1705,15 +1779,14 @@ argmaxTail:
 	VCVTDQ2PS X0, X0
 	VMULSS scaleX+32(FP), X0, X0
 	MOVSS (DX), X1
-	VMULSS X1, X0, X0        // X0 = score
-	MOVSS X3, X1             // X1 = best so far
+	VMULSS X1, X0, X0
+	MOVSS X3, X1
 	UCOMISS X1, X0
-	JAE tailNext             // if score <= best, skip
-	MOVSS X0, X3             // update best value
-	// Update best index: need to store R10 as int32 into X4
+	JAE tailNext
+	MOVSS X0, X3
 	MOVQ R10, AX
-	MOVD AX, X4              // X4 = index (broadcast to lane 0)
-	
+	MOVD AX, X4
+
 tailNext:
 	ADDQ $4, SI
 	ADDQ $4, DI
@@ -1730,12 +1803,20 @@ argmaxTailDone:
 	VZEROUPPER
 	RET
 
-DATA argmaxIdxVec<>+0(SB)/4, $0x00000000
-DATA argmaxIdxVec<>+4(SB)/4, $0x00000001
-DATA argmaxIdxVec<>+8(SB)/4, $0x00000002
-DATA argmaxIdxVec<>+12(SB)/4, $0x00000003
-DATA argmaxIdxVec<>+16(SB)/4, $0x00000004
-DATA argmaxIdxVec<>+20(SB)/4, $0x00000005
-DATA argmaxIdxVec<>+24(SB)/4, $0x00000006
-DATA argmaxIdxVec<>+28(SB)/4, $0x00000007
-GLOBL argmaxIdxVec<>(SB), RODATA, $32
+DATA argmaxIdxVec16<>+0(SB)/4, $0x00000000
+DATA argmaxIdxVec16<>+4(SB)/4, $0x00000001
+DATA argmaxIdxVec16<>+8(SB)/4, $0x00000002
+DATA argmaxIdxVec16<>+12(SB)/4, $0x00000003
+DATA argmaxIdxVec16<>+16(SB)/4, $0x00000004
+DATA argmaxIdxVec16<>+20(SB)/4, $0x00000005
+DATA argmaxIdxVec16<>+24(SB)/4, $0x00000006
+DATA argmaxIdxVec16<>+28(SB)/4, $0x00000007
+DATA argmaxIdxVec16<>+32(SB)/4, $0x00000008
+DATA argmaxIdxVec16<>+36(SB)/4, $0x00000009
+DATA argmaxIdxVec16<>+40(SB)/4, $0x0000000a
+DATA argmaxIdxVec16<>+44(SB)/4, $0x0000000b
+DATA argmaxIdxVec16<>+48(SB)/4, $0x0000000c
+DATA argmaxIdxVec16<>+52(SB)/4, $0x0000000d
+DATA argmaxIdxVec16<>+56(SB)/4, $0x0000000e
+DATA argmaxIdxVec16<>+60(SB)/4, $0x0000000f
+GLOBL argmaxIdxVec16<>(SB), RODATA, $64
