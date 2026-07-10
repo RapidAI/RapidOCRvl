@@ -70,13 +70,46 @@ f32fmaLoop32:
 	JMP f32fmaLoop32
 f32fmaLoop16:
 	CMPQ CX, $16
-	JB f32fmaReduce
+	JB f32fmaReduceTail
 	VMOVUPS (SI), Z8
 	VFMADD231PS (DI), Z8, Z0
 	ADDQ $64, SI
 	ADDQ $64, DI
 	SUBQ $16, CX
 	JMP f32fmaLoop16
+f32fmaReduceTail:
+	// Reduce Z0 -> X0 partial sum (only Z0 is live; Z1..Z7 zero).
+	VADDPS Z1, Z0, Z0
+	VADDPS Z3, Z2, Z2
+	VADDPS Z5, Z4, Z4
+	VADDPS Z7, Z6, Z6
+	VADDPS Z2, Z0, Z0
+	VADDPS Z6, Z4, Z4
+	VADDPS Z4, Z0, Z0
+	VEXTRACTF64X4 $1, Z0, Y1
+	VADDPS Y0, Y1, Y1
+	VEXTRACTF128 $1, Y1, X2
+	VADDPS X2, X1, X1
+	VMOVHLPS X1, X1, X2
+	VADDPS X2, X1, X1
+	VSHUFPS $1, X1, X1, X2
+	VADDSS X2, X1, X0
+	VZEROUPPER
+	// X0 holds the partial sum of full 16-element chunks.
+	// Process the remaining CX (<16) elements scalar-style.
+f32fmaTailScalar2:
+	CMPQ CX, $0
+	JE f32fmaDone2
+	MOVSS (SI), X1
+	MULSS (DI), X1
+	ADDSS X1, X0
+	ADDQ $4, SI
+	ADDQ $4, DI
+	DECQ CX
+	JMP f32fmaTailScalar2
+f32fmaDone2:
+	MOVSS X0, ret+48(FP)
+	RET
 f32fmaReduce:
 	VADDPS Z1, Z0, Z0
 	VADDPS Z3, Z2, Z2
