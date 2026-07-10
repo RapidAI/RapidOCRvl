@@ -26,14 +26,7 @@ func MatVecArgmaxQ8(x []float32, q *Q8Matrix) (int, float32) {
 			scratch := getInt32Scratch(q.Rows)
 			defer putInt32Scratch(scratch)
 			dotQ8VNNICoreMultiRowZMM(&data[0], &xq[0], &scratch[0], q.Rows, cols)
-			for r := 0; r < q.Rows; r++ {
-				score := float32(scratch[r]-128*rowSum[r]) * scaleX * scale[r]
-				if r == 0 || score > bestScore {
-					bestToken = r
-					bestScore = score
-				}
-			}
-			return bestToken, bestScore
+			return argmaxQ8VNNI(&scratch[0], &rowSum[0], &scale[0], q.Rows, scaleX)
 		}
 		for r := 0; r < q.Rows; r++ {
 			base := r * q.Cols
