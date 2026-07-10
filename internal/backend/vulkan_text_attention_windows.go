@@ -2350,7 +2350,7 @@ layout(set=0,binding=3) writeonly buffer O { float outv[]; };
 shared float scratch[256];
 shared float maxScore;
 shared float denom;
-shared float weight;
+shared float rescale;
 void main() {
   uint head = gl_WorkGroupID.x;
   uint lid = gl_LocalInvocationID.x;
@@ -2359,26 +2359,15 @@ void main() {
   uint qBase = head * pc.headDim;
   uint kvHeadBase = kvHead * pc.headDim;
   float scale = inversesqrt(float(pc.headDim));
-  if (lid == 0) maxScore = -3.4028234663852886e38;
-  barrier();
-  for (uint token = 0; token < pc.cacheLen; token++) {
-    uint kBase = token * pc.kvDim + kvHeadBase;
-    float part = 0.0;
-    if (lid < pc.headDim) part = q[qBase + lid] * k[kBase + lid];
-    scratch[lid] = part;
-    barrier();
-    for (uint stride = 128; stride > 0; stride >>= 1) {
-      if (lid < stride) scratch[lid] += scratch[lid + stride];
-      barrier();
-    }
-    if (lid == 0) maxScore = max(maxScore, scratch[0] * scale);
-    barrier();
-  }
+
+  // Online softmax: single pass over KV cache
   float acc = 0.0;
-  if (lid == 0) denom = 0.0;
+  if (lid == 0) { maxScore = -3.4028234663852886e38; denom = 0.0; }
   barrier();
+
   for (uint token = 0; token < pc.cacheLen; token++) {
     uint kBase = token * pc.kvDim + kvHeadBase;
+    // Compute dot product Q.K for this token
     float part = 0.0;
     if (lid < pc.headDim) part = q[qBase + lid] * k[kBase + lid];
     scratch[lid] = part;
@@ -2387,12 +2376,22 @@ void main() {
       if (lid < stride) scratch[lid] += scratch[lid + stride];
       barrier();
     }
+    float score = scratch[0] * scale;
+
+    // Online softmax rescale
     if (lid == 0) {
-      weight = exp(scratch[0] * scale - maxScore);
-      denom += weight;
+      float newMax = max(maxScore, score);
+      rescale = exp(maxScore - newMax);
+      denom *= rescale;
+      maxScore = newMax;
     }
     barrier();
-    if (lid < pc.headDim) acc += weight * v[token * pc.kvDim + kvHeadBase + lid];
+
+    // Rescale accumulator and add new weighted value
+    float w = exp(score - maxScore);
+    acc = acc * rescale;
+    if (lid < pc.headDim) acc += w * v[token * pc.kvDim + kvHeadBase + lid];
+    if (lid == 0) denom += w;
     barrier();
   }
   if (lid < pc.headDim) outv[qBase + lid] = acc / denom;
