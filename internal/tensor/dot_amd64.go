@@ -57,6 +57,7 @@ func dotF32FMA(a, b []float32) float32
 func dotF32PairFMA(a, b, x []float32) (ret0, ret1 float32)
 func dotF32TripletFMA(a, b, c, x []float32) (ret0, ret1, ret2 float32)
 func dotF32QuadFMA(a, b, c, d, x []float32) (ret0, ret1, ret2, ret3 float32)
+func dotF32OctetFMA(b0, b1, b2, b3, b4, b5, b6, b7, x []float32) (ret0, ret1, ret2, ret3, ret4, ret5, ret6, ret7 float32)
 func dotQ8FMA(a []int8, b []float32) float32
 func dotQ8PairFMA(a, b []int8, x []float32) (ret0, ret1 float32)
 func dotQ8TripletFMA(a, b, c []int8, x []float32) (ret0, ret1, ret2 float32)

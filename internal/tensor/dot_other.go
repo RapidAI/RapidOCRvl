@@ -315,6 +315,17 @@ func dotF32FMA(a, b []float32) float32 { return dotF32Scalar(a, b) }
 func dotF32PairFMA(a, b, x []float32) (float32, float32) { return dotF32PairScalar(a, b, x) }
 func dotF32TripletFMA(a, b, c, x []float32) (float32, float32, float32) { return dotF32TripletScalar(a, b, c, x) }
 func dotF32QuadFMA(a, b, c, d, x []float32) (float32, float32, float32, float32) { return dotF32QuadScalar(a, b, c, d, x) }
+func dotF32OctetFMA(b0, b1, b2, b3, b4, b5, b6, b7, x []float32) (float32, float32, float32, float32, float32, float32, float32, float32) {
+	s0 := dotF32Scalar(b0, x)
+	s1 := dotF32Scalar(b1, x)
+	s2 := dotF32Scalar(b2, x)
+	s3 := dotF32Scalar(b3, x)
+	s4 := dotF32Scalar(b4, x)
+	s5 := dotF32Scalar(b5, x)
+	s6 := dotF32Scalar(b6, x)
+	s7 := dotF32Scalar(b7, x)
+	return s0, s1, s2, s3, s4, s5, s6, s7
+}
 func dotQ8FMA(a []int8, b []float32) float32 { return dotQ8Scalar(a, b) }
 func dotQ8PairFMA(a, b []int8, x []float32) (float32, float32) { return dotQ8PairScalar(a, b, x) }
 func dotQ8TripletFMA(a, b, c []int8, x []float32) (float32, float32, float32) { return dotQ8TripletScalar(a, b, c, x) }

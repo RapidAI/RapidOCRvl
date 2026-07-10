@@ -23,6 +23,24 @@ func DotQuad(b0, b1, b2, b3, a []float32) (float32, float32, float32, float32) {
 	return dotF32Quad(b0, b1, b2, b3, a)
 }
 
+// DotOctet computes eight dot products simultaneously, sharing the x read
+// across all eight outputs. This reduces memory traffic and function-call
+// overhead compared to two DotQuad calls.
+func DotOctet(b0, b1, b2, b3, b4, b5, b6, b7, a []float32) (float32, float32, float32, float32, float32, float32, float32, float32) {
+	if useDotFMA && len(a) >= 16 {
+		return dotF32OctetFMA(b0, b1, b2, b3, b4, b5, b6, b7, a)
+	}
+	s0 := dotF32(b0, a)
+	s1 := dotF32(b1, a)
+	s2 := dotF32(b2, a)
+	s3 := dotF32(b3, a)
+	s4 := dotF32(b4, a)
+	s5 := dotF32(b5, a)
+	s6 := dotF32(b6, a)
+	s7 := dotF32(b7, a)
+	return s0, s1, s2, s3, s4, s5, s6, s7
+}
+
 // MatVecArgmax computes the F32 matvec x . w^T and returns the row index
 // with the maximum score along with that score.
 func MatVecArgmax(x, w []float32, rows, cols int) (int, float32) {

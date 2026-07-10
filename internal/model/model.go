@@ -4625,6 +4625,25 @@ func cacheAttentionScores(scores, q []float32, cache *kvCache, head, dim int, sc
 	}
 	if dim == 128 {
 		t := 0
+		for ; t+7 < len(scores); t += 8 {
+			b0 := t*cache.kvDim + headBase
+			b1 := b0 + cache.kvDim
+			b2 := b1 + cache.kvDim
+			b3 := b2 + cache.kvDim
+			b4 := b3 + cache.kvDim
+			b5 := b4 + cache.kvDim
+			b6 := b5 + cache.kvDim
+			b7 := b6 + cache.kvDim
+			s0, s1, s2, s3, s4, s5, s6, s7 := dotAt128OctetAt(q, cache.k, b0, b1, b2, b3, b4, b5, b6, b7)
+			scores[t] = s0 * scale
+			scores[t+1] = s1 * scale
+			scores[t+2] = s2 * scale
+			scores[t+3] = s3 * scale
+			scores[t+4] = s4 * scale
+			scores[t+5] = s5 * scale
+			scores[t+6] = s6 * scale
+			scores[t+7] = s7 * scale
+		}
 		for ; t+3 < len(scores); t += 4 {
 			base0 := t*cache.kvDim + headBase
 			base1 := base0 + cache.kvDim
@@ -4651,6 +4670,25 @@ func cacheAttentionScores(scores, q []float32, cache *kvCache, head, dim int, sc
 	}
 	if dim == 96 {
 		t := 0
+		for ; t+7 < len(scores); t += 8 {
+			b0 := t*cache.kvDim + headBase
+			b1 := b0 + cache.kvDim
+			b2 := b1 + cache.kvDim
+			b3 := b2 + cache.kvDim
+			b4 := b3 + cache.kvDim
+			b5 := b4 + cache.kvDim
+			b6 := b5 + cache.kvDim
+			b7 := b6 + cache.kvDim
+			s0, s1, s2, s3, s4, s5, s6, s7 := dotAt96OctetAt(q, cache.k, b0, b1, b2, b3, b4, b5, b6, b7)
+			scores[t] = s0 * scale
+			scores[t+1] = s1 * scale
+			scores[t+2] = s2 * scale
+			scores[t+3] = s3 * scale
+			scores[t+4] = s4 * scale
+			scores[t+5] = s5 * scale
+			scores[t+6] = s6 * scale
+			scores[t+7] = s7 * scale
+		}
 		for ; t+3 < len(scores); t += 4 {
 			base0 := t*cache.kvDim + headBase
 			base1 := base0 + cache.kvDim
@@ -4677,6 +4715,25 @@ func cacheAttentionScores(scores, q []float32, cache *kvCache, head, dim int, sc
 	}
 	if dim == 64 {
 		t := 0
+		for ; t+7 < len(scores); t += 8 {
+			b0 := t*cache.kvDim + headBase
+			b1 := b0 + cache.kvDim
+			b2 := b1 + cache.kvDim
+			b3 := b2 + cache.kvDim
+			b4 := b3 + cache.kvDim
+			b5 := b4 + cache.kvDim
+			b6 := b5 + cache.kvDim
+			b7 := b6 + cache.kvDim
+			s0, s1, s2, s3, s4, s5, s6, s7 := dotAt64OctetAt(q, cache.k, b0, b1, b2, b3, b4, b5, b6, b7)
+			scores[t] = s0 * scale
+			scores[t+1] = s1 * scale
+			scores[t+2] = s2 * scale
+			scores[t+3] = s3 * scale
+			scores[t+4] = s4 * scale
+			scores[t+5] = s5 * scale
+			scores[t+6] = s6 * scale
+			scores[t+7] = s7 * scale
+		}
 		for ; t+3 < len(scores); t += 4 {
 			base0 := t*cache.kvDim + headBase
 			base1 := base0 + cache.kvDim
@@ -5116,6 +5173,18 @@ func dotAt96QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (floa
 
 func dotAt64QuadAt(a, b []float32, offset0, offset1, offset2, offset3 int) (float32, float32, float32, float32) {
 	return tensor.DotQuad(b[offset0:offset0+64], b[offset1:offset1+64], b[offset2:offset2+64], b[offset3:offset3+64], a[:64])
+}
+
+func dotAt128OctetAt(a, b []float32, off0, off1, off2, off3, off4, off5, off6, off7 int) (float32, float32, float32, float32, float32, float32, float32, float32) {
+	return tensor.DotOctet(b[off0:off0+128], b[off1:off1+128], b[off2:off2+128], b[off3:off3+128], b[off4:off4+128], b[off5:off5+128], b[off6:off6+128], b[off7:off7+128], a[:128])
+}
+
+func dotAt96OctetAt(a, b []float32, off0, off1, off2, off3, off4, off5, off6, off7 int) (float32, float32, float32, float32, float32, float32, float32, float32) {
+	return tensor.DotOctet(b[off0:off0+96], b[off1:off1+96], b[off2:off2+96], b[off3:off3+96], b[off4:off4+96], b[off5:off5+96], b[off6:off6+96], b[off7:off7+96], a[:96])
+}
+
+func dotAt64OctetAt(a, b []float32, off0, off1, off2, off3, off4, off5, off6, off7 int) (float32, float32, float32, float32, float32, float32, float32, float32) {
+	return tensor.DotOctet(b[off0:off0+64], b[off1:off1+64], b[off2:off2+64], b[off3:off3+64], b[off4:off4+64], b[off5:off5+64], b[off6:off6+64], b[off7:off7+64], a[:64])
 }
 
 func weightedCacheValueSum(dst []float32, cache *kvCache, head, dim int, weights []float32) {
