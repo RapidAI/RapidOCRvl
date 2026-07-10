@@ -60,6 +60,14 @@ func MatVecArgmax(x, w []float32, rows, cols int) (int, float32) {
 	return bestIdx, bestVal
 }
 
+
+// finalizeTopKScores converts VNNI dot results to TopKScore entries.
+func finalizeTopKScores(scores []TopKScore, dots []int32, rowSum []int32, scale []float32, n int, scaleX float32) {
+	for r := 0; r < n; r++ {
+		scores[r] = TopKScore{ID: r, Score: float32(dots[r]-128*rowSum[r]) * scaleX * scale[r]}
+	}
+}
+
 func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 	type partial struct {
 		idx int
@@ -132,6 +140,16 @@ func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 // number of valid entries.
 func MatVecTopKQ8WithWork(scores, work []TopKScore, x []float32, q *Q8Matrix, k int) ([]TopKScore, []TopKScore, int) {
 	scores = ensureTopKScoreCap(scores, q.Rows)
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		xq := getVNNIScratch(q.Cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		scratch := getInt32Scratch(q.Rows)
+		defer putInt32Scratch(scratch)
+		dotQ8VNNICoreMultiRowZMM(&q.Data[0], &xq[0], &scratch[0], q.Rows, q.Cols)
+		finalizeTopKScores(scores, scratch, q.RowSum, q.Scale, q.Rows, scaleX)
+		return topKSelectWithWork(scores, work, q.Rows, k), work, k
+	}
 	for r := 0; r < q.Rows; r++ {
 		base := r * q.Cols
 		scores[r] = TopKScore{ID: r, Score: dotQ8(q.Data[base:base+q.Cols], x) * q.Scale[r]}
@@ -143,6 +161,16 @@ func MatVecTopKQ8WithWork(scores, work []TopKScore, x []float32, q *Q8Matrix, k 
 func MatVecTopKQ6WithWork(scores, work []TopKScore, x []float32, q *Q6Matrix, k int) ([]TopKScore, []TopKScore, int) {
 	scores = ensureTopKScoreCap(scores, q.Rows)
 	if q.Unpacked != nil {
+		if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+			xq := getVNNIScratch(q.Cols)
+			defer putVNNIScratch(xq)
+			scaleX := quantizeXForVNNI(x, xq)
+			scratch := getInt32Scratch(q.Rows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&q.Unpacked[0], &xq[0], &scratch[0], q.Rows, q.Cols)
+			finalizeTopKScores(scores, scratch, q.RowSum, q.Scale, q.Rows, scaleX)
+			return topKSelectWithWork(scores, work, q.Rows, k), work, k
+		}
 		for r := 0; r < q.Rows; r++ {
 			base := r * q.Cols
 			scores[r] = TopKScore{ID: r, Score: dotQ6Unpacked(q.Unpacked[base:base+q.Cols], x) * q.Scale[r]}
@@ -161,6 +189,16 @@ func MatVecTopKQ6WithWork(scores, work []TopKScore, x []float32, q *Q6Matrix, k 
 func MatVecTopKQ4WithWork(scores, work []TopKScore, x []float32, q *Q4Matrix, k int) ([]TopKScore, []TopKScore, int) {
 	scores = ensureTopKScoreCap(scores, q.Rows)
 	if q.Unpacked != nil {
+		if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+			xq := getVNNIScratch(q.Cols)
+			defer putVNNIScratch(xq)
+			scaleX := quantizeXForVNNI(x, xq)
+			scratch := getInt32Scratch(q.Rows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&q.Unpacked[0], &xq[0], &scratch[0], q.Rows, q.Cols)
+			finalizeTopKScores(scores, scratch, q.RowSum, q.Scale, q.Rows, scaleX)
+			return topKSelectWithWork(scores, work, q.Rows, k), work, k
+		}
 		for r := 0; r < q.Rows; r++ {
 			base := r * q.Cols
 			scores[r] = TopKScore{ID: r, Score: dotQ4Unpacked(q.Unpacked[base:base+q.Cols], x) * q.Scale[r]}
