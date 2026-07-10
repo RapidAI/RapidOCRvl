@@ -2127,12 +2127,12 @@ q8tfmaDone:
 // addBias3FMA(outA *float32, biasA *float32, outB *float32, biasB *float32, outC *float32, biasC *float32, n int)
 // Computes outX[i] += biasX[i] for X in {A,B,C} using YMM.
 TEXT ·addBias3FMA(SB), NOSPLIT, $0-56
-	MOVQ outA_base+0(FP), SI
-	MOVQ biasA_base+8(FP), DI
-	MOVQ outB_base+16(FP), DX
-	MOVQ biasB_base+24(FP), CX
-	MOVQ outC_base+32(FP), R8
-	MOVQ biasC_base+40(FP), R10
+	MOVQ outA+0(FP), SI
+	MOVQ biasA+8(FP), DI
+	MOVQ outB+16(FP), DX
+	MOVQ biasB+24(FP), CX
+	MOVQ outC+32(FP), R8
+	MOVQ biasC+40(FP), R10
 	MOVQ n+48(FP), R9
 
 	CMPQ R9, $16

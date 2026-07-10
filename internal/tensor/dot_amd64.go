@@ -118,6 +118,7 @@ func dotQ8TripletVNNICoreMultiRowZMM(a *int8, b *int8, c *int8, xq *uint8, outA 
 func finalizeDotQ8VNNI(dots *int32, rowSum *int32, scale *float32, out *float32, n int, scaleX float32)
 //go:noescape
 func finalizeDotQ8PairVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32, dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32, n int, scaleX float32)
+func finalizeDotQ8PairSwiGLUVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32, dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32, n int, scaleX float32)
 
 
 //go:noescape

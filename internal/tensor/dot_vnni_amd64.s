@@ -6,7 +6,7 @@
 // Computes sum(a[i]*xq[i]) using VPDPBUSD.
 // VPDPBUSD: dst = src1(int8, from mem) * src2(uint8, from reg) + dst, per-lane int32 accumulate.
 // Each VPDPBUSD on YMM processes 32 int8 * 32 uint8 -> 4 int32 partial sums.
-TEXT ·dotQ8VNNICore(SB), NOSPLIT, $0-32
+TEXT ·dotQ8VNNICore(SB), NOSPLIT, $0-28
 	MOVQ a+0(FP), SI
 	MOVQ xq+8(FP), DI
 	MOVQ n+16(FP), CX
@@ -122,7 +122,7 @@ vnniCoreTailDone:
 	MOVL AX, ret+24(FP)
 	RET
 
-TEXT ·rowSumQ8Asm(SB), NOSPLIT, $0-24
+TEXT ·rowSumQ8Asm(SB), NOSPLIT, $0-20
 	MOVQ a+0(FP), SI
 	MOVQ n+8(FP), CX
 	XORL AX, AX
@@ -285,7 +285,7 @@ pairVnniReduce:
 	VPADDD X5, X4, X4
 	VMOVD X4, R8
 	VZEROUPPER
-	MOVL AX, ret0+32(FP)
+	MOVL AX, ret+32(FP)
 	MOVL R8, ret1+36(FP)
 	RET
 pairVnniTail:
@@ -307,14 +307,14 @@ pairVnniTailLoop:
 	DECQ CX
 	JMP pairVnniTailLoop
 pairVnniTailDone:
-	MOVL AX, ret0+32(FP)
+	MOVL AX, ret+32(FP)
 	MOVL R8, ret1+36(FP)
 	RET
 
 // dotQ8TripletVNNICore(a *int8, b *int8, c *int8, xq *uint8, n int) (int32, int32, int32)
 // ZMM (512-bit) version: each VPDPBUSD processes 64 int8 values.
 // 6 accumulators (Z0-Z1 for a, Z2-Z3 for b, Z4-Z5 for c), 128 elements per loop.
-TEXT ·dotQ8TripletVNNICore(SB), NOSPLIT, $0-56
+TEXT ·dotQ8TripletVNNICore(SB), NOSPLIT, $0-52
 	MOVQ a+0(FP), SI
 	MOVQ b+8(FP), BX
 	MOVQ c+16(FP), R12
@@ -394,7 +394,7 @@ tripVnniReduce:
 	VPADDD X5, X4, X4
 	VMOVD X4, R9
 	VZEROUPPER
-	MOVL AX, ret0+40(FP)
+	MOVL AX, ret+40(FP)
 	MOVL R8, ret1+44(FP)
 	MOVL R9, ret2+48(FP)
 	RET
@@ -422,7 +422,7 @@ tripVnniTailLoop:
 	DECQ CX
 	JMP tripVnniTailLoop
 tripVnniTailDone:
-	MOVL AX, ret0+40(FP)
+	MOVL AX, ret+40(FP)
 	MOVL R8, ret1+44(FP)
 	MOVL R9, ret2+48(FP)
 	RET
@@ -431,7 +431,7 @@ tripVnniTailDone:
 // Quantizes float32 x to uint8 with offset 128: q = round(x*inv) + 128, clamped [0,255].
 // ZMM (512-bit) version: processes 16 floats per iteration using VRNDSCALEPS
 // and VPMOVDB to pack 16 int32 -> 16 uint8 in a single instruction.
-TEXT ·quantizeXForVNNIAsm(SB), NOSPLIT, $0-40
+TEXT ·quantizeXForVNNIAsm(SB), NOSPLIT, $0-28
 	MOVQ x_base+0(FP), SI
 	MOVQ xq_base+8(FP), DI
 	MOVQ n+16(FP), CX
@@ -508,7 +508,7 @@ GLOBL quantOffset128<>(SB), RODATA, $4
 
 // dotQ8VNNICoreZMM(a *int8, xq *uint8, n int) int32
 // ZMM (512-bit) version of dotQ8VNNICore. Each VPDPBUSD processes 64 int8 values.
-TEXT ·dotQ8VNNICoreZMM(SB), NOSPLIT, $0-32
+TEXT ·dotQ8VNNICoreZMM(SB), NOSPLIT, $0-28
 	MOVQ a+0(FP), SI
 	MOVQ xq+8(FP), DI
 	MOVQ n+16(FP), CX
@@ -1041,10 +1041,10 @@ GLOBL offset128<>(SB), RODATA, $4
 // Computes out[i] = float32(dots[i] - 128*rowSum[i]) * scaleX * scale[i]
 // using AVX2 YMM registers. Processes 8 elements per iteration.
 TEXT ·finalizeDotQ8VNNI(SB), NOSPLIT, $0-44
-	MOVQ dots_base+0(FP), SI
-	MOVQ rowSum_base+8(FP), DI
-	MOVQ scale_base+16(FP), DX
-	MOVQ out_base+24(FP), CX
+	MOVQ dots+0(FP), SI
+	MOVQ rowSum+8(FP), DI
+	MOVQ scale+16(FP), DX
+	MOVQ out+24(FP), CX
 	MOVQ n+32(FP), R9
 	VBROADCASTSS scaleX+40(FP), Z1
 	VBROADCASTSS offset128<>(SB), Z2   // 128.0
@@ -1103,15 +1103,15 @@ finRet:
 // Computes outA[i] = float32(dotsA[i] - 128*rowSumA[i]) * scaleX * scaleA[i]
 // and   outB[i] = float32(dotsB[i] - 128*rowSumB[i]) * scaleX * scaleB[i]
 // Processes 8 elements per iteration using YMM registers.
-TEXT ·finalizeDotQ8PairVNNI(SB), NOSPLIT, $0-80
-	MOVQ dotsA_base+0(FP), SI
-	MOVQ rowSumA_base+8(FP), DI
-	MOVQ scaleA_base+16(FP), DX
-	MOVQ outA_base+24(FP), CX
-	MOVQ dotsB_base+32(FP), R8
-	MOVQ rowSumB_base+40(FP), R10
-	MOVQ scaleB_base+48(FP), R11
-	MOVQ outB_base+56(FP), R12
+TEXT ·finalizeDotQ8PairVNNI(SB), NOSPLIT, $0-76
+	MOVQ dotsA+0(FP), SI
+	MOVQ rowSumA+8(FP), DI
+	MOVQ scaleA+16(FP), DX
+	MOVQ outA+24(FP), CX
+	MOVQ dotsB+32(FP), R8
+	MOVQ rowSumB+40(FP), R10
+	MOVQ scaleB+48(FP), R11
+	MOVQ outB+56(FP), R12
 	MOVQ n+64(FP), R9
 	VBROADCASTSS scaleX+72(FP), Z1
 	VBROADCASTSS offset128<>(SB), Z2   // 128.0
@@ -1205,11 +1205,11 @@ finPairRet:
 // Returns sum of v*v.
 // Processes 8 elements per iteration using YMM registers.
 TEXT ·finalizeAddSumSquaresInPlaceVNNI(SB), NOSPLIT, $0-60
-	MOVQ dots_base+0(FP), SI
-	MOVQ rowSum_base+8(FP), DI
-	MOVQ scale_base+16(FP), DX
-	MOVQ out_base+24(FP), CX
-	MOVQ residual_base+32(FP), R8
+	MOVQ dots+0(FP), SI
+	MOVQ rowSum+8(FP), DI
+	MOVQ scale+16(FP), DX
+	MOVQ out+24(FP), CX
+	MOVQ residual+32(FP), R8
 	MOVQ n+40(FP), R9
 	VBROADCASTSS scaleX+48(FP), Z1
 	VBROADCASTSS offset128<>(SB), Z2   // 128.0
@@ -1295,11 +1295,11 @@ ssInPlaceRetTail:
 // Stores v to out[i] only (does NOT modify residual).
 // Returns sum of v*v.
 TEXT ·finalizeAddSumSquaresOutOnlyVNNI(SB), NOSPLIT, $0-60
-	MOVQ dots_base+0(FP), SI
-	MOVQ rowSum_base+8(FP), DI
-	MOVQ scale_base+16(FP), DX
-	MOVQ out_base+24(FP), CX
-	MOVQ residual_base+32(FP), R8
+	MOVQ dots+0(FP), SI
+	MOVQ rowSum+8(FP), DI
+	MOVQ scale+16(FP), DX
+	MOVQ out+24(FP), CX
+	MOVQ residual+32(FP), R8
 	MOVQ n+40(FP), R9
 	VBROADCASTSS scaleX+48(FP), Z1
 	VBROADCASTSS offset128<>(SB), Z2   // 128.0
@@ -1380,11 +1380,11 @@ ssOutRetTail:
 // Computes out[i] = float32(dots[i] - 128*rowSum[i]) * scaleX * scale[i] + bias[i]
 // Processes 8 elements per iteration using YMM registers.
 TEXT ·finalizeDotQ8BiasVNNI(SB), NOSPLIT, $0-52
-	MOVQ dots_base+0(FP), SI
-	MOVQ rowSum_base+8(FP), DI
-	MOVQ scale_base+16(FP), DX
-	MOVQ out_base+24(FP), CX
-	MOVQ bias_base+32(FP), R8
+	MOVQ dots+0(FP), SI
+	MOVQ rowSum+8(FP), DI
+	MOVQ scale+16(FP), DX
+	MOVQ out+24(FP), CX
+	MOVQ bias+32(FP), R8
 	MOVQ n+40(FP), R9
 	VBROADCASTSS scaleX+48(FP), Z1
 	VBROADCASTSS offset128<>(SB), Z2   // 128.0
@@ -1448,19 +1448,19 @@ finBiasRet:
 //   dotsC *int32, rowSumC *int32, scaleC *float32, outC *float32, n int, scaleX float32)
 // Computes outX[i] = float32(dotsX[i] - 128*rowSumX[i]) * scaleX * scaleX[i] for X in {A,B,C}
 // Processes 8 elements per iteration using YMM registers.
-TEXT ·finalizeDotQ8TripletVNNI(SB), NOSPLIT, $0-116
-	MOVQ dotsA_base+0(FP), SI
-	MOVQ rowSumA_base+8(FP), DI
-	MOVQ scaleA_base+16(FP), DX
-	MOVQ outA_base+24(FP), CX
-	MOVQ dotsB_base+32(FP), R8
-	MOVQ rowSumB_base+40(FP), R10
-	MOVQ scaleB_base+48(FP), R11
-	MOVQ outB_base+56(FP), R12
-	MOVQ dotsC_base+64(FP), R13
-	MOVQ rowSumC_base+72(FP), R14
-	MOVQ scaleC_base+80(FP), R15
-	MOVQ outC_base+88(FP), AX
+TEXT ·finalizeDotQ8TripletVNNI(SB), NOSPLIT, $0-108
+	MOVQ dotsA+0(FP), SI
+	MOVQ rowSumA+8(FP), DI
+	MOVQ scaleA+16(FP), DX
+	MOVQ outA+24(FP), CX
+	MOVQ dotsB+32(FP), R8
+	MOVQ rowSumB+40(FP), R10
+	MOVQ scaleB+48(FP), R11
+	MOVQ outB+56(FP), R12
+	MOVQ dotsC+64(FP), R13
+	MOVQ rowSumC+72(FP), R14
+	MOVQ scaleC+80(FP), R15
+	MOVQ outC+88(FP), AX
 	MOVQ n+96(FP), R9
 	VBROADCASTSS scaleX+104(FP), Z1
 	VBROADCASTSS offset128<>(SB), Z2   // 128.0
@@ -1581,10 +1581,10 @@ finTriRet:
 // Strategy: process 8 elements at a time. Track 8 candidate (value, index) pairs.
 // At the end, scalar-reduce the 8 candidates to find the overall best.
 // argmaxQ8VNNI: ZMM load+compute, YMM compare+update. 16 elements/iteration.
-TEXT ·argmaxQ8VNNI(SB), NOSPLIT, $0-48
-	MOVQ dots_base+0(FP), SI
-	MOVQ rowSum_base+8(FP), DI
-	MOVQ scale_base+16(FP), DX
+TEXT ·argmaxQ8VNNI(SB), NOSPLIT, $0-52
+	MOVQ dots+0(FP), SI
+	MOVQ rowSum+8(FP), DI
+	MOVQ scale+16(FP), DX
 	MOVQ n+24(FP), R9
 	VBROADCASTSS scaleX+32(FP), Y1
 	VBROADCASTSS offset128<>(SB), Y2
@@ -1769,8 +1769,8 @@ argmaxR15:
 	MOVQ X5, R8
 
 argmaxRDone:
-	MOVQ R8, ret_idx+40(FP)
-	MOVSS X0, ret_val+48(FP)
+	MOVQ R8, ret+40(FP)
+	MOVSS X0, ret1+48(FP)
 	VZEROUPPER
 	RET
 
@@ -1804,8 +1804,8 @@ tailNext:
 argmaxTailDone:
 	MOVSS X3, X0
 	MOVD X4, AX
-	MOVQ AX, ret_idx+40(FP)
-	MOVSS X0, ret_val+48(FP)
+	MOVQ AX, ret+40(FP)
+	MOVSS X0, ret1+48(FP)
 	VZEROUPPER
 	RET
 
@@ -1826,3 +1826,234 @@ DATA argmaxIdxVec16<>+52(SB)/4, $0x0000000d
 DATA argmaxIdxVec16<>+56(SB)/4, $0x0000000e
 DATA argmaxIdxVec16<>+60(SB)/4, $0x0000000f
 GLOBL argmaxIdxVec16<>(SB), RODATA, $64
+
+// SiLU/exp constants (duplicated from dot_amd64.s for local symbol access)
+	DATA siluExpLog2e<>+0(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+4(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+8(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+12(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+16(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+20(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+24(SB)/4, $0x3FB8AA3B
+	DATA siluExpLog2e<>+28(SB)/4, $0x3FB8AA3B
+	GLOBL siluExpLog2e<>(SB), RODATA, $32
+
+	DATA siluExpC1<>+0(SB)/4, $0x3F317218
+	DATA siluExpC1<>+4(SB)/4, $0x3F317218
+	DATA siluExpC1<>+8(SB)/4, $0x3F317218
+	DATA siluExpC1<>+12(SB)/4, $0x3F317218
+	DATA siluExpC1<>+16(SB)/4, $0x3F317218
+	DATA siluExpC1<>+20(SB)/4, $0x3F317218
+	DATA siluExpC1<>+24(SB)/4, $0x3F317218
+	DATA siluExpC1<>+28(SB)/4, $0x3F317218
+	GLOBL siluExpC1<>(SB), RODATA, $32
+
+	DATA siluExpC2<>+0(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+4(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+8(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+12(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+16(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+20(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+24(SB)/4, $0x3E75FDF0
+	DATA siluExpC2<>+28(SB)/4, $0x3E75FDF0
+	GLOBL siluExpC2<>(SB), RODATA, $32
+
+	DATA siluExpC3<>+0(SB)/4, $0x3D625954
+	DATA siluExpC3<>+4(SB)/4, $0x3D625954
+	DATA siluExpC3<>+8(SB)/4, $0x3D625954
+	DATA siluExpC3<>+12(SB)/4, $0x3D625954
+	DATA siluExpC3<>+16(SB)/4, $0x3D625954
+	DATA siluExpC3<>+20(SB)/4, $0x3D625954
+	DATA siluExpC3<>+24(SB)/4, $0x3D625954
+	DATA siluExpC3<>+28(SB)/4, $0x3D625954
+	GLOBL siluExpC3<>(SB), RODATA, $32
+
+	DATA siluExpC4<>+0(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+4(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+8(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+12(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+16(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+20(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+24(SB)/4, $0x3C3590A8
+	DATA siluExpC4<>+28(SB)/4, $0x3C3590A8
+	GLOBL siluExpC4<>(SB), RODATA, $32
+
+	DATA siluExpC5<>+0(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+4(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+8(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+12(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+16(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+20(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+24(SB)/4, $0x3B2C8BAA
+	DATA siluExpC5<>+28(SB)/4, $0x3B2C8BAA
+	GLOBL siluExpC5<>(SB), RODATA, $32
+
+	DATA siluOne<>+0(SB)/4, $0x3F800000
+	DATA siluOne<>+4(SB)/4, $0x3F800000
+	DATA siluOne<>+8(SB)/4, $0x3F800000
+	DATA siluOne<>+12(SB)/4, $0x3F800000
+	DATA siluOne<>+16(SB)/4, $0x3F800000
+	DATA siluOne<>+20(SB)/4, $0x3F800000
+	DATA siluOne<>+24(SB)/4, $0x3F800000
+	DATA siluOne<>+28(SB)/4, $0x3F800000
+	GLOBL siluOne<>(SB), RODATA, $32
+
+	DATA siluInt127<>+0(SB)/4, $0x0000007F
+	DATA siluInt127<>+4(SB)/4, $0x0000007F
+	DATA siluInt127<>+8(SB)/4, $0x0000007F
+	DATA siluInt127<>+12(SB)/4, $0x0000007F
+	DATA siluInt127<>+16(SB)/4, $0x0000007F
+	DATA siluInt127<>+20(SB)/4, $0x0000007F
+	DATA siluInt127<>+24(SB)/4, $0x0000007F
+	DATA siluInt127<>+28(SB)/4, $0x0000007F
+	GLOBL siluInt127<>(SB), RODATA, $32
+
+// finalizeDotQ8PairSwiGLUVNNI(dotsA *int32, rowSumA *int32, scaleA *float32, outA *float32,
+//   dotsB *int32, rowSumB *int32, scaleB *float32, outB *float32, n int, scaleX float32)
+// Computes outA[i] = SiLU(gate[i]) * up[i] where gate and up are VNNI dot products.
+// outB is written with raw up values (for compatibility).
+// Fuses finalize + SiLU into one pass, saving one full data traversal.
+TEXT ·finalizeDotQ8PairSwiGLUVNNI(SB), NOSPLIT, $0-76
+	MOVQ dotsA+0(FP), SI
+	MOVQ rowSumA+8(FP), DI
+	MOVQ scaleA+16(FP), DX
+	MOVQ outA+24(FP), CX
+	MOVQ dotsB+32(FP), R8
+	MOVQ rowSumB+40(FP), R10
+	MOVQ scaleB+48(FP), R11
+	MOVQ outB+56(FP), R12
+	MOVQ n+64(FP), R9
+	VBROADCASTSS scaleX+72(FP), Z1
+	VBROADCASTSS offset128<>(SB), Z2
+	VBROADCASTSS siluOne<>(SB), Z20
+	VBROADCASTSS siluExpLog2e<>(SB), Z21
+	VBROADCASTSS siluExpC1<>(SB), Z22
+	VBROADCASTSS siluExpC2<>(SB), Z23
+	VBROADCASTSS siluExpC3<>(SB), Z24
+	VBROADCASTSS siluExpC4<>(SB), Z25
+	VBROADCASTSS siluExpC5<>(SB), Z26
+
+	CMPQ R9, $16
+	JB swiGLUFinPairTail
+
+swiGLUFinPairLoop:
+	CMPQ R9, $16
+	JB swiGLUFinPairDone
+	VMOVDQU64 (SI), Z0
+	VMOVDQU64 (DI), Z3
+	VCVTDQ2PS Z0, Z0
+	VCVTDQ2PS Z3, Z3
+	VMULPS Z2, Z3, Z3
+	VSUBPS Z3, Z0, Z0
+	VMOVUPS (DX), Z4
+	VMULPS Z1, Z0, Z0
+	VMULPS Z4, Z0, Z0
+	VMOVDQU64 (R8), Z6
+	VMOVDQU64 (R10), Z9
+	VCVTDQ2PS Z6, Z6
+	VCVTDQ2PS Z9, Z9
+	VMULPS Z2, Z9, Z9
+	VSUBPS Z9, Z6, Z6
+	VMOVUPS (R11), Z7
+	VMULPS Z1, Z6, Z6
+	VMULPS Z7, Z6, Z6
+	VMOVUPS Z6, (R12)
+	VXORPS Z8, Z8, Z8
+	VSUBPS Z0, Z8, Z8
+	VMULPS Z21, Z8, Z8
+	VRNDSCALEPS $8, Z8, Z10
+	VSUBPS Z10, Z8, Z11
+	VMULPS Z11, Z11, Z12
+	VMOVUPS Z20, Z13
+	VFMADD231PS Z11, Z22, Z13
+	VMOVUPS Z23, Z14
+	VFMADD231PS Z11, Z24, Z14
+	VMOVUPS Z25, Z15
+	VFMADD231PS Z11, Z26, Z15
+	VFMADD231PS Z12, Z15, Z14
+	VFMADD231PS Z12, Z14, Z13
+	VCVTPS2DQ Z10, Z10
+	VPADDD siluInt127<>(SB), Z10, Z10
+	VPSLLD $23, Z10, Z10
+	VMULPS Z10, Z13, Z13
+	VADDPS Z20, Z13, Z13
+	VDIVPS Z13, Z0, Z13
+	VMULPS Z6, Z13, Z13
+	VMOVUPS Z13, (CX)
+	ADDQ $64, SI
+	ADDQ $64, DI
+	ADDQ $64, DX
+	ADDQ $64, CX
+	ADDQ $64, R8
+	ADDQ $64, R10
+	ADDQ $64, R11
+	ADDQ $64, R12
+	SUBQ $16, R9
+	JMP swiGLUFinPairLoop
+
+swiGLUFinPairDone:
+	VZEROUPPER
+swiGLUFinPairTail:
+	CMPQ R9, $0
+	JE swiGLUFinPairRet
+	MOVL (SI), AX
+	MOVL (DI), R13
+	IMULL $128, R13
+	SUBL R13, AX
+	VMOVD AX, X0
+	VCVTDQ2PS X0, X0
+	VMULSS scaleX+72(FP), X0, X0
+	MOVSS (DX), X1
+	VMULSS X1, X0, X0
+	MOVL (R8), AX
+	MOVL (R10), R13
+	IMULL $128, R13
+	SUBL R13, AX
+	VMOVD AX, X2
+	VCVTDQ2PS X2, X2
+	VMULSS scaleX+72(FP), X2, X2
+	MOVSS (R11), X3
+	VMULSS X3, X2, X2
+	MOVSS X2, (R12)
+	MOVSS X0, X4
+	PXOR X5, X5
+	VSUBSS X0, X5, X5
+	MULSS siluExpLog2e<>(SB), X5
+	ROUNDSS $8, X5, X6
+	SUBSS X6, X5
+	MOVSS X5, X7
+	MULSS X5, X5
+	MOVSS X7, X8
+	MULSS siluExpC1<>(SB), X8
+	ADDSS siluOne<>(SB), X8
+	MOVSS X7, X9
+	MULSS siluExpC3<>(SB), X9
+	ADDSS siluExpC2<>(SB), X9
+	MOVSS X7, X10
+	MULSS siluExpC5<>(SB), X10
+	ADDSS siluExpC4<>(SB), X10
+	MULSS X5, X10
+	ADDSS X9, X10
+	MULSS X5, X10
+	ADDSS X10, X8
+	VCVTPS2DQ X6, X6
+	VPADDD siluInt127<>(SB), X6, X6
+	VPSLLD $23, X6, X6
+	MULSS X6, X8
+	ADDSS siluOne<>(SB), X8
+	DIVSS X8, X4
+	MULSS X2, X4
+	MOVSS X4, (CX)
+	ADDQ $4, SI
+	ADDQ $4, DI
+	ADDQ $4, DX
+	ADDQ $4, CX
+	ADDQ $4, R8
+	ADDQ $4, R10
+	ADDQ $4, R11
+	ADDQ $4, R12
+	DECQ R9
+	JMP swiGLUFinPairTail
+
+swiGLUFinPairRet:
+	RET
