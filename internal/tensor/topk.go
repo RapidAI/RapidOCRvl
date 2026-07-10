@@ -27,7 +27,7 @@ func DotQuad(b0, b1, b2, b3, a []float32) (float32, float32, float32, float32) {
 // across all eight outputs. This reduces memory traffic and function-call
 // overhead compared to two DotQuad calls.
 func DotOctet(b0, b1, b2, b3, b4, b5, b6, b7, a []float32) (float32, float32, float32, float32, float32, float32, float32, float32) {
-	if useDotFMA && len(a) >= 16 {
+	if useDotFMA && len(a) >= 8 {
 		return dotF32OctetFMA(b0, b1, b2, b3, b4, b5, b6, b7, a)
 	}
 	s0 := dotF32(b0, a)
