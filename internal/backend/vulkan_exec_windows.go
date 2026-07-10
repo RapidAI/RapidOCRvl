@@ -2188,7 +2188,7 @@ func compileVulkanGLSLWindows(source string) ([]uint32, error) {
 	if err := os.WriteFile(src, []byte(source), 0o600); err != nil {
 		return nil, err
 	}
-	cmd := exec.Command(compiler, "--target-env", "vulkan1.1", "-S", "comp", src, "-o", dst)
+	cmd := exec.Command(compiler, "-fshader-stage=compute", "-std=450core", src, "-o", dst)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("%s failed: %w: %s", filepath.Base(compiler), err, string(out))
 	}
