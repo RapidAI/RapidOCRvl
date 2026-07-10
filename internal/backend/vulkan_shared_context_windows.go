@@ -44,7 +44,7 @@ func getVulkanSharedContextWindows() (vulkanSharedContextWin, error) {
 			ApplicationVersion: vkMakeVersion(0, 1, 0),
 			PEngineName:        uintptr(unsafe.Pointer(&engineName[0])),
 			EngineVersion:      vkMakeVersion(0, 1, 0),
-			APIVersion:         vkMakeVersion(1, 0, 0),
+			APIVersion:         vkMakeVersion(1, 1, 0),
 		}
 		ici := vkInstanceCreateInfo{
 			SType:            vkStructureTypeInstanceCreateInfo,

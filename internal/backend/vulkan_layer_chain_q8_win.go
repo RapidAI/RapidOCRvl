@@ -20,6 +20,8 @@ import (
 // This eliminates one full submit+fence-wait cycle per layer and avoids
 // the host round-trip of normOut and residual between the attention and
 // MLP chains.
+// When skipNormResidualReadback is true, normOut and residual copies are
+// skipped (the next layer reads from device-local devNorm/devResidual).
 func VulkanLayerChainQ8Win(
 	normOut, residual, rawInput, ln1Weight []float32,
 	qA, qB, qC *tensor.Q8Matrix,
@@ -32,6 +34,7 @@ func VulkanLayerChainQ8Win(
 	mlpNormWeight []float32,
 	devInputReady bool,
 	readResidual bool,
+	skipNormResidualReadback bool,
 ) error {
 	if qA == nil || qB == nil || qC == nil || attW == nil || mlpGate == nil || mlpUp == nil || mlpDown == nil {
 		return fmt.Errorf("nil Vulkan q8 layer chain matrix")
@@ -544,14 +547,17 @@ func VulkanLayerChainQ8Win(
 	vk.callVoid(vk.cmdPushConstants, cmd, qkvRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(20), uintptr(unsafe.Pointer(&qkvPC[0])))
 	groups := qRows/2 + kvRows/2 + kvRows
 	vk.callVoid(vk.cmdDispatch, cmd, uintptr(groups), 1, 1)
-	vk.computeBarrier(cmd)
 
-	// Copy new K/V into device cache
+	// Copy new K/V into device cache (compute -> transfer barrier for correctness)
 	kvCopyBytes := uint64(kvRows) * 4
 	kvCopyOffset := uint64(cacheLen) * uint64(kvRows) * 4
+	kvCopyBarrier := vkMemoryBarrier{SType: vkStructureTypeMemoryBarrier, SrcAccessMask: vkAccessShaderWriteBit, DstAccessMask: vkAccessTransferReadBit | vkAccessTransferWriteBit}
+	vk.callVoid(vk.cmdPipelineBarrier, cmd, vkPipelineStageComputeShaderBit, vkPipelineStageTransferBit, 0, 1, uintptr(unsafe.Pointer(&kvCopyBarrier)), 0, 0, 0, 0)
 	vk.cmdCopyBufferOffsetWin(cmd, devOutB.buffer, devK.buffer, kvCopyOffset, kvCopyBytes)
 	vk.cmdCopyBufferOffsetWin(cmd, devOutC.buffer, devV.buffer, kvCopyOffset, kvCopyBytes)
-	vk.computeBarrier(cmd)
+	// transfer -> compute barrier: ensure copies visible to attention shader
+	kvAfterBarrier := vkMemoryBarrier{SType: vkStructureTypeMemoryBarrier, SrcAccessMask: vkAccessTransferWriteBit, DstAccessMask: vkAccessShaderReadBit}
+	vk.callVoid(vk.cmdPipelineBarrier, cmd, vkPipelineStageTransferBit, vkPipelineStageComputeShaderBit, 0, 1, uintptr(unsafe.Pointer(&kvAfterBarrier)), 0, 0, 0, 0)
 
 	// Dispatch 2: Attention
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, attRunner.pipeline)
@@ -564,9 +570,7 @@ func VulkanLayerChainQ8Win(
 	binary.LittleEndian.PutUint32(attPC[16:20], uint32(kvRows))
 	vk.callVoid(vk.cmdPushConstants, cmd, attRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(20), uintptr(unsafe.Pointer(&attPC[0])))
 	vk.callVoid(vk.cmdDispatch, cmd, uintptr(numHeads), 1, 1)
-
-	barrier := vkMemoryBarrier{SType: vkStructureTypeMemoryBarrier, SrcAccessMask: vkAccessShaderWriteBit, DstAccessMask: vkAccessShaderReadBit}
-	vk.callVoid(vk.cmdPipelineBarrier, cmd, vkPipelineStageComputeShaderBit, vkPipelineStageComputeShaderBit, 0, 1, uintptr(unsafe.Pointer(&barrier)), 0, 0, 0, 0)
+	vk.computeBarrier(cmd)
 
 	// Dispatch 3: Output projection
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, attRunner.q8ProjPipeline)
@@ -577,7 +581,7 @@ func VulkanLayerChainQ8Win(
 	binary.LittleEndian.PutUint32(attPC[16:20], 0)
 	vk.callVoid(vk.cmdPushConstants, cmd, attRunner.pipelineLayout, vkShaderStageComputeBit, 0, uintptr(20), uintptr(unsafe.Pointer(&attPC[0])))
 	vk.callVoid(vk.cmdDispatch, cmd, uintptr(qRows), 1, 1)
-	vk.callVoid(vk.cmdPipelineBarrier, cmd, vkPipelineStageComputeShaderBit, vkPipelineStageComputeShaderBit, 0, 1, uintptr(unsafe.Pointer(&barrier)), 0, 0, 0, 0)
+	vk.computeBarrier(cmd)
 
 	// Dispatch 4: AddRMSNorm (attention residual + output -> devNorm, devResidual)
 	vk.callVoid(vk.cmdBindPipeline, cmd, vkPipelineBindPointCompute, attRunner.normPipeline)
@@ -624,12 +628,14 @@ func VulkanLayerChainQ8Win(
 	readbackV := &attRunner.readbackV
 
 	// Ensure host buffers are sized
-	if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackNorm, outBytes); err != nil {
-		return fmt.Errorf("readback mlp norm: %w", err)
-	}
-	if readResidual {
-		if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackResidual, outBytes); err != nil {
-			return fmt.Errorf("readback mlp residual: %w", err)
+	if !skipNormResidualReadback {
+		if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackNorm, outBytes); err != nil {
+			return fmt.Errorf("readback mlp norm: %w", err)
+		}
+		if readResidual {
+			if err := ensureHostBufferWin(vk, device, swiRunner.memProps, readbackResidual, outBytes); err != nil {
+				return fmt.Errorf("readback mlp residual: %w", err)
+			}
 		}
 	}
 	if err := ensureHostBufferWin(vk, device, attRunner.memProps, readbackK, uint64(kvRows)*4); err != nil {
@@ -650,9 +656,11 @@ func VulkanLayerChainQ8Win(
 		0, 1, uintptr(unsafe.Pointer(&devBarrier)), 0, 0, 0, 0)
 
 	// All copies (no barriers between them)
-	vk.cmdCopyBufferWin(cmd, devMlpNorm.buffer, readbackNorm.buffer, outBytes)
-	if readResidual {
-		vk.cmdCopyBufferWin(cmd, devMlpResidual.buffer, readbackResidual.buffer, outBytes)
+	if !skipNormResidualReadback {
+		vk.cmdCopyBufferWin(cmd, devMlpNorm.buffer, readbackNorm.buffer, outBytes)
+		if readResidual {
+			vk.cmdCopyBufferWin(cmd, devMlpResidual.buffer, readbackResidual.buffer, outBytes)
+		}
 	}
 	vk.cmdCopyBufferWin(cmd, devOutB.buffer, readbackK.buffer, uint64(kvRows)*4)
 	vk.cmdCopyBufferWin(cmd, devOutC.buffer, readbackV.buffer, uint64(kvRows)*4)
@@ -688,12 +696,14 @@ func VulkanLayerChainQ8Win(
 	}
 
 	// Read results from mapped host buffers
-	if err := vk.readFloat32Into(device, *readbackNorm, normOut[:hidden]); err != nil {
-		return err
-	}
-	if readResidual {
-		if err := vk.readFloat32Into(device, *readbackResidual, residual[:hidden]); err != nil {
+	if !skipNormResidualReadback {
+		if err := vk.readFloat32Into(device, *readbackNorm, normOut[:hidden]); err != nil {
 			return err
+		}
+		if readResidual {
+			if err := vk.readFloat32Into(device, *readbackResidual, residual[:hidden]); err != nil {
+				return err
+			}
 		}
 	}
 	if err := vk.readFloat32Into(device, *readbackK, outK[:kvRows]); err != nil {

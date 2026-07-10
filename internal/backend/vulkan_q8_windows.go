@@ -2514,7 +2514,12 @@ func vulkanFusedMatVec3Q8ShaderCodeWindows() ([]uint32, error) {
 
 func vulkanFusedMatVec3MRoPEQ8ShaderCodeWindows() ([]uint32, error) {
 	vulkanFusedMatVec3MRoPEQ8SPV.once.Do(func() {
-		vulkanFusedMatVec3MRoPEQ8SPV.code, vulkanFusedMatVec3MRoPEQ8SPV.err = compileVulkanGLSLWindows(vulkanFusedQKVMRoPEQ8GLSL)
+		// Try subgroup-optimized shader first; fall back to shared-memory version
+		if code, err := compileVulkanGLSLWindows(vulkanFusedQKVMRoPEQ8SubgroupGLSL); err == nil {
+			vulkanFusedMatVec3MRoPEQ8SPV.code = code
+		} else {
+			vulkanFusedMatVec3MRoPEQ8SPV.code, vulkanFusedMatVec3MRoPEQ8SPV.err = compileVulkanGLSLWindows(vulkanFusedQKVMRoPEQ8GLSL)
+		}
 	})
 	return vulkanFusedMatVec3MRoPEQ8SPV.code, vulkanFusedMatVec3MRoPEQ8SPV.err
 }
