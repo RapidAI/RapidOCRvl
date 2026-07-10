@@ -106,6 +106,8 @@ type Runtime struct {
 	zeroBiasMu            sync.Mutex
 	zeroBiasBuf           []float32
 	zeroBiasSmall         [maxZeroBiasSmall]float32
+vulkanLayerK          []float32
+vulkanLayerV          []float32
 	vulkanDisabledOps     [2]atomic.Uint64
 	kvCacheEpoch          atomic.Uint64
 }
@@ -4289,8 +4291,16 @@ func (rt *Runtime) vulkanLayerChainQ8(normOut, residual, rawInput, ln1Weight []f
 		return false
 	}
 	kCache, vCache := cache.vulkanBufferSlices()
-	newK := make([]float32, kvRows)
-	newV := make([]float32, kvRows)
+	if cap(rt.vulkanLayerK) >= kvRows {
+		rt.vulkanLayerK = rt.vulkanLayerK[:kvRows]
+	} else {
+		rt.vulkanLayerK = make([]float32, kvRows)
+	}
+	if cap(rt.vulkanLayerV) >= kvRows {
+		rt.vulkanLayerV = rt.vulkanLayerV[:kvRows]
+	} else {
+		rt.vulkanLayerV = make([]float32, kvRows)
+	}
 	zeroBias := rt.zeroBias(qRows)
 	if err := backend.VulkanLayerChainQ8Win(
 		normOut, residual, rawInput, ln1Weight,
@@ -4299,13 +4309,13 @@ func (rt *Runtime) vulkanLayerChainQ8(normOut, residual, rawInput, ln1Weight []f
 		tl.q8.o, zeroBias, ln2Weight,
 		kCache, vCache,
 		cache.epoch, cache.len, hidden, numHeads, kvHeads, headDim,
-		newK, newV,
+		rt.vulkanLayerK, rt.vulkanLayerV,
 		tl.q8.gate, tl.q8.up, tl.q8.down,
 		nextNormWeight,
 		devInputReady,
 		readResidual,
 	); err == nil {
-		cache.append(newK, newV)
+		cache.append(rt.vulkanLayerK, rt.vulkanLayerV)
 		return true
 	} else {
 		rt.disableVulkanOp(vulkanOpLayerChainQ8, err)
