@@ -496,9 +496,7 @@ func matVecParallel(out, x, w []float32, rows, cols int) {
 }
 
 func matVecSerial(out, x, w []float32, rows, cols int) {
-	for r := 0; r < rows; r++ {
-		out[r] = dotF32(w[r*cols:(r+1)*cols], x)
-	}
+	matVecF32Batched(out, x, w, cols, 0, rows)
 }
 
 func matVecSerial16(out, x, w []float32, rows int) {
@@ -517,16 +515,12 @@ func matVecSerial256(out, x, w []float32, rows int) {
 
 func matVecBiasParallel(out, x, w, bias []float32, rows, cols int) {
 	parallelFor(rows, func(start, end int) {
-		for r := start; r < end; r++ {
-			out[r] = dotF32(w[r*cols:(r+1)*cols], x) + bias[r]
-		}
+		matVecBiasF32Batched(out, x, w, bias, cols, start, end)
 	})
 }
 
 func matVecBiasSerial(out, x, w, bias []float32, rows, cols int) {
-	for r := 0; r < rows; r++ {
-		out[r] = dotF32(w[r*cols:(r+1)*cols], x) + bias[r]
-	}
+	matVecBiasF32Batched(out, x, w, bias, cols, 0, rows)
 }
 
 func matVecBiasSerial16(out, x, w, bias []float32, rows int) {
