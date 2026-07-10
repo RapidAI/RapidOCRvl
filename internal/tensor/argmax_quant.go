@@ -217,6 +217,9 @@ func MatVecArgmaxQ6(x []float32, q *Q6Matrix) (int, float32) {
 }
 
 func matVecArgmaxQ6Unpacked(x []float32, q *Q6Matrix) (int, float32) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		return matVecArgmaxUnpackedVNNI(x, q.Rows, q.Cols, q.Unpacked, q.RowSum, q.Scale)
+	}
 	if shouldParallel(q.Rows*q.Cols, q.Rows) {
 		return matVecArgmaxQ6UnpackedParallel(x, q)
 	}
@@ -234,6 +237,9 @@ func matVecArgmaxQ6Unpacked(x []float32, q *Q6Matrix) (int, float32) {
 }
 
 func matVecArgmaxQ6UnpackedParallel(x []float32, q *Q6Matrix) (int, float32) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		return matVecArgmaxUnpackedVNNIParallel(x, q.Rows, q.Cols, q.Unpacked, q.RowSum, q.Scale)
+	}
 	return matVecArgmaxUnpackedParallel(q.Rows, q.Cols, q.Unpacked, q.Scale, x, dotQ6Unpacked)
 }
 
@@ -258,6 +264,9 @@ func MatVecArgmaxQ4(x []float32, q *Q4Matrix) (int, float32) {
 }
 
 func matVecArgmaxQ4Unpacked(x []float32, q *Q4Matrix) (int, float32) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		return matVecArgmaxUnpackedVNNI(x, q.Rows, q.Cols, q.Unpacked, q.RowSum, q.Scale)
+	}
 	if shouldParallel(q.Rows*q.Cols, q.Rows) {
 		return matVecArgmaxQ4UnpackedParallel(x, q)
 	}
@@ -274,7 +283,84 @@ func matVecArgmaxQ4Unpacked(x []float32, q *Q4Matrix) (int, float32) {
 	return bestToken, bestScore
 }
 
+// matVecArgmaxUnpackedVNNI computes argmax using the VNNI multi-row kernel.
+// Works for Q4/Q6 unpacked matrices (which are stored as int8 with RowSum).
+func matVecArgmaxUnpackedVNNI(x []float32, rows, cols int, data []int8, rowSum []int32, scale []float32) (int, float32) {
+	if shouldParallel(rows*cols, rows) {
+		return matVecArgmaxUnpackedVNNIParallel(x, rows, cols, data, rowSum, scale)
+	}
+	xq := getVNNIScratch(cols)
+	defer putVNNIScratch(xq)
+	scaleX := quantizeXForVNNI(x, xq)
+	scratch := getInt32Scratch(rows)
+	defer putInt32Scratch(scratch)
+	dotQ8VNNICoreMultiRowZMM(&data[0], &xq[0], &scratch[0], rows, cols)
+	return argmaxQ8VNNI(&scratch[0], &rowSum[0], &scale[0], rows, scaleX)
+}
+
+func matVecArgmaxUnpackedVNNIParallel(x []float32, rows, cols int, data []int8, rowSum []int32, scale []float32) (int, float32) {
+	type partial struct {
+		idx int
+		val float32
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 16 {
+		workers = 16
+	}
+	if workers > rows {
+		workers = rows
+	}
+	if workers <= 1 {
+		xq := getVNNIScratch(cols)
+		defer putVNNIScratch(xq)
+		scaleX := quantizeXForVNNI(x, xq)
+		scratch := getInt32Scratch(rows)
+		defer putInt32Scratch(scratch)
+		dotQ8VNNICoreMultiRowZMM(&data[0], &xq[0], &scratch[0], rows, cols)
+		return argmaxQ8VNNI(&scratch[0], &rowSum[0], &scale[0], rows, scaleX)
+	}
+	xq := getVNNIScratch(cols)
+	defer putVNNIScratch(xq)
+	scaleX := quantizeXForVNNI(x, xq)
+	chunk := (rows + workers - 1) / workers
+	var resultsArr [16]partial
+	results := resultsArr[:workers]
+	var wg sync.WaitGroup
+	for wi := 0; wi < workers; wi++ {
+		start := wi * chunk
+		end := start + chunk
+		if end > rows {
+			end = rows
+		}
+		if start >= end {
+			results[wi] = partial{0, 0}
+			continue
+		}
+		wg.Add(1)
+		go func(slot, start, end int) {
+			defer wg.Done()
+		nRows := end - start
+			scratch := getInt32Scratch(nRows)
+			defer putInt32Scratch(scratch)
+			dotQ8VNNICoreMultiRowZMM(&data[start*cols], &xq[0], &scratch[0], nRows, cols)
+			idx, val := argmaxQ8VNNI(&scratch[0], &rowSum[start], &scale[start], nRows, scaleX)
+			results[slot] = partial{start + idx, val}
+		}(wi, start, end)
+	}
+	wg.Wait()
+	best := results[0]
+	for i := 1; i < workers; i++ {
+		if results[i].val > best.val {
+			best = results[i]
+		}
+	}
+	return best.idx, best.val
+}
+
 func matVecArgmaxQ4UnpackedParallel(x []float32, q *Q4Matrix) (int, float32) {
+	if useVNNI && q.Cols >= 32 && q.RowSum != nil {
+		return matVecArgmaxUnpackedVNNIParallel(x, q.Rows, q.Cols, q.Unpacked, q.RowSum, q.Scale)
+	}
 	return matVecArgmaxUnpackedParallel(q.Rows, q.Cols, q.Unpacked, q.Scale, x, dotQ4Unpacked)
 }
 
