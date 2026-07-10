@@ -6887,7 +6887,7 @@ maxF32zmmDone:
 // Same polynomial as expF32VecFMA but reads from x (SI), writes to out (DI),
 // and uses VFMADD213PS for scale*x+bias instead of a separate scalar pass.
 // Frame: out_base+0(FP), out_len+8(FP), x_base+24(FP), x_len+32(FP), scale+48(FP), bias+52(FP), ret+56(FP)
-TEXT ·expScaledVecFMA(SB), NOSPLIT, $0-64
+TEXT ·expScaledVecFMA(SB), NOSPLIT, $0-60
 	MOVQ out_base+0(FP), DI
 	MOVQ out_len+8(FP), CX
 	MOVQ x_base+24(FP), SI
@@ -6997,7 +6997,7 @@ expScaledTailDone:
 DATA maxF32NegInf<>+0(SB)/4, $0xFF800000
 GLOBL maxF32NegInf<>(SB), RODATA, $4
 
-TEXT ·argmaxF32AVX2(SB), NOSPLIT, $0-40
+TEXT ·argmaxF32AVX2(SB), NOSPLIT, $0-36
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
 
@@ -7053,7 +7053,7 @@ argmaxF32MaxTail:
 	VSHUFPS $0xB1, X0, X0, X1
 	VMAXPS X1, X0, X0
 	VZEROUPPER
-	MOVSS X0, ret_val+32(FP)
+	MOVSS X0, ret1+32(FP)
 	// Scalar tail scan
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
@@ -7069,7 +7069,7 @@ argmaxF32MaxTailLoop:
 	ADDQ $1, R9
 	JMP argmaxF32MaxTailLoop
 argmaxF32MaxTailDone:
-	MOVQ R9, ret_idx+24(FP)
+	MOVQ R9, ret+24(FP)
 	RET
 
 argmaxF32MaxReduce:
@@ -7086,7 +7086,7 @@ argmaxF32MaxReduce:
 	VPERMILPS $0, X0, X1
 	VZEROUPPER
 	// Save max value to ret_val
-	MOVSS X0, ret_val+32(FP)
+	MOVSS X0, ret1+32(FP)
 
 	// Phase 2: find first index where x[i] == maxVal
 	MOVQ x_base+0(FP), SI
@@ -7111,7 +7111,7 @@ argmaxF32IdxFound:
 	// R8 has bitmask of matching lanes. Find lowest set bit.
 	BSFL R8, AX            // AX = bit position of first match (0-7)
 	ADDQ R9, AX            // add base index
-	MOVQ AX, ret_idx+24(FP)
+	MOVQ AX, ret+24(FP)
 	VZEROUPPER
 	RET
 
@@ -7130,15 +7130,15 @@ argmaxF32IdxTailLoop:
 	ADDQ $1, R9
 	JMP argmaxF32IdxTailLoop
 argmaxF32IdxNotFound:
-	MOVQ R9, ret_idx+24(FP)
+	MOVQ R9, ret+24(FP)
 	RET
 argmaxF32IdxTailDone:
-	MOVQ R9, ret_idx+24(FP)
+	MOVQ R9, ret+24(FP)
 	RET
 
 // argmaxF32ZMM: ZMM (512-bit) version of argmaxF32AVX2.
 // Phase 1: 16 elements/VMAXPS, 4 accumulators. Phase 2: 16 elements/VCMPPS into mask register.
-TEXT ·argmaxF32ZMM(SB), NOSPLIT, $0-40
+TEXT ·argmaxF32ZMM(SB), NOSPLIT, $0-36
 	MOVQ x_base+0(FP), SI
 	MOVQ x_len+8(FP), CX
 	LEAQ maxF32NegInf<>(SB), AX
@@ -7180,7 +7180,7 @@ argmaxZmmMaxReduce:
 	VMAXPS X2, X1, X1
 	VSHUFPS $0xB1, X1, X1, X2
 	VMAXPS X2, X1, X1
-	MOVSS X1, ret_val+32(FP)
+	MOVSS X1, ret1+32(FP)
 	VZEROUPPER
 	JMP argmaxZmmPhase2
 
@@ -7207,7 +7207,7 @@ argmaxZmmMaxTailReduce:
 	VSHUFPS $0xB1, X0, X0, X1
 	VMAXPS X1, X0, X0
 	VZEROUPPER
-	MOVSS X0, ret_val+32(FP)
+	MOVSS X0, ret1+32(FP)
 	JMP argmaxZmmPhase2Scalar
 
 argmaxZmmMaxTailScalar:
@@ -7223,7 +7223,7 @@ argmaxZmmMaxTailScalarLoop:
 	JMP argmaxZmmMaxTailScalarLoop
 
 argmaxZmmMaxTailScalarDone:
-	MOVSS X0, ret_val+32(FP)
+	MOVSS X0, ret1+32(FP)
 	JMP argmaxZmmPhase2Scalar
 
 argmaxZmmPhase2:
@@ -7251,7 +7251,7 @@ argmaxZmmIdxLoop:
 argmaxZmmIdxFound:
 	BSFQ R8, AX
 	ADDQ R9, AX
-	MOVQ AX, ret_idx+24(FP)
+	MOVQ AX, ret+24(FP)
 	VZEROUPPER
 	RET
 
@@ -7277,7 +7277,7 @@ argmaxZmmIdxLoopYMM:
 argmaxZmmIdxFoundYMM:
 	BSFL R8, AX
 	ADDQ R9, AX
-	MOVQ AX, ret_idx+24(FP)
+	MOVQ AX, ret+24(FP)
 	VZEROUPPER
 	RET
 
@@ -7296,11 +7296,11 @@ argmaxZmmIdxTailLoop:
 	JMP argmaxZmmIdxTailLoop
 
 argmaxZmmIdxNotFound:
-	MOVQ R9, ret_idx+24(FP)
+	MOVQ R9, ret+24(FP)
 	RET
 
 argmaxZmmIdxDone:
-	MOVQ R9, ret_idx+24(FP)
+	MOVQ R9, ret+24(FP)
 	RET
 
 

@@ -463,7 +463,18 @@ func FusedSwiGLUGateUpF32Scratch(tmpG, tmpU, x, gate, up []float32, rows, cols i
 func fusedSwiGLUGateUpSerialBatched(tmpG, tmpU, x, gate, up []float32, start, end, cols int) {
 	batchSize := end - start
 	if useDotF32AVX && batchSize >= 8 && tmpU != nil && len(tmpU) >= end {
-		for r := start; r < end; r++ {
+		r := start
+		for ; r+7 < end; r += 8 {
+			b0 := r * cols
+			tmpG[r], tmpG[r+1], tmpG[r+2], tmpG[r+3], tmpG[r+4], tmpG[r+5], tmpG[r+6], tmpG[r+7] = DotOctet(gate[b0:b0+cols], gate[b0+cols:b0+cols*2], gate[b0+cols*2:b0+cols*3], gate[b0+cols*3:b0+cols*4], gate[b0+cols*4:b0+cols*5], gate[b0+cols*5:b0+cols*6], gate[b0+cols*6:b0+cols*7], gate[b0+cols*7:b0+cols*8], x)
+			tmpU[r], tmpU[r+1], tmpU[r+2], tmpU[r+3], tmpU[r+4], tmpU[r+5], tmpU[r+6], tmpU[r+7] = DotOctet(up[b0:b0+cols], up[b0+cols:b0+cols*2], up[b0+cols*2:b0+cols*3], up[b0+cols*3:b0+cols*4], up[b0+cols*4:b0+cols*5], up[b0+cols*5:b0+cols*6], up[b0+cols*6:b0+cols*7], up[b0+cols*7:b0+cols*8], x)
+		}
+		for ; r+3 < end; r += 4 {
+			b0 := r * cols
+			tmpG[r], tmpG[r+1], tmpG[r+2], tmpG[r+3] = DotQuad(gate[b0:b0+cols], gate[b0+cols:b0+cols*2], gate[b0+cols*2:b0+cols*3], gate[b0+cols*3:b0+cols*4], x)
+			tmpU[r], tmpU[r+1], tmpU[r+2], tmpU[r+3] = DotQuad(up[b0:b0+cols], up[b0+cols:b0+cols*2], up[b0+cols*2:b0+cols*3], up[b0+cols*3:b0+cols*4], x)
+		}
+		for ; r < end; r++ {
 			base := r * cols
 			g, u := dotF32Pair(gate[base:base+cols], up[base:base+cols], x)
 			tmpG[r] = g
@@ -489,9 +500,7 @@ func parallelForGateUp(rows int, fn func(start, end int)) {
 
 func matVecParallel(out, x, w []float32, rows, cols int) {
 	parallelFor(rows, func(start, end int) {
-		for r := start; r < end; r++ {
-			out[r] = dotF32(w[r*cols:(r+1)*cols], x)
-		}
+		matVecF32Batched(out, x, w, cols, start, end)
 	})
 }
 
@@ -605,7 +614,7 @@ func parallelForMax(n, maxWorkers int, fn func(start, end int)) {
 }
 
 func dotF32(a, b []float32) float32 {
-	if useDotFMA && len(a) >= 8 && len(a)%16 == 0 {
+	if useDotFMA && len(a) >= 8 {
 		return dotF32FMA(a, b)
 	}
 	if useDotF32AVX && len(a) >= 8 {
@@ -704,7 +713,7 @@ func Dot(a, b []float32) float32 {
 }
 
 func dotF32Pair(a, b, x []float32) (float32, float32) {
-	if useDotFMA && len(x) >= 8 && len(x)%16 == 0 {
+	if useDotFMA && len(x) >= 8 {
 		return dotF32PairFMA(a, b, x)
 	}
 	if useDotF32AVX && len(x) >= 8 {
@@ -740,7 +749,7 @@ func dotF32PairScalar(a, b, x []float32) (float32, float32) {
 }
 
 func dotF32Triplet(a, b, c, x []float32) (float32, float32, float32) {
-	if useDotFMA && len(x) >= 8 && len(x)%16 == 0 {
+	if useDotFMA && len(x) >= 8 {
 		return dotF32TripletFMA(a, b, c, x)
 	}
 	if useDotF32AVX && len(x) >= 8 {
@@ -782,7 +791,7 @@ func dotF32TripletScalar(a, b, c, x []float32) (float32, float32, float32) {
 }
 
 func dotF32Quad(a, b, c, d, x []float32) (float32, float32, float32, float32) {
-	if useDotFMA && len(a) >= 8 && len(a)%16 == 0 {
+	if useDotFMA && len(a) >= 8 {
 		return dotF32QuadFMA(a, b, c, d, x)
 	}
 	if useDotF32AVX && len(a) >= 8 {
