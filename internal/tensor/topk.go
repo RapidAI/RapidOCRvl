@@ -49,7 +49,38 @@ func MatVecArgmax(x, w []float32, rows, cols int) (int, float32) {
 	}
 	bestIdx := 0
 	bestVal := float32(0)
-	for r := 0; r < rows; r++ {
+	r := 0
+	for ; r+7 < rows; r += 8 {
+		b0 := r * cols
+		b1 := b0 + cols
+		b2 := b1 + cols
+		b3 := b2 + cols
+		b4 := b3 + cols
+		b5 := b4 + cols
+		b6 := b5 + cols
+		b7 := b6 + cols
+		s0, s1, s2, s3, s4, s5, s6, s7 := DotOctet(w[b0:b0+cols], w[b1:b1+cols], w[b2:b2+cols], w[b3:b3+cols], w[b4:b4+cols], w[b5:b5+cols], w[b6:b6+cols], w[b7:b7+cols], x)
+		if r == 0 || s0 > bestVal { bestVal = s0; bestIdx = r }
+		if s1 > bestVal { bestVal = s1; bestIdx = r + 1 }
+		if s2 > bestVal { bestVal = s2; bestIdx = r + 2 }
+		if s3 > bestVal { bestVal = s3; bestIdx = r + 3 }
+		if s4 > bestVal { bestVal = s4; bestIdx = r + 4 }
+		if s5 > bestVal { bestVal = s5; bestIdx = r + 5 }
+		if s6 > bestVal { bestVal = s6; bestIdx = r + 6 }
+		if s7 > bestVal { bestVal = s7; bestIdx = r + 7 }
+	}
+	for ; r+3 < rows; r += 4 {
+		b0 := r * cols
+		b1 := b0 + cols
+		b2 := b1 + cols
+		b3 := b2 + cols
+		s0, s1, s2, s3 := DotQuad(w[b0:b0+cols], w[b1:b1+cols], w[b2:b2+cols], w[b3:b3+cols], x)
+		if r == 0 || s0 > bestVal { bestVal = s0; bestIdx = r }
+		if s1 > bestVal { bestVal = s1; bestIdx = r + 1 }
+		if s2 > bestVal { bestVal = s2; bestIdx = r + 2 }
+		if s3 > bestVal { bestVal = s3; bestIdx = r + 3 }
+	}
+	for ; r < rows; r++ {
 		base := r * cols
 		v := dotF32(w[base:base+cols], x)
 		if r == 0 || v > bestVal {
@@ -68,6 +99,53 @@ func finalizeTopKScores(scores []TopKScore, dots []int32, rowSum []int32, scale 
 	}
 }
 
+// matVecArgmaxBatched processes a range of rows using DotOctet/DotQuad
+// for reduced function-call overhead.
+func matVecArgmaxBatched(x, w []float32, rows, cols, start, end int) (int, float32) {
+	bestIdx := start
+	bestVal := float32(0)
+	r := start
+	for ; r+7 < end; r += 8 {
+		b0 := r * cols
+		b1 := b0 + cols
+		b2 := b1 + cols
+		b3 := b2 + cols
+		b4 := b3 + cols
+		b5 := b4 + cols
+		b6 := b5 + cols
+		b7 := b6 + cols
+		s0, s1, s2, s3, s4, s5, s6, s7 := DotOctet(w[b0:b0+cols], w[b1:b1+cols], w[b2:b2+cols], w[b3:b3+cols], w[b4:b4+cols], w[b5:b5+cols], w[b6:b6+cols], w[b7:b7+cols], x)
+		if r == start || s0 > bestVal { bestVal = s0; bestIdx = r }
+		if s1 > bestVal { bestVal = s1; bestIdx = r + 1 }
+		if s2 > bestVal { bestVal = s2; bestIdx = r + 2 }
+		if s3 > bestVal { bestVal = s3; bestIdx = r + 3 }
+		if s4 > bestVal { bestVal = s4; bestIdx = r + 4 }
+		if s5 > bestVal { bestVal = s5; bestIdx = r + 5 }
+		if s6 > bestVal { bestVal = s6; bestIdx = r + 6 }
+		if s7 > bestVal { bestVal = s7; bestIdx = r + 7 }
+	}
+	for ; r+3 < end; r += 4 {
+		b0 := r * cols
+		b1 := b0 + cols
+		b2 := b1 + cols
+		b3 := b2 + cols
+		s0, s1, s2, s3 := DotQuad(w[b0:b0+cols], w[b1:b1+cols], w[b2:b2+cols], w[b3:b3+cols], x)
+		if r == start || s0 > bestVal { bestVal = s0; bestIdx = r }
+		if s1 > bestVal { bestVal = s1; bestIdx = r + 1 }
+		if s2 > bestVal { bestVal = s2; bestIdx = r + 2 }
+		if s3 > bestVal { bestVal = s3; bestIdx = r + 3 }
+	}
+	for ; r < end; r++ {
+		base := r * cols
+		v := dotF32(w[base:base+cols], x)
+		if r == start || v > bestVal {
+			bestVal = v
+			bestIdx = r
+		}
+	}
+	return bestIdx, bestVal
+}
+
 func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 	type partial struct {
 		idx int
@@ -81,17 +159,7 @@ func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 		workers = rows
 	}
 	if workers <= 1 {
-		bestIdx := 0
-		bestVal := float32(0)
-		for r := 0; r < rows; r++ {
-			base := r * cols
-			v := dotF32(w[base:base+cols], x)
-			if r == 0 || v > bestVal {
-				bestVal = v
-				bestIdx = r
-			}
-		}
-		return bestIdx, bestVal
+		return matVecArgmaxBatched(x, w, rows, cols, 0, rows)
 	}
 	chunk := (rows + workers - 1) / workers
 	var resultsArr [16]partial; results := resultsArr[:workers]
@@ -109,17 +177,8 @@ func matVecArgmaxParallel(x, w []float32, rows, cols int) (int, float32) {
 		wg.Add(1)
 		go func(slot, start, end int) {
 			defer wg.Done()
-			bestIdx := start
-			bestVal := float32(0)
-			for r := start; r < end; r++ {
-				base := r * cols
-				v := dotF32(w[base:base+cols], x)
-				if r == start || v > bestVal {
-					bestVal = v
-					bestIdx = r
-				}
-			}
-			results[slot] = partial{bestIdx, bestVal}
+			idx, val := matVecArgmaxBatched(x, w, rows, cols, start, end)
+			results[slot] = partial{idx, val}
 		}(wi, start, end)
 	}
 	wg.Wait()
