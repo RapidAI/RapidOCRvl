@@ -275,7 +275,38 @@ func MatVecTopKQ4WithWork(scores, work []TopKScore, x []float32, q *Q4Matrix, k 
 // MatVecTopKWithWork is the F32 variant of MatVecTopKQ8WithWork.
 func MatVecTopKWithWork(scores, work []TopKScore, x, w []float32, rows, cols, k int) ([]TopKScore, []TopKScore, int) {
 	scores = ensureTopKScoreCap(scores, rows)
-	for r := 0; r < rows; r++ {
+	r := 0
+	for ; r+7 < rows; r += 8 {
+		b0 := r * cols
+		b1 := b0 + cols
+		b2 := b1 + cols
+		b3 := b2 + cols
+		b4 := b3 + cols
+		b5 := b4 + cols
+		b6 := b5 + cols
+		b7 := b6 + cols
+		s0, s1, s2, s3, s4, s5, s6, s7 := DotOctet(w[b0:b0+cols], w[b1:b1+cols], w[b2:b2+cols], w[b3:b3+cols], w[b4:b4+cols], w[b5:b5+cols], w[b6:b6+cols], w[b7:b7+cols], x)
+		scores[r] = TopKScore{ID: r, Score: s0}
+		scores[r+1] = TopKScore{ID: r + 1, Score: s1}
+		scores[r+2] = TopKScore{ID: r + 2, Score: s2}
+		scores[r+3] = TopKScore{ID: r + 3, Score: s3}
+		scores[r+4] = TopKScore{ID: r + 4, Score: s4}
+		scores[r+5] = TopKScore{ID: r + 5, Score: s5}
+		scores[r+6] = TopKScore{ID: r + 6, Score: s6}
+		scores[r+7] = TopKScore{ID: r + 7, Score: s7}
+	}
+	for ; r+3 < rows; r += 4 {
+		b0 := r * cols
+		b1 := b0 + cols
+		b2 := b1 + cols
+		b3 := b2 + cols
+		s0, s1, s2, s3 := DotQuad(w[b0:b0+cols], w[b1:b1+cols], w[b2:b2+cols], w[b3:b3+cols], x)
+		scores[r] = TopKScore{ID: r, Score: s0}
+		scores[r+1] = TopKScore{ID: r + 1, Score: s1}
+		scores[r+2] = TopKScore{ID: r + 2, Score: s2}
+		scores[r+3] = TopKScore{ID: r + 3, Score: s3}
+	}
+	for ; r < rows; r++ {
 		base := r * cols
 		scores[r] = TopKScore{ID: r, Score: dotF32(w[base:base+cols], x)}
 	}
